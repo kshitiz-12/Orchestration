@@ -1,0 +1,60 @@
+# Render Blueprint — API on Render, database on Supabase
+# Set DATABASE_URL manually from Supabase → Project Settings → Database
+
+services:
+  - type: web
+    name: outcome-orchestration-api
+    runtime: python
+    rootDir: backend
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: bash start.sh
+    healthCheckPath: /health
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: DEBUG
+        value: "false"
+      - key: AUTO_SEED
+        value: "true"
+      - key: PYTHON_VERSION
+        value: "3.12.8"
+      - key: SECRET_KEY
+        generateValue: true
+      # Paste Supabase URI (Session mode / direct). sslmode=require is auto-added.
+      - key: DATABASE_URL
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: ADMIN_EMAIL
+        value: admin@prototype.local
+      - key: ADMIN_PASSWORD
+        sync: false
+
+  - type: worker
+    name: outcome-orchestration-worker
+    runtime: python
+    rootDir: backend
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m app.workers.runner
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: DEBUG
+        value: "false"
+      - key: AUTO_SEED
+        value: "false"
+      - key: PYTHON_VERSION
+        value: "3.12.8"
+      - key: SECRET_KEY
+        fromService:
+          type: web
+          name: outcome-orchestration-api
+          envVarKey: SECRET_KEY
+      - key: DATABASE_URL
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false

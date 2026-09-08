@@ -1,0 +1,2 @@
+web: bash start.sh
+worker: python -m app.workers.runner
