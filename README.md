@@ -82,24 +82,46 @@ See `backend/.env.example`.
 - `GEMINI_API_KEY` — enables Gemini; empty uses deterministic heuristic provider
 - `GMAIL_CLIENT_ID` / `GMAIL_CLIENT_SECRET` — dedicated prototype inbox OAuth
 
+## Architecture (scalable by design)
+
+See `backend/ARCHITECTURE.md`.
+
+We intentionally keep **one backend stack**:
+- FastAPI + SQLModel/SQLAlchemy + Alembic + Supabase Postgres
+- Durable DB-backed job queue (worker process when needed)
+- Replaceable AI (`LLMService`) and email (`EmailChannel`) adapters
+
+**Not using Prisma** — it would split schema ownership across Node and Python and reduce scalability for this product.
+
+Schema path:
+- Models: `app/models/`
+- Migrations: `alembic/` (`alembic upgrade head`)
+- Boot: `SCHEMA_AUTO_CREATE` (prototype) or `RUN_MIGRATIONS_ON_STARTUP` (production)
+
+Health:
+- `GET /health` — liveness
+- `GET /ready` — database readiness
+
 ## Deploy backend on Render (database = Supabase)
 
 1. In Supabase → **Project Settings → Database → Connection string → URI**
-   - Prefer **Session** pooler or **Direct** connection (port `5432`)
+   - Use **Session pooler** (host `*.pooler.supabase.com`, port `5432`)
+   - Do **not** use Direct `db.*.supabase.co` from Render (often IPv6-only → deploy crash)
    - Avoid Transaction pooler (`6543`) for this FastAPI app
 2. On Render Web Service (`rootDir: backend`):
    - Build: `pip install -r requirements.txt`
    - Start: `bash start.sh`
-   - Health: `/health`
+   - Health: `/health` (also available: `/ready`)
 3. Set env vars:
    - `PYTHON_VERSION=3.12.8` (**required** — do not use 3.14)
-   - `DATABASE_URL` = that Supabase URI (ssl is auto-added)
+   - `DATABASE_URL` = Session pooler URI (ssl is auto-added)
    - `SECRET_KEY`, `ADMIN_PASSWORD`
    - `CORS_ORIGINS` = your frontend URL(s)
    - `APP_ENV=production`, `DEBUG=false`, `AUTO_SEED=true`
    - optional `GEMINI_API_KEY`
 
 Build must show `Using Python version 3.12.8`, not 3.14.
+If deploy loops on startup, check logs for `Database connection failed` and switch to the Session pooler URI.
 
 On first boot the API creates tables in Supabase and seeds `admin@prototype.local`.
 

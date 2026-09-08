@@ -11,9 +11,12 @@ def normalize_database_url(value: str) -> str:
     if not isinstance(value, str) or not value:
         return value
 
-    # Render/Heroku style scheme
     if value.startswith("postgres://"):
         value = value.replace("postgres://", "postgresql://", 1)
+
+    # Do not re-serialize sqlite URLs — urlparse mangles them
+    if value.startswith("sqlite:"):
+        return value
 
     parsed = urlparse(value)
     host = (parsed.hostname or "").lower()
@@ -41,6 +44,13 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:3000"
 
     database_url: str = "sqlite:///./orchestration.db"
+    db_pool_size: int = 5
+    db_max_overflow: int = 10
+    db_pool_timeout: int = 30
+    # create_all on boot — fine for prototype; prefer Alembic in production
+    schema_auto_create: bool = True
+    run_migrations_on_startup: bool = False
+    auto_seed: bool = True
 
     admin_email: str = "admin@prototype.local"
     admin_password: str = "admin123"
@@ -69,7 +79,6 @@ class Settings(BaseSettings):
 
     storage_path: str = "./storage"
     audit_append_only: bool = True
-    auto_seed: bool = True
 
     @field_validator("database_url", mode="before")
     @classmethod
@@ -87,6 +96,21 @@ class Settings(BaseSettings):
     @property
     def is_sqlite(self) -> bool:
         return self.database_url.startswith("sqlite")
+
+    @property
+    def is_production(self) -> bool:
+        return self.app_env.lower() in {"production", "prod"}
+
+    @property
+    def uses_supabase_pooler(self) -> bool:
+        host = (urlparse(self.database_url).hostname or "").lower()
+        return "pooler.supabase.com" in host
+
+    @property
+    def uses_transaction_pooler(self) -> bool:
+        """Supabase transaction pooler is typically port 6543."""
+        parsed = urlparse(self.database_url)
+        return self.uses_supabase_pooler and parsed.port == 6543
 
 
 @lru_cache

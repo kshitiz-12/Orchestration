@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from sqlmodel import Session, select
 
-from app.core.database import get_engine, init_db
 from app.core.security import hash_password
 from app.models import (
     BusinessRule,
@@ -439,6 +438,8 @@ def seed(session: Session) -> str:
 
 
 def main():
+    from app.core.database import get_engine, init_db
+
     init_db()
     with Session(get_engine()) as session:
         tid = seed(session)
