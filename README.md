@@ -92,11 +92,14 @@ See `backend/.env.example`.
    - Start: `bash start.sh`
    - Health: `/health`
 3. Set env vars:
+   - `PYTHON_VERSION=3.12.8` (**required** — do not use 3.14)
    - `DATABASE_URL` = that Supabase URI (ssl is auto-added)
    - `SECRET_KEY`, `ADMIN_PASSWORD`
    - `CORS_ORIGINS` = your frontend URL(s)
    - `APP_ENV=production`, `DEBUG=false`, `AUTO_SEED=true`
    - optional `GEMINI_API_KEY`
+
+Build must show `Using Python version 3.12.8`, not 3.14.
 
 On first boot the API creates tables in Supabase and seeds `admin@prototype.local`.
 
