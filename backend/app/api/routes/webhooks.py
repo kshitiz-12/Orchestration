@@ -68,21 +68,23 @@ def cloudmailin_status(session: SessionDep):
 
     settings = get_settings()
     provider = CloudMailinProvider(session=session)
+    cfg = provider._send_config() or {}
     return {
         "provider": PROVIDER,
         "email_provider": settings.email_provider,
         "enabled": True,
         "address": settings.cloudmailin_address or None,
-        "from_email": settings.cloudmailin_from_email or settings.cloudmailin_address or None,
+        "from_email": provider.get_account_email(),
         "webhook_path": f"{settings.api_prefix}/webhooks/cloudmailin",
         "format": "JSON Normalized",
         "secret_configured": bool(settings.cloudmailin_webhook_secret),
-        "smtp_configured": provider.is_connected(),
-        "can_send_replies": provider.is_connected(),
-        "outbound": "https_api_preferred",
+        "smtp_configured": provider.can_send(),
+        "can_send_replies": provider.can_send(),
+        "outbound_channel": cfg.get("channel") or None,
+        "outbound": "gmail_smtp" if cfg.get("channel") == "gmail_smtp" else "cloudmailin_or_none",
         "note": (
-            "Inbound: CloudMailin Target URL (JSON Normalized). "
-            "Outbound: CloudMailin Message API via CLOUDMAILIN_SMTP_URL credentials."
+            "Inbound: CloudMailin webhook. "
+            "Outbound: set OUTBOUND_SMTP_* (Gmail App Password) for real inbox delivery."
         ),
     }
 

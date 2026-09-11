@@ -73,15 +73,24 @@ class Settings(BaseSettings):
     microsoft_mailbox: str = ""
     microsoft_scopes: str = "openid offline_access User.Read Mail.Read Mail.Send"
 
-    # CloudMailin (prototype email channel)
+    # CloudMailin (inbound webhook)
     cloudmailin_address: str = ""  # inbound address e.g. inbox@xxxx.cloudmailin.net
     cloudmailin_webhook_secret: str = ""  # ?secret= or X-Webhook-Secret
-    cloudmailin_from_email: str = ""  # From: for SMTP replies
-    cloudmailin_smtp_url: str = ""  # smtp://user:pass@host:587
+    cloudmailin_from_email: str = ""  # legacy; prefer OUTBOUND_SMTP_FROM
+    cloudmailin_smtp_url: str = ""  # optional CloudMailin outbound (often test_mode)
     cloudmailin_smtp_host: str = ""
     cloudmailin_smtp_port: int = 587
     cloudmailin_smtp_username: str = ""
     cloudmailin_smtp_password: str = ""
+
+    # Outbound SMTP (recommended: Gmail App Password — delivers to real inboxes)
+    # Google Account → Security → 2-Step Verification → App passwords
+    outbound_smtp_host: str = "smtp.gmail.com"
+    outbound_smtp_port: int = 587
+    outbound_smtp_username: str = ""  # yourtestemail@gmail.com
+    outbound_smtp_password: str = ""  # 16-char app password
+    outbound_smtp_from: str = ""  # usually same as username
+    outbound_smtp_use_ssl: bool = False  # True for port 465
 
     gmail_client_id: str = ""
     gmail_client_secret: str = ""

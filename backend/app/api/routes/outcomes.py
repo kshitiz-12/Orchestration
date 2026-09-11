@@ -164,8 +164,11 @@ def resend_clarification(outcome_id: str, session: SessionDep, tenant_id: Tenant
 
     email = get_email_provider(session, tenant_id)
     sender = email if email.is_connected() else None
-    if not sender:
-        raise HTTPException(400, "Outbound email not configured (CLOUDMAILIN_SMTP_URL)")
+    if not sender or not getattr(sender, "can_send", sender.is_connected)():
+        raise HTTPException(
+            400,
+            "Outbound email not configured. Set OUTBOUND_SMTP_USERNAME + OUTBOUND_SMTP_PASSWORD (Gmail App Password).",
+        )
 
     latest = session.exec(
         select(RawEmailEvent)

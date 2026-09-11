@@ -1,8 +1,9 @@
-"""CloudMailin email channel — inbound webhook + outbound via HTTP API (SMTP fallback).
+"""CloudMailin inbound + Gmail SMTP outbound.
 
 Inbound: CloudMailin POSTs JSON to /webhooks/cloudmailin.
-Outbound: Prefer HTTPS Message API (works on Render). SMTP is local fallback only —
-many PaaS hosts block outbound port 587.
+Outbound: Prefer OUTBOUND_SMTP_* (Gmail App Password) for real inbox delivery.
+Falls back to CloudMailin HTTP API / SMTP (often test_mode).
+Note: some PaaS hosts (e.g. Render free) block outbound SMTP :587.
 """
 
 from __future__ import annotations
@@ -141,6 +142,8 @@ def parse_smtp_url(url: str) -> dict[str, Any]:
 
 
 class CloudMailinProvider(EmailProvider):
+    """Inbound via CloudMailin webhook; outbound prefers Gmail SMTP App Password."""
+
     def __init__(self, session=None, tenant_id: Optional[str] = None):
         self.settings = get_settings()
         self.session = session
@@ -150,11 +153,34 @@ class CloudMailinProvider(EmailProvider):
     def provider_name(self) -> str:
         return PROVIDER
 
-    def _smtp_config(self) -> Optional[dict[str, Any]]:
+    def _outbound_gmail_config(self) -> Optional[dict[str, Any]]:
+        user = (self.settings.outbound_smtp_username or "").strip()
+        password = (self.settings.outbound_smtp_password or "").strip()
+        if not user or not password:
+            return None
+        # App passwords are often pasted with spaces — strip them
+        password = password.replace(" ", "")
+        return {
+            "host": (self.settings.outbound_smtp_host or "smtp.gmail.com").strip(),
+            "port": int(self.settings.outbound_smtp_port or 587),
+            "username": user,
+            "password": password,
+            "from_addr": (self.settings.outbound_smtp_from or user).strip(),
+            "use_ssl": bool(self.settings.outbound_smtp_use_ssl) or int(self.settings.outbound_smtp_port or 587) == 465,
+            "channel": "gmail_smtp",
+        }
+
+    def _cloudmailin_smtp_config(self) -> Optional[dict[str, Any]]:
         url = (self.settings.cloudmailin_smtp_url or "").strip()
         if url:
             try:
-                return parse_smtp_url(url)
+                cfg = parse_smtp_url(url)
+                cfg["from_addr"] = (
+                    (self.settings.cloudmailin_from_email or "").strip()
+                    or (self.settings.cloudmailin_address or "").strip()
+                )
+                cfg["channel"] = "cloudmailin"
+                return cfg
             except Exception as exc:  # noqa: BLE001
                 logger.warning("cloudmailin_smtp_url_invalid", error=str(exc))
                 return None
@@ -168,15 +194,35 @@ class CloudMailinProvider(EmailProvider):
                 "username": user,
                 "password": password,
                 "use_ssl": False,
+                "from_addr": (
+                    (self.settings.cloudmailin_from_email or "").strip()
+                    or (self.settings.cloudmailin_address or "").strip()
+                ),
+                "channel": "cloudmailin",
             }
         return None
 
+    def _send_config(self) -> Optional[dict[str, Any]]:
+        # Prefer Gmail/outbound SMTP so replies reach real inboxes
+        return self._outbound_gmail_config() or self._cloudmailin_smtp_config()
+
     def is_connected(self) -> bool:
-        return self._smtp_config() is not None
+        """True when live outbound send is configured (Gmail App Password or CloudMailin)."""
+        return self.can_send()
+
+    def can_send(self) -> bool:
+        return self._send_config() is not None
+
+    def inbound_ready(self) -> bool:
+        return bool((self.settings.cloudmailin_address or "").strip())
 
     def get_account_email(self) -> Optional[str]:
+        gmail = self._outbound_gmail_config()
+        if gmail and gmail.get("from_addr"):
+            return gmail["from_addr"]
         return (
-            (self.settings.cloudmailin_from_email or "").strip()
+            (self.settings.outbound_smtp_from or "").strip()
+            or (self.settings.cloudmailin_from_email or "").strip()
             or (self.settings.cloudmailin_address or "").strip()
             or None
         )
@@ -196,17 +242,31 @@ class CloudMailinProvider(EmailProvider):
         conversation_id: Optional[str] = None,
         in_reply_to_message_id: Optional[str] = None,
     ) -> str:
-        cfg = self._smtp_config()
+        cfg = self._send_config()
         if not cfg:
             raise RuntimeError(
-                "CloudMailin SMTP/API not configured. Set CLOUDMAILIN_SMTP_URL "
-                "(smtp://USER:PASS@HOST:587)."
+                "No outbound SMTP configured. Set OUTBOUND_SMTP_USERNAME + "
+                "OUTBOUND_SMTP_PASSWORD (Gmail App Password) to send real replies."
             )
-        from_addr = self.get_account_email()
+        from_addr = cfg.get("from_addr") or self.get_account_email()
         if not from_addr:
-            raise RuntimeError("Set CLOUDMAILIN_FROM_EMAIL (or CLOUDMAILIN_ADDRESS) as the From address.")
+            raise RuntimeError("Set OUTBOUND_SMTP_FROM (your Gmail address).")
 
         subj = subject if subject.lower().startswith("re:") else f"Re: {subject}"
+
+        # Gmail SMTP path — real delivery
+        if cfg.get("channel") == "gmail_smtp":
+            return self._send_via_smtp(
+                cfg=cfg,
+                from_addr=from_addr,
+                to=to,
+                subject=subj,
+                body=body,
+                conversation_id=conversation_id,
+                in_reply_to_message_id=in_reply_to_message_id,
+            )
+
+        # CloudMailin: try HTTPS API then SMTP (may be test_mode / non-delivering)
         headers: dict[str, Any] = {}
         if in_reply_to_message_id:
             headers["In-Reply-To"] = in_reply_to_message_id
@@ -214,8 +274,6 @@ class CloudMailinProvider(EmailProvider):
         elif conversation_id:
             headers["In-Reply-To"] = conversation_id
             headers["References"] = conversation_id
-
-        # Prefer HTTPS API — Render and many hosts block outbound SMTP :587
         try:
             return self._send_via_http_api(
                 username=cfg["username"],

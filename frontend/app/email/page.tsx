@@ -27,7 +27,7 @@ export default function EmailInboxPage() {
   return (
     <AppShell
       title="CloudMailin"
-      subtitle="Inbound webhook → store → AI → outcome. SMTP replies stay in the same email thread."
+      subtitle="Inbound: CloudMailin. Outbound: Gmail SMTP App Password (real inbox delivery)."
       actions={
         <button className="btn secondary" onClick={load}>
           Refresh status
@@ -53,9 +53,15 @@ export default function EmailInboxPage() {
         <div className="kpi">
           <div className="label">SMTP outbound</div>
           <div className="value" style={{ fontSize: "1.2rem" }}>
-            {cloudmailin?.smtp_configured ? "Ready" : "Off"}
+            {cloudmailin?.can_send_replies ? "Ready" : "Off"}
           </div>
-          <div className="hint">{cloudmailin?.smtp_configured ? "Live replies" : "Store only"}</div>
+          <div className="hint">
+            {cloudmailin?.outbound_channel === "gmail_smtp"
+              ? "Gmail SMTP"
+              : cloudmailin?.can_send_replies
+                ? "Configured"
+                : "Add App Password"}
+          </div>
         </div>
       </div>
 
@@ -63,8 +69,8 @@ export default function EmailInboxPage() {
         <div className="panel">
           <div className="panel-head">
             <h2>Connection</h2>
-            <span className={`badge ${cloudmailin?.smtp_configured ? "ok" : "warn"}`}>
-              {cloudmailin?.smtp_configured ? "Full loop" : "Inbound only"}
+            <span className={`badge ${cloudmailin?.can_send_replies ? "ok" : "warn"}`}>
+              {cloudmailin?.can_send_replies ? "Full loop" : "Inbound only"}
             </span>
           </div>
           <div className="stack">
@@ -81,7 +87,7 @@ export default function EmailInboxPage() {
                 From (replies)
               </div>
               <div className="mono" style={{ marginTop: "0.35rem" }}>
-                {cloudmailin?.from_email || "Set CLOUDMAILIN_FROM_EMAIL"}
+                {cloudmailin?.from_email || "Set OUTBOUND_SMTP_FROM"}
               </div>
             </div>
             <div>
@@ -99,14 +105,15 @@ export default function EmailInboxPage() {
           <h2 style={{ marginBottom: "0.75rem" }}>Demo script</h2>
           <ol className="muted" style={{ margin: 0, paddingLeft: "1.1rem", lineHeight: 1.55 }}>
             <li>
-              Email the CloudMailin address:{" "}
-              <em>&quot;I need a meeting room for 8 people tomorrow at 3 PM for 2 hours.&quot;</em>
+              Google Account → Security → 2-Step Verification → App passwords → set{" "}
+              <span className="mono">OUTBOUND_SMTP_*</span> on Render
             </li>
             <li>
-              Incomplete: <em>&quot;I need a meeting room tomorrow.&quot;</em> → clarification
+              Email CloudMailin: <em>&quot;I need a meeting room tomorrow.&quot;</em> → clarification
+              lands in your Gmail (From = your App Password account)
             </li>
             <li>Reply in-thread with details → same Outcome updates</li>
-            <li>Duplicate webhook → deduplicated</li>
+            <li>Or use Outcomes → Resend clarification after SMTP is set</li>
           </ol>
         </div>
       </div>
