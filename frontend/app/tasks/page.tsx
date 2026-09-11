@@ -19,9 +19,15 @@ export default function TasksPage() {
   }, []);
 
   return (
-    <AppShell>
-      <h1 className="page-title">Task Workspace</h1>
-      <p className="page-sub">Accept, start, hold, complete — evidence required where configured.</p>
+    <AppShell
+      title="Task workspace"
+      subtitle="Accept, start, hold, complete — evidence required where configured."
+      actions={
+        <button className="btn secondary" onClick={load}>
+          Refresh
+        </button>
+      }
+    >
       {msg && <p className="badge danger">{msg}</p>}
       <div className="panel">
         <table>

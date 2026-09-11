@@ -2,25 +2,53 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { clearToken, getToken } from "@/lib/api";
+import { clearToken, getToken, api } from "@/lib/api";
 import { useEffect, useState } from "react";
 
-const LINKS = [
-  { href: "/", label: "Operations" },
-  { href: "/email", label: "CloudMailin" },
-  { href: "/outcomes", label: "Outcomes" },
-  { href: "/reviews", label: "Human Review" },
-  { href: "/tasks", label: "Task Workspace" },
-  { href: "/resources", label: "Resources" },
-  { href: "/invoices", label: "Invoice Workbench" },
-  { href: "/failures", label: "Failure Console" },
-  { href: "/config", label: "Configuration" },
+const GROUPS = [
+  {
+    label: "Overview",
+    links: [{ href: "/", label: "Operations" }],
+  },
+  {
+    label: "Intake",
+    links: [{ href: "/email", label: "CloudMailin" }],
+  },
+  {
+    label: "Work",
+    links: [
+      { href: "/outcomes", label: "Outcomes" },
+      { href: "/reviews", label: "Human review" },
+      { href: "/tasks", label: "Tasks" },
+      { href: "/resources", label: "Resources" },
+      { href: "/invoices", label: "Invoices" },
+    ],
+  },
+  {
+    label: "System",
+    links: [
+      { href: "/failures", label: "Failures" },
+      { href: "/config", label: "Configuration" },
+    ],
+  },
 ];
 
-export function AppShell({ children }: { children: React.ReactNode }) {
+export function AppShell({
+  children,
+  title,
+  subtitle,
+  actions,
+}: {
+  children: React.ReactNode;
+  title?: string;
+  subtitle?: string;
+  actions?: React.ReactNode;
+}) {
   const pathname = usePathname();
   const router = useRouter();
   const [ready, setReady] = useState(false);
+  const [open, setOpen] = useState(false);
+  const [mailin, setMailin] = useState<any>(null);
 
   useEffect(() => {
     if (!getToken() && pathname !== "/login") {
@@ -30,31 +58,91 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     }
   }, [pathname, router]);
 
+  useEffect(() => {
+    if (!ready || pathname === "/login") return;
+    api("/webhooks/cloudmailin")
+      .then(setMailin)
+      .catch(() => setMailin(null));
+  }, [ready, pathname]);
+
+  useEffect(() => {
+    setOpen(false);
+  }, [pathname]);
+
   if (pathname === "/login") return <>{children}</>;
-  if (!ready) return null;
+  if (!ready) {
+    return (
+      <div className="login-wrap" style={{ gridTemplateColumns: "1fr" }}>
+        <div className="empty">Loading console…</div>
+      </div>
+    );
+  }
+
+  function isActive(href: string) {
+    if (href === "/") return pathname === "/";
+    return pathname === href || pathname.startsWith(`${href}/`);
+  }
 
   return (
     <div className="shell">
-      <aside className="nav">
-        <h1 className="brand">Outcome Orchestration</h1>
-        <div className="brand-sub">Prototype operations console</div>
-        {LINKS.map((l) => (
-          <Link key={l.href} href={l.href} className={pathname === l.href ? "active" : ""}>
-            {l.label}
-          </Link>
+      <div className={`nav-backdrop ${open ? "show" : ""}`} onClick={() => setOpen(false)} />
+      <aside className={`nav ${open ? "open" : ""}`}>
+        <div className="brand-block">
+          <h1 className="brand">
+            Outcome <span>Orchestrate</span>
+          </h1>
+          <div className="brand-sub">Email → AI → governed outcomes</div>
+        </div>
+
+        {GROUPS.map((g) => (
+          <div className="nav-group" key={g.label}>
+            <div className="nav-group-label">{g.label}</div>
+            {g.links.map((l) => (
+              <Link key={l.href} href={l.href} className={isActive(l.href) ? "active" : ""}>
+                {l.label}
+              </Link>
+            ))}
+          </div>
         ))}
-        <button
-          className="btn secondary"
-          style={{ marginTop: "1.5rem", width: "100%" }}
-          onClick={() => {
-            clearToken();
-            router.push("/login");
-          }}
-        >
-          Sign out
-        </button>
+
+        <div className="nav-footer">
+          <div className="panel" style={{ padding: "0.75rem 0.85rem", marginBottom: "0.75rem" }}>
+            <div className="row" style={{ gap: "0.45rem" }}>
+              <span className={`live-dot ${mailin?.smtp_configured ? "" : "off"}`} />
+              <strong style={{ fontSize: "0.82rem" }}>CloudMailin</strong>
+            </div>
+            <div className="muted" style={{ fontSize: "0.75rem", marginTop: "0.35rem" }}>
+              {mailin?.address || "Address not set"}
+              <br />
+              {mailin?.smtp_configured ? "SMTP replies on" : "Inbound only"}
+            </div>
+          </div>
+          <button
+            className="btn secondary"
+            style={{ width: "100%" }}
+            onClick={() => {
+              clearToken();
+              router.push("/login");
+            }}
+          >
+            Sign out
+          </button>
+        </div>
       </aside>
-      <main className="main">{children}</main>
+
+      <main className="main">
+        <div className="topbar">
+          <div>
+            <button type="button" className="nav-toggle" onClick={() => setOpen(true)} style={{ marginBottom: "0.75rem" }}>
+              Menu
+            </button>
+            {title ? <h1 className="page-title">{title}</h1> : null}
+            {subtitle ? <p className="page-sub">{subtitle}</p> : null}
+          </div>
+          {actions ? <div className="row">{actions}</div> : null}
+        </div>
+        <div className="main-content">{children}</div>
+      </main>
     </div>
   );
 }

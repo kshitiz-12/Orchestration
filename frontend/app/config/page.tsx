@@ -20,9 +20,7 @@ export default function ConfigPage() {
   }, []);
 
   return (
-    <AppShell>
-      <h1 className="page-title">Configuration</h1>
-      <p className="page-sub">Outcome templates, rules, SLAs, notifications, evidence requirements.</p>
+    <AppShell title="Configuration" subtitle="Outcome templates, rules, SLAs, notifications, evidence requirements.">
       <div className="stack">
         <div className="panel">
           <h2>Outcome templates</h2>

@@ -1,18 +1,21 @@
 """Inbound email webhooks (CloudMailin) → Intake → pipeline.
 
 Public endpoint (no JWT). Protected by shared secret query/header when configured.
+Returns 2xx quickly after durable ingest; AI/outcome runs in a background task so
+CloudMailin does not time out on Render cold starts.
 """
 
 from __future__ import annotations
 
 from typing import Any, Optional
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request
-from sqlmodel import select
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, Request
+from sqlmodel import Session, select
 
 from app.api.deps import SessionDep
 from app.connectors.cloudmailin import PROVIDER, normalize_cloudmailin_payload
 from app.core.config import get_settings
+from app.core.database import get_engine
 from app.core.logging import get_logger
 from app.engine.pipeline import ProcessingPipeline
 from app.models.org import Tenant
@@ -30,7 +33,6 @@ def _assert_webhook_auth(
     settings = get_settings()
     expected = (settings.cloudmailin_webhook_secret or "").strip()
     if not expected:
-        # Prototype convenience: allow open webhook only in non-production
         if settings.is_production:
             raise HTTPException(503, "CLOUDMAILIN_WEBHOOK_SECRET must be set in production")
         return
@@ -46,9 +48,22 @@ def _default_tenant_id(session) -> str:
     return tenant.tenant_id
 
 
+def _process_event_background(event_id: str, tenant_id: str) -> None:
+    try:
+        with Session(get_engine()) as session:
+            result = ProcessingPipeline(session, tenant_id).process_event(event_id)
+            logger.info(
+                "cloudmailin_background_processed",
+                event_id=event_id,
+                status=result.get("status"),
+                outcome_id=result.get("outcome_id"),
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("cloudmailin_background_failed", event_id=event_id, error=str(exc))
+
+
 @router.get("/cloudmailin")
 def cloudmailin_status(session: SessionDep):
-    """Safe status for dashboard / ops (no secrets)."""
     from app.connectors.cloudmailin import CloudMailinProvider
 
     settings = get_settings()
@@ -64,9 +79,10 @@ def cloudmailin_status(session: SessionDep):
         "secret_configured": bool(settings.cloudmailin_webhook_secret),
         "smtp_configured": provider.is_connected(),
         "can_send_replies": provider.is_connected(),
+        "outbound": "https_api_preferred",
         "note": (
-            "Inbound: point CloudMailin Target URL here (JSON Normalized). "
-            "Outbound: set CLOUDMAILIN_SMTP_URL for same-thread SMTP replies."
+            "Inbound: CloudMailin Target URL (JSON Normalized). "
+            "Outbound: CloudMailin Message API via CLOUDMAILIN_SMTP_URL credentials."
         ),
     }
 
@@ -75,11 +91,12 @@ def cloudmailin_status(session: SessionDep):
 async def cloudmailin_inbound(
     request: Request,
     session: SessionDep,
+    background_tasks: BackgroundTasks,
     process: bool = Query(True),
     secret: Optional[str] = Query(None, description="Shared secret (or use X-Webhook-Secret)"),
     x_webhook_secret: Optional[str] = Header(None, alias="X-Webhook-Secret"),
 ):
-    """Receive CloudMailin JSON Normalized POST → store → optional AI pipeline."""
+    """Receive CloudMailin JSON Normalized POST → store → background AI pipeline."""
     _assert_webhook_auth(secret_query=secret, secret_header=x_webhook_secret)
 
     content_type = (request.headers.get("content-type") or "").lower()
@@ -104,11 +121,12 @@ async def cloudmailin_inbound(
         if headers_map:
             payload["headers"] = headers_map
     else:
-        # Default to JSON (CloudMailin JSON Normalized)
         try:
             payload = await request.json()
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(400, f"Unsupported CloudMailin content-type: {content_type or 'unknown'}") from exc
+            raise HTTPException(
+                400, f"Unsupported CloudMailin content-type: {content_type or 'unknown'}"
+            ) from exc
 
     if not isinstance(payload, dict):
         raise HTTPException(400, "Expected JSON object body")
@@ -121,34 +139,34 @@ async def cloudmailin_inbound(
 
     tenant_id = _default_tenant_id(session)
     intake = IntakeService(session, tenant_id)
-    ingested = intake.ingest(
-        message_id=normalized.provider_message_id,
-        thread_id=normalized.provider_conversation_id,
-        sender=normalized.sender,
-        recipients=normalized.recipients,
-        cc=normalized.cc,
-        subject=normalized.subject,
-        body_text=normalized.body_text,
-        source=PROVIDER,
-        attachments=[a.model_dump() for a in normalized.attachments],
-        headers=normalized.original_metadata.get("headers") or {},
-        body_html=normalized.body_html,
-    )
+    try:
+        ingested = intake.ingest(
+            message_id=normalized.provider_message_id,
+            thread_id=normalized.provider_conversation_id,
+            sender=normalized.sender,
+            recipients=normalized.recipients,
+            cc=normalized.cc,
+            subject=normalized.subject,
+            body_text=normalized.body_text,
+            source=PROVIDER,
+            attachments=[a.model_dump() for a in normalized.attachments],
+            headers=normalized.original_metadata.get("headers") or {},
+            body_html=normalized.body_html,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("cloudmailin_ingest_failed", error=str(exc))
+        raise HTTPException(500, f"Ingest failed: {exc}") from exc
 
-    processed = None
+    queued = False
     if process and ingested.get("status") == "queued" and ingested.get("event_id"):
-        try:
-            processed = ProcessingPipeline(session, tenant_id).process_event(ingested["event_id"])
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("cloudmailin_process_failed", error=str(exc))
-            processed = {"error": str(exc)}
+        background_tasks.add_task(_process_event_background, ingested["event_id"], tenant_id)
+        queued = True
 
-    # CloudMailin expects 2xx; 201 Created is conventional in their docs
     return {
         "ok": True,
         "provider": PROVIDER,
         "ingest": ingested,
-        "process": processed,
+        "processing": "queued" if queued else ingested.get("status"),
         "message_id": normalized.provider_message_id,
         "conversation_id": normalized.provider_conversation_id,
     }

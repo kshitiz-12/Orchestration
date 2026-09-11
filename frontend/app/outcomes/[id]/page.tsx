@@ -1,6 +1,7 @@
 "use client";
 
 import { AppShell } from "@/components/AppShell";
+import { ReadinessBar, StatusBadge } from "@/components/Status";
 import { api } from "@/lib/api";
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -21,48 +22,97 @@ export default function OutcomeDetailPage() {
 
   if (!data) {
     return (
-      <AppShell>
-        <p className="muted">{msg || "Loading…"}</p>
+      <AppShell title="Outcome" subtitle={msg || "Loading case details…"}>
+        <div className="panel empty">
+          <strong>{msg ? "Could not load" : "Loading…"}</strong>
+          {msg || "Fetching email, AI decision, tasks, and audit trail."}
+        </div>
       </AppShell>
     );
   }
 
-  const { outcome, email, ai_decision, requirements, tasks, exceptions, evidence, communications, audit, vendor_issues, approvals } =
-    data;
+  const {
+    outcome,
+    email,
+    ai_decision,
+    requirements,
+    tasks,
+    exceptions,
+    evidence,
+    communications,
+    audit,
+    vendor_issues,
+    approvals,
+  } = data;
 
   return (
-    <AppShell>
-      <h1 className="page-title">{outcome.case_reference}</h1>
-      <p className="page-sub">
-        {outcome.title} · <span className="badge">{outcome.status}</span> · readiness {outcome.readiness_pct}%
-        {outcome.joining_day_readiness_pct != null && (
-          <> · joining-day {outcome.joining_day_readiness_pct}% · permanent {outcome.permanent_readiness_pct}%</>
-        )}
-      </p>
-      <div className="row" style={{ marginBottom: "1rem" }}>
-        <button
-          className="btn"
-          onClick={async () => {
-            try {
-              await api(`/outcomes/${id}/close`, { method: "POST" });
-              setMsg("Closed");
-              load();
-            } catch (e: any) {
-              setMsg(e.message);
-            }
-          }}
-        >
-          Verify & close
-        </button>
-        {msg && <span className="muted">{msg}</span>}
+    <AppShell
+      title={outcome.case_reference}
+      subtitle={outcome.title}
+      actions={
+        <>
+          <StatusBadge status={outcome.status} />
+          <button
+            className="btn accent"
+            onClick={async () => {
+              try {
+                await api(`/outcomes/${id}/close`, { method: "POST" });
+                setMsg("Closed");
+                load();
+              } catch (e: any) {
+                setMsg(e.message);
+              }
+            }}
+          >
+            Verify & close
+          </button>
+          <button
+            className="btn secondary"
+            onClick={async () => {
+              try {
+                const res = await api(`/outcomes/${id}/resend-clarification`, { method: "POST" });
+                setMsg(res.delivered ? "Clarification emailed" : "Saved but not delivered");
+                load();
+              } catch (e: any) {
+                setMsg(e.message);
+              }
+            }}
+          >
+            Resend clarification
+          </button>
+        </>
+      }
+    >
+      {msg && <p className="badge danger">{msg}</p>}
+      <div className="grid kpis" style={{ marginBottom: "1.25rem" }}>
+        <div className="kpi">
+          <div className="label">Readiness</div>
+          <div className="value" style={{ fontSize: "1.4rem" }}>
+            <ReadinessBar value={outcome.readiness_pct} />
+          </div>
+        </div>
+        <div className="kpi">
+          <div className="label">Requester</div>
+          <div className="value" style={{ fontSize: "0.95rem", marginTop: "0.5rem" }}>
+            {outcome.requester_email}
+          </div>
+        </div>
+        <div className="kpi">
+          <div className="label">Template</div>
+          <div className="value" style={{ fontSize: "0.95rem", marginTop: "0.5rem" }}>
+            {outcome.template_code}
+          </div>
+        </div>
       </div>
       <div className="cols-2">
         <div className="stack">
           <div className="panel">
-            <h2>Original email</h2>
+            <h2 style={{ marginBottom: "0.75rem" }}>Original email</h2>
             {email ? (
               <>
-                <div className="muted">{email.sender} · {email.subject}</div>
+                <div className="muted">
+                  {email.sender} · {email.subject}
+                </div>
                 <div className="pre">{email.body_text}</div>
               </>
             ) : (
@@ -70,7 +120,7 @@ export default function OutcomeDetailPage() {
             )}
           </div>
           <div className="panel">
-            <h2>AI interpretation</h2>
+            <h2 style={{ marginBottom: "0.75rem" }}>AI interpretation</h2>
             {ai_decision ? (
               <>
                 <p>
@@ -84,7 +134,7 @@ export default function OutcomeDetailPage() {
             )}
           </div>
           <div className="panel">
-            <h2>Communications</h2>
+            <h2 style={{ marginBottom: "0.75rem" }}>Communications</h2>
             {(communications || []).map((c: any) => (
               <div key={c.message_id} style={{ marginBottom: "0.75rem" }}>
                 <div className="badge">{c.communication_type}</div>
@@ -92,9 +142,10 @@ export default function OutcomeDetailPage() {
                 <div className="pre">{c.body}</div>
               </div>
             ))}
+            {(communications || []).length === 0 && <p className="muted">None yet</p>}
           </div>
           <div className="panel">
-            <h2>Audit timeline</h2>
+            <h2 style={{ marginBottom: "0.75rem" }}>Audit timeline</h2>
             <table>
               <tbody>
                 {(audit || []).map((a: any) => (
@@ -110,14 +161,14 @@ export default function OutcomeDetailPage() {
         </div>
         <div className="stack">
           <div className="panel">
-            <h2>Requirements</h2>
+            <h2 style={{ marginBottom: "0.75rem" }}>Requirements</h2>
             <table>
               <tbody>
                 {(requirements || []).map((r: any) => (
                   <tr key={r.requirement_id}>
                     <td>{r.title}</td>
                     <td>
-                      <span className="badge">{r.status}</span>
+                      <StatusBadge status={r.status} />
                     </td>
                   </tr>
                 ))}
@@ -125,7 +176,7 @@ export default function OutcomeDetailPage() {
             </table>
           </div>
           <div className="panel">
-            <h2>Tasks & dependencies</h2>
+            <h2 style={{ marginBottom: "0.75rem" }}>Tasks & dependencies</h2>
             <table>
               <thead>
                 <tr>
@@ -143,7 +194,9 @@ export default function OutcomeDetailPage() {
                       {t.is_blocked && <span className="badge warn"> BLOCKED</span>}
                     </td>
                     <td>{t.owner_role}</td>
-                    <td>{t.status}</td>
+                    <td>
+                      <StatusBadge status={t.status} />
+                    </td>
                     <td className="mono">{(t.depends_on_task_codes || []).join(", ") || "—"}</td>
                   </tr>
                 ))}
@@ -151,7 +204,7 @@ export default function OutcomeDetailPage() {
             </table>
           </div>
           <div className="panel">
-            <h2>Exceptions / risks</h2>
+            <h2 style={{ marginBottom: "0.75rem" }}>Exceptions / risks</h2>
             {(exceptions || []).map((e: any) => (
               <div key={e.exception_id} style={{ marginBottom: "0.5rem" }}>
                 <span className="badge danger">{e.severity}</span> {e.title}
@@ -163,9 +216,12 @@ export default function OutcomeDetailPage() {
                 [{v.workstream}] {v.issue_type} — {v.allegation_status}
               </div>
             ))}
+            {(exceptions || []).length === 0 && (vendor_issues || []).length === 0 && (
+              <p className="muted">None</p>
+            )}
           </div>
           <div className="panel">
-            <h2>Approvals</h2>
+            <h2 style={{ marginBottom: "0.75rem" }}>Approvals</h2>
             {(approvals || []).map((a: any) => (
               <div key={a.approval_id} className="row" style={{ marginBottom: "0.5rem" }}>
                 <span>
@@ -187,9 +243,10 @@ export default function OutcomeDetailPage() {
                 )}
               </div>
             ))}
+            {(approvals || []).length === 0 && <p className="muted">None</p>}
           </div>
           <div className="panel">
-            <h2>Evidence</h2>
+            <h2 style={{ marginBottom: "0.75rem" }}>Evidence</h2>
             {(evidence || []).length === 0 && <p className="muted">None yet</p>}
             {(evidence || []).map((e: any) => (
               <div key={e.evidence_id}>

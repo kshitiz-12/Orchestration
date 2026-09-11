@@ -14,9 +14,7 @@ export default function ResourcesPage() {
   }, [type]);
 
   return (
-    <AppShell>
-      <h1 className="page-title">Resources</h1>
-      <p className="page-sub">Seats, parking, chairs, devices — allocation, reservation, conflict.</p>
+    <AppShell title="Resources" subtitle="Seats, parking, chairs, devices — allocation, reservation, conflict.">
       <div className="row" style={{ marginBottom: "1rem" }}>
         {["", "SEAT", "CHAIR", "PARKING_SLOT", "LAPTOP", "MONITOR", "ACCESS_CARD"].map((t) => (
           <button key={t || "ALL"} className="btn secondary" onClick={() => setType(t)}>

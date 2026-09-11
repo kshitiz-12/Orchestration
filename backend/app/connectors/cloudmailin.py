@@ -1,9 +1,8 @@
-"""CloudMailin email channel — inbound webhook + optional SMTP outbound.
+"""CloudMailin email channel — inbound webhook + outbound via HTTP API (SMTP fallback).
 
-Inbound: CloudMailin POSTs JSON to /webhooks/cloudmailin (see routes/webhooks.py).
-Outbound: SMTP with In-Reply-To / References so replies thread in the client's mailbox.
-
-No Microsoft Graph. No Gmail API.
+Inbound: CloudMailin POSTs JSON to /webhooks/cloudmailin.
+Outbound: Prefer HTTPS Message API (works on Render). SMTP is local fallback only —
+many PaaS hosts block outbound port 587.
 """
 
 from __future__ import annotations
@@ -17,6 +16,8 @@ from email.utils import formataddr, make_msgid, parseaddr
 from typing import Any, Optional
 from urllib.parse import unquote, urlparse
 
+import httpx
+
 from app.connectors.base import EmailProvider
 from app.core.config import get_settings
 from app.core.logging import get_logger
@@ -25,6 +26,7 @@ from app.schemas.email import NormalizedAttachment, NormalizedEmailEvent
 logger = get_logger(__name__)
 
 PROVIDER = "CLOUDMAILIN"
+CLOUDMAILIN_API = "https://api.cloudmailin.com/api/v0.1"
 
 
 def _header(headers: dict[str, Any], *names: str) -> Optional[str]:
@@ -126,7 +128,6 @@ def normalize_cloudmailin_payload(payload: dict[str, Any]) -> NormalizedEmailEve
 
 
 def parse_smtp_url(url: str) -> dict[str, Any]:
-    """Parse smtp://user:pass@host:587 into connection fields."""
     parsed = urlparse(url)
     if parsed.scheme not in {"smtp", "smtps"}:
         raise ValueError("CLOUDMAILIN_SMTP_URL must start with smtp:// or smtps://")
@@ -140,8 +141,6 @@ def parse_smtp_url(url: str) -> dict[str, Any]:
 
 
 class CloudMailinProvider(EmailProvider):
-    """Push inbound via webhook; send replies via CloudMailin SMTP when configured."""
-
     def __init__(self, session=None, tenant_id: Optional[str] = None):
         self.settings = get_settings()
         self.session = session
@@ -173,7 +172,6 @@ class CloudMailinProvider(EmailProvider):
         return None
 
     def is_connected(self) -> bool:
-        """Ready to send live replies when SMTP is configured."""
         return self._smtp_config() is not None
 
     def get_account_email(self) -> Optional[str]:
@@ -184,7 +182,6 @@ class CloudMailinProvider(EmailProvider):
         )
 
     def fetch_unread(self, max_results: int = 20) -> list[dict[str, Any]]:
-        # Inbound is push-based via webhook — nothing to poll.
         return []
 
     def mark_processed(self, message_id: str) -> None:
@@ -202,17 +199,107 @@ class CloudMailinProvider(EmailProvider):
         cfg = self._smtp_config()
         if not cfg:
             raise RuntimeError(
-                "CloudMailin SMTP not configured. Set CLOUDMAILIN_SMTP_URL "
-                "(or HOST/USERNAME/PASSWORD) to send live replies."
+                "CloudMailin SMTP/API not configured. Set CLOUDMAILIN_SMTP_URL "
+                "(smtp://USER:PASS@HOST:587)."
             )
         from_addr = self.get_account_email()
         if not from_addr:
             raise RuntimeError("Set CLOUDMAILIN_FROM_EMAIL (or CLOUDMAILIN_ADDRESS) as the From address.")
 
+        subj = subject if subject.lower().startswith("re:") else f"Re: {subject}"
+        headers: dict[str, Any] = {}
+        if in_reply_to_message_id:
+            headers["In-Reply-To"] = in_reply_to_message_id
+            headers["References"] = f"{conversation_id or in_reply_to_message_id} {in_reply_to_message_id}".strip()
+        elif conversation_id:
+            headers["In-Reply-To"] = conversation_id
+            headers["References"] = conversation_id
+
+        # Prefer HTTPS API — Render and many hosts block outbound SMTP :587
+        try:
+            return self._send_via_http_api(
+                username=cfg["username"],
+                api_token=cfg["password"],
+                from_addr=from_addr,
+                to=to,
+                subject=subj,
+                body=body,
+                headers=headers,
+            )
+        except Exception as api_exc:  # noqa: BLE001
+            logger.warning("cloudmailin_http_api_failed_trying_smtp", error=str(api_exc))
+            return self._send_via_smtp(
+                cfg=cfg,
+                from_addr=from_addr,
+                to=to,
+                subject=subj,
+                body=body,
+                conversation_id=conversation_id,
+                in_reply_to_message_id=in_reply_to_message_id,
+            )
+
+    def _send_via_http_api(
+        self,
+        *,
+        username: str,
+        api_token: str,
+        from_addr: str,
+        to: list[str],
+        subject: str,
+        body: str,
+        headers: dict[str, Any],
+    ) -> str:
+        payload: dict[str, Any] = {
+            "from": from_addr,
+            "to": to,
+            "subject": subject,
+            "plain": body,
+            "tags": ["orchestration", "clarification"],
+        }
+        if headers:
+            payload["headers"] = headers
+        url = f"{CLOUDMAILIN_API}/{username}/messages"
+        with httpx.Client(timeout=40.0) as client:
+            resp = client.post(
+                url,
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {api_token}",
+                    "Content-Type": "application/json",
+                },
+            )
+            if resp.status_code >= 400:
+                raise RuntimeError(f"CloudMailin API {resp.status_code}: {resp.text[:400]}")
+            data = resp.json() if resp.content else {}
+            msg_id = (
+                data.get("message_id")
+                or data.get("id")
+                or f"cloudmailin-api:{username}"
+            )
+            logger.info(
+                "cloudmailin_api_sent",
+                to=to,
+                subject=subject,
+                message_id=msg_id,
+                test_mode=data.get("test_mode"),
+            )
+            return str(msg_id)
+
+    def _send_via_smtp(
+        self,
+        *,
+        cfg: dict[str, Any],
+        from_addr: str,
+        to: list[str],
+        subject: str,
+        body: str,
+        conversation_id: Optional[str],
+        in_reply_to_message_id: Optional[str],
+    ) -> str:
         msg = EmailMessage()
         msg["From"] = formataddr(("Outcome Orchestration", from_addr))
         msg["To"] = ", ".join(to)
-        msg["Subject"] = subject if subject.lower().startswith("re:") else f"Re: {subject}"
+        msg["Subject"] = subject
         new_id = make_msgid(domain=from_addr.split("@")[-1])
         msg["Message-ID"] = new_id
         if in_reply_to_message_id:
@@ -237,11 +324,5 @@ class CloudMailinProvider(EmailProvider):
                 smtp.login(cfg["username"], cfg["password"])
                 smtp.send_message(msg)
 
-        logger.info(
-            "cloudmailin_smtp_sent",
-            to=to,
-            subject=subject,
-            message_id=new_id,
-            in_reply_to=in_reply_to_message_id,
-        )
+        logger.info("cloudmailin_smtp_sent", to=to, subject=subject, message_id=new_id)
         return new_id

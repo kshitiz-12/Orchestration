@@ -25,77 +25,88 @@ export default function EmailInboxPage() {
   }`;
 
   return (
-    <AppShell>
-      <h1 className="page-title">CloudMailin inbox</h1>
-      <p className="page-sub">
-        CloudMailin webhook → store → AI → outcome → SMTP reply in the same email thread. Prototype only —
-        no Microsoft Graph.
-      </p>
+    <AppShell
+      title="CloudMailin"
+      subtitle="Inbound webhook → store → AI → outcome. SMTP replies stay in the same email thread."
+      actions={
+        <button className="btn secondary" onClick={load}>
+          Refresh status
+        </button>
+      }
+    >
       {msg && <p className="badge danger">{msg}</p>}
 
-      <div className="stack">
+      <div className="grid kpis" style={{ marginBottom: "1.25rem" }}>
+        <div className="kpi">
+          <div className="label">Provider</div>
+          <div className="value" style={{ fontSize: "1.2rem" }}>
+            {cloudmailin?.provider || "CLOUDMAILIN"}
+          </div>
+        </div>
+        <div className="kpi">
+          <div className="label">Webhook secret</div>
+          <div className="value" style={{ fontSize: "1.2rem" }}>
+            {cloudmailin?.secret_configured ? "On" : "Open"}
+          </div>
+          <div className="hint">{cloudmailin?.secret_configured ? "Configured" : "Prototype mode"}</div>
+        </div>
+        <div className="kpi">
+          <div className="label">SMTP outbound</div>
+          <div className="value" style={{ fontSize: "1.2rem" }}>
+            {cloudmailin?.smtp_configured ? "Ready" : "Off"}
+          </div>
+          <div className="hint">{cloudmailin?.smtp_configured ? "Live replies" : "Store only"}</div>
+        </div>
+      </div>
+
+      <div className="cols-2">
         <div className="panel">
-          <h2>Status</h2>
-          <p>
-            Provider: <span className="badge accent">{cloudmailin?.provider || "CLOUDMAILIN"}</span>
-          </p>
-          <p>
-            Inbound address:{" "}
-            <span className="mono">{cloudmailin?.address || "set CLOUDMAILIN_ADDRESS in backend/.env"}</span>
-          </p>
-          <p>
-            From (replies):{" "}
-            <span className="mono">{cloudmailin?.from_email || "set CLOUDMAILIN_FROM_EMAIL"}</span>
-          </p>
-          <p>
-            Webhook secret:{" "}
-            <span className={`badge ${cloudmailin?.secret_configured ? "ok" : "warn"}`}>
-              {cloudmailin?.secret_configured ? "configured" : "open (prototype)"}
-            </span>
-          </p>
-          <p>
-            SMTP outbound:{" "}
+          <div className="panel-head">
+            <h2>Connection</h2>
             <span className={`badge ${cloudmailin?.smtp_configured ? "ok" : "warn"}`}>
-              {cloudmailin?.smtp_configured ? "ready — live replies enabled" : "not set — clarifications stored only"}
+              {cloudmailin?.smtp_configured ? "Full loop" : "Inbound only"}
             </span>
-          </p>
-          <button className="btn secondary" onClick={load}>
-            Refresh
-          </button>
+          </div>
+          <div className="stack">
+            <div>
+              <div className="muted" style={{ fontSize: "0.8rem", fontWeight: 600 }}>
+                Inbound address
+              </div>
+              <div className="mono pre" style={{ marginTop: "0.35rem" }}>
+                {cloudmailin?.address || "Set CLOUDMAILIN_ADDRESS"}
+              </div>
+            </div>
+            <div>
+              <div className="muted" style={{ fontSize: "0.8rem", fontWeight: 600 }}>
+                From (replies)
+              </div>
+              <div className="mono" style={{ marginTop: "0.35rem" }}>
+                {cloudmailin?.from_email || "Set CLOUDMAILIN_FROM_EMAIL"}
+              </div>
+            </div>
+            <div>
+              <div className="muted" style={{ fontSize: "0.8rem", fontWeight: 600 }}>
+                Target URL (JSON Normalized)
+              </div>
+              <div className="mono pre" style={{ marginTop: "0.35rem" }}>
+                {targetUrl}
+              </div>
+            </div>
+          </div>
         </div>
 
         <div className="panel">
-          <h2>CloudMailin setup</h2>
-          <ol className="muted">
-            <li>
-              Create a free account at{" "}
-              <a href="https://www.cloudmailin.com/" target="_blank" rel="noreferrer">
-                cloudmailin.com
-              </a>
-            </li>
-            <li>Copy the inbound address into <span className="mono">CLOUDMAILIN_ADDRESS</span></li>
-            <li>
-              Set format to <strong>JSON Normalized</strong>
-            </li>
-            <li>Set Target URL to the webhook below (use ngrok if the API is local)</li>
-            <li>
-              Optional for live replies: CloudMailin SMTP → <span className="mono">CLOUDMAILIN_SMTP_URL</span>
-            </li>
-          </ol>
-          <p className="muted mono">Target URL</p>
-          <p className="mono pre">{targetUrl}</p>
-        </div>
-
-        <div className="panel">
-          <h2>Demo</h2>
-          <ol className="muted">
+          <h2 style={{ marginBottom: "0.75rem" }}>Demo script</h2>
+          <ol className="muted" style={{ margin: 0, paddingLeft: "1.1rem", lineHeight: 1.55 }}>
             <li>
               Email the CloudMailin address:{" "}
               <em>&quot;I need a meeting room for 8 people tomorrow at 3 PM for 2 hours.&quot;</em>
             </li>
-            <li>Incomplete: <em>&quot;I need a meeting room tomorrow.&quot;</em> → clarification reply</li>
-            <li>Reply in-thread with details → same Outcome updates (no duplicate)</li>
-            <li>Resend the same message → deduplicated</li>
+            <li>
+              Incomplete: <em>&quot;I need a meeting room tomorrow.&quot;</em> → clarification
+            </li>
+            <li>Reply in-thread with details → same Outcome updates</li>
+            <li>Duplicate webhook → deduplicated</li>
           </ol>
         </div>
       </div>

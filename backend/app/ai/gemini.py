@@ -23,6 +23,7 @@ EXTRACTION_SCHEMA_HINT = {
             "type": "string",
             "enum": [
                 "ONBOARDING",
+                "MEETING_ROOM",
                 "PARKING_CONFLICT",
                 "FURNITURE_ISSUE",
                 "VENDOR_ESCALATION",
@@ -129,6 +130,10 @@ class GeminiProvider(LLMProvider):
             "allowed_context": allowed_context or {},
             "instructions": (
                 "Extract structured information. Identify missing mandatory fields. "
+                "If this is a meeting room / conference room / booking request, set event_type=MEETING_ROOM "
+                "and extract attendees, date, start time, duration when present. "
+                "If attendees, preferred time, or duration are missing, add blocking missing_information "
+                "with clear questions. "
                 "If multiple issues exist, list each separately. "
                 "Do not invent facts not present in the email or allowed_context."
             ),
@@ -187,7 +192,6 @@ class HeuristicProvider(LLMProvider):
                 "work_model": ["hybrid", "remote", "onsite", "work model"],
             }.items():
                 if key not in entities:
-                    # naive presence check
                     if not any(a in text for a in aliases):
                         missing.append(
                             {
@@ -208,6 +212,79 @@ class HeuristicProvider(LLMProvider):
                         "entities": {},
                     }
                 )
+
+        elif any(
+            k in text
+            for k in [
+                "meeting room",
+                "conference room",
+                "book a room",
+                "need a room",
+                "need a meeting",
+                "room booking",
+                "meeting space",
+            ]
+        ) or (("room" in text or "meeting" in text) and any(k in text for k in ["people", "attendees", "pm", "am", "hours", "tomorrow"])):
+            event_type = "MEETING_ROOM"
+            confidence = 0.9
+            import re
+
+            m_people = re.search(r"(\d+)\s*(?:people|attendees|persons|pax)", text)
+            if m_people:
+                entities["attendees"] = int(m_people.group(1))
+            else:
+                missing.append(
+                    {
+                        "field": "attendees",
+                        "question": "How many people / attendees will attend?",
+                        "blocking": True,
+                    }
+                )
+
+            if "tomorrow" in text:
+                entities["date"] = "tomorrow"
+            elif not any(k in text for k in ["today", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "/"]):
+                missing.append(
+                    {
+                        "field": "date",
+                        "question": "Which date do you need the room?",
+                        "blocking": True,
+                    }
+                )
+
+            m_time = re.search(
+                r"(\d{1,2}(?::\d{2})?\s*(?:am|pm))(?:\s*(?:to|-|–|for)\s*)?",
+                text,
+                re.I,
+            )
+            if m_time:
+                entities["preferred_time"] = m_time.group(1).strip()
+            elif not any(k in text for k in ["am", "pm", ":"]):
+                missing.append(
+                    {
+                        "field": "preferred_time",
+                        "question": "What preferred start time (e.g. 3 PM)?",
+                        "blocking": True,
+                    }
+                )
+
+            m_dur = re.search(r"(\d+(?:\.\d+)?)\s*(?:hours?|hrs?)", text)
+            if m_dur:
+                entities["duration_hours"] = float(m_dur.group(1))
+            else:
+                missing.append(
+                    {
+                        "field": "duration",
+                        "question": "How long do you need the room (duration)?",
+                        "blocking": True,
+                    }
+                )
+
+            # Complete request → high confidence auto path
+            if not missing:
+                confidence = 0.93
+            elif len(missing) >= 2:
+                confidence = 0.72
 
         elif "parking" in text and ("occupied" in text or "conflict" in text or "taken" in text):
             event_type = "PARKING_CONFLICT"

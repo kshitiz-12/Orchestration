@@ -16,9 +16,15 @@ export default function FailuresPage() {
   }, []);
 
   return (
-    <AppShell>
-      <h1 className="page-title">Failure Console</h1>
-      <p className="page-sub">Failed stage, error, retry count — original event retained and reprocessable.</p>
+    <AppShell
+      title="Failure console"
+      subtitle="Failed stage, error, retry count — original event retained and reprocessable."
+      actions={
+        <button className="btn secondary" onClick={load}>
+          Refresh
+        </button>
+      }
+    >
       <div className="panel">
         <table>
           <thead>

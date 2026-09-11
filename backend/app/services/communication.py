@@ -81,7 +81,7 @@ class CommunicationService:
                 logger.warning(
                     "email_sender_not_attached",
                     key=key,
-                    hint="Communication stored only — connect Outlook to send live replies",
+                    hint="Communication stored only — configure CLOUDMAILIN_SMTP_URL for live replies",
                 )
             self.audit.record(
                 tenant_id=self.tenant_id,
@@ -121,6 +121,13 @@ class CommunicationService:
         questions: list[str],
         case_reference: Optional[str] = None,
     ) -> Communication:
+        questions = [q for q in questions if q]
+        if not questions:
+            questions = [
+                "How many people will attend?",
+                "What date and preferred start time?",
+                "How long do you need the room (duration)?",
+            ]
         ref = case_reference or "PENDING"
         subject = f"[INFORMATION REQUIRED] [{ref}] Additional details needed"
         body = (

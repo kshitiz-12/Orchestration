@@ -138,6 +138,69 @@ def close_outcome(outcome_id: str, session: SessionDep, tenant_id: TenantDep, us
     return outcome
 
 
+@router.post("/outcomes/{outcome_id}/resend-clarification")
+def resend_clarification(outcome_id: str, session: SessionDep, tenant_id: TenantDep, _user: UserDep):
+    """Force a live clarification email via CloudMailin (prototype helper)."""
+    from app.connectors.factory import get_email_provider
+    from app.services.communication import CommunicationService
+
+    outcome = session.get(Outcome, outcome_id)
+    if not outcome or outcome.tenant_id != tenant_id:
+        raise HTTPException(404, "Outcome not found")
+    conversation = session.get(Conversation, outcome.conversation_id) if outcome.conversation_id else None
+    if not conversation:
+        raise HTTPException(400, "Outcome has no conversation")
+
+    questions = []
+    for item in conversation.missing_information or []:
+        if isinstance(item, dict) and item.get("question"):
+            questions.append(item["question"])
+    if not questions:
+        questions = [
+            "How many people will attend?",
+            "What date and preferred start time?",
+            "How long do you need the room (duration)?",
+        ]
+
+    email = get_email_provider(session, tenant_id)
+    sender = email if email.is_connected() else None
+    if not sender:
+        raise HTTPException(400, "Outbound email not configured (CLOUDMAILIN_SMTP_URL)")
+
+    latest = session.exec(
+        select(RawEmailEvent)
+        .where(RawEmailEvent.conversation_id == conversation.conversation_id)
+        .order_by(RawEmailEvent.created_at.desc())  # type: ignore[attr-defined]
+    ).first()
+    in_reply_to = (latest.provider_message_id or latest.gmail_message_id) if latest else None
+
+    # Unique key so resend is allowed
+    import time
+
+    msg = CommunicationService(session, tenant_id, email_sender=sender).send(
+        communication_type="INFORMATION_REQUIRED",
+        recipients=[conversation.requester_email],
+        subject=f"[INFORMATION REQUIRED] [{outcome.case_reference}] Additional details needed",
+        body=(
+            "We need a few details to continue processing your request:\n\n"
+            + "\n".join(f"- {q}" for q in questions)
+            + "\n\nPlease reply to this email thread."
+        ),
+        conversation_id=conversation.conversation_id,
+        outcome_id=outcome.outcome_id,
+        thread_id=conversation.thread_id,
+        in_reply_to_message_id=in_reply_to,
+        idempotency_key=f"clarify-resend:{outcome.outcome_id}:{int(time.time())}",
+    )
+    session.commit()
+    return {
+        "ok": True,
+        "message_id": msg.message_id if msg else None,
+        "provider_message_id": msg.provider_message_id if msg else None,
+        "delivered": bool(msg and msg.provider_message_id),
+    }
+
+
 @router.get("/tasks")
 def list_tasks(session: SessionDep, tenant_id: TenantDep, _user: UserDep, outcome_id: str | None = None):
     stmt = select(Task).where(Task.tenant_id == tenant_id)

@@ -20,10 +20,29 @@ export async function api<T = any>(path: string, options: RequestInit = {}): Pro
     ...(options.headers as Record<string, string>),
   };
   if (token) headers.Authorization = `Bearer ${token}`;
-  const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}${path}`, { ...options, headers });
+  } catch {
+    throw new Error(`Cannot reach API at ${API_BASE}. Is Render awake?`);
+  }
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(text || res.statusText);
+    let detail = text || res.statusText;
+    try {
+      const parsed = JSON.parse(text);
+      detail = parsed.detail || parsed.message || detail;
+    } catch {
+      /* plain text */
+    }
+    if (typeof detail === "string" && detail.length > 220) {
+      detail = `${detail.slice(0, 220)}…`;
+    }
+    if (res.status === 401) {
+      clearToken();
+      throw new Error("Session expired — sign in again.");
+    }
+    throw new Error(detail || `Request failed (${res.status})`);
   }
   return res.json();
 }

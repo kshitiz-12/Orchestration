@@ -163,9 +163,20 @@ class ProcessingPipeline:
                 business_event_id=event.event_id,
                 context=relevant_ctx,
             )
-            questions = extraction.clarification_questions or [
-                m.question for m in extraction.missing_information
+            questions = [
+                q
+                for q in (
+                    extraction.clarification_questions
+                    or [m.question for m in extraction.missing_information]
+                )
+                if q
             ]
+            if not questions:
+                questions = [
+                    "How many people will attend?",
+                    "What date and preferred start time?",
+                    "How long do you need the room (duration)?",
+                ]
             self.comms.send_clarification(
                 conversation=conversation,
                 questions=questions,

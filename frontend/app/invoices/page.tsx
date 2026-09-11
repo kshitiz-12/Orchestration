@@ -17,9 +17,15 @@ export default function InvoicesPage() {
   }, []);
 
   return (
-    <AppShell>
-      <h1 className="page-title">Invoice Workbench</h1>
-      <p className="page-sub">Three-way match · exceptions · human approval · mock ERP handoff (never auto-pay).</p>
+    <AppShell
+      title="Invoice workbench"
+      subtitle="Three-way match · exceptions · human approval · mock ERP handoff (never auto-pay)."
+      actions={
+        <button className="btn secondary" onClick={load}>
+          Refresh
+        </button>
+      }
+    >
       {msg && <p className="muted">{msg}</p>}
       <div className="panel">
         <table>
