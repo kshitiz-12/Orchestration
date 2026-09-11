@@ -36,7 +36,7 @@ class IntakeService:
         recipients: list[str],
         subject: str,
         body_text: str,
-        source: str = "GMAIL",
+        source: str = "OUTLOOK",
         cc: Optional[list[str]] = None,
         body_html: Optional[str] = None,
         received_at: Optional[datetime] = None,
@@ -80,6 +80,9 @@ class IntakeService:
         event = RawEmailEvent(
             tenant_id=self.tenant_id,
             idempotency_key=idem,
+            provider=source,
+            provider_message_id=message_id,
+            provider_conversation_id=thread_id,
             gmail_message_id=message_id,
             gmail_thread_id=thread_id,
             source=source,

@@ -61,6 +61,28 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-2.5-flash"
     ai_prompt_version: str = "v1.0.0"
 
+    # Active email channel: cloudmailin (prototype default) | outlook | gmail
+    email_provider: str = "cloudmailin"
+    email_poll_interval_seconds: int = 30
+
+    # Microsoft Entra / Graph (optional — not used when EMAIL_PROVIDER=cloudmailin)
+    microsoft_tenant_id: str = "common"
+    microsoft_client_id: str = ""
+    microsoft_client_secret: str = ""
+    microsoft_redirect_uri: str = "http://localhost:8000/api/v1/integrations/outlook/callback"
+    microsoft_mailbox: str = ""
+    microsoft_scopes: str = "openid offline_access User.Read Mail.Read Mail.Send"
+
+    # CloudMailin (prototype email channel)
+    cloudmailin_address: str = ""  # inbound address e.g. inbox@xxxx.cloudmailin.net
+    cloudmailin_webhook_secret: str = ""  # ?secret= or X-Webhook-Secret
+    cloudmailin_from_email: str = ""  # From: for SMTP replies
+    cloudmailin_smtp_url: str = ""  # smtp://user:pass@host:587
+    cloudmailin_smtp_host: str = ""
+    cloudmailin_smtp_port: int = 587
+    cloudmailin_smtp_username: str = ""
+    cloudmailin_smtp_password: str = ""
+
     gmail_client_id: str = ""
     gmail_client_secret: str = ""
     gmail_redirect_uri: str = "http://localhost:8000/api/v1/integrations/gmail/callback"

@@ -155,7 +155,8 @@ class Communication(TimestampMixin, table=True):
     )
     outcome_id: Optional[str] = Field(default=None, foreign_key="outcomes.outcome_id")
     thread_id: Optional[str] = None
-    gmail_message_id: Optional[str] = None
+    gmail_message_id: Optional[str] = None  # legacy
+    provider_message_id: Optional[str] = None
     communication_type: str
     sender: str
     recipients: list = Field(default_factory=list, sa_column=Column(JSON))

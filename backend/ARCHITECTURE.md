@@ -20,5 +20,13 @@ Future scale path (without rewrite):
 - Read replicas / separate worker service
 - Redis/Celery only when queue volume requires it (DB queue is enough for prototype)
 - Entra ID auth, object storage for attachments
-- Channel adapters (Outlook, Teams) behind the same intake interface
+- Channel adapters (Outlook.com / M365 via Graph, optional Gmail) behind `EmailProvider`
+- Least-privilege Graph: `User.Read` `Mail.Read` `Mail.Send` (processed IDs in DB; no Mail.ReadWrite)
+
+Email channel:
+- `app/connectors/base.py` — `EmailProvider` (fetch / reply / mark processed)
+- `app/connectors/outlook.py` — Microsoft Graph for Outlook.com / work accounts
+- `app/connectors/gmail.py` — optional legacy Gmail
+- `app/connectors/factory.py` — `EMAIL_PROVIDER` selection
+- Outcome engine never imports Graph or Gmail SDKs directly
 """

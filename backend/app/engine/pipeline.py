@@ -16,6 +16,7 @@ from app.core.logging import get_logger
 from app.engine.scenarios import ScenarioOrchestrator
 from app.models.intake import AIDecision, Conversation, HumanReviewItem, ProcessingJob, RawEmailEvent
 from app.models.org import utcnow
+from app.connectors.factory import get_email_provider
 from app.services.communication import CommunicationService
 from app.services.context import ContextRetrievalService
 from app.services.intake import JobQueueService
@@ -35,7 +36,10 @@ class ProcessingPipeline:
         self.llm = llm or LLMService()
         self.audit = AuditService(session)
         self.context = ContextRetrievalService(session, tenant_id)
-        self.comms = CommunicationService(session, tenant_id)
+        email = get_email_provider(session, tenant_id)
+        # Only attach live sender when connected — otherwise persist-only
+        sender = email if email.is_connected() else None
+        self.comms = CommunicationService(session, tenant_id, email_sender=sender)
         self.scenarios = ScenarioOrchestrator(session, tenant_id, self.comms)
         self.settings = get_settings()
 
@@ -193,7 +197,7 @@ class ProcessingPipeline:
             business_event_id=event.event_id,
             context=relevant_ctx,
         )
-        if conversation.facts and event.gmail_thread_id:
+        if conversation.facts and (event.provider_conversation_id or event.gmail_thread_id):
             self.audit.record(
                 tenant_id=self.tenant_id,
                 actor="system",
@@ -215,7 +219,12 @@ class ProcessingPipeline:
         }
 
     def _get_or_create_conversation(self, event: RawEmailEvent) -> Conversation:
-        thread_id = event.gmail_thread_id or event.gmail_message_id
+        thread_id = (
+            event.provider_conversation_id
+            or event.gmail_thread_id
+            or event.provider_message_id
+            or event.gmail_message_id
+        )
         existing = self.session.exec(
             select(Conversation).where(
                 Conversation.tenant_id == self.tenant_id,

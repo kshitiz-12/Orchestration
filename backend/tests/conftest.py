@@ -10,6 +10,10 @@ from sqlmodel.pool import StaticPool
 os.environ["DATABASE_URL"] = "sqlite://"
 os.environ["GEMINI_API_KEY"] = ""
 os.environ["SECRET_KEY"] = "test-secret"
+os.environ["APP_ENV"] = "prototype"
+os.environ["EMAIL_PROVIDER"] = "cloudmailin"
+os.environ["CLOUDMAILIN_WEBHOOK_SECRET"] = ""
+
 
 from app.core.database import get_session  # noqa: E402
 from app.core.config import get_settings  # noqa: E402

@@ -49,6 +49,7 @@ class ResourceStatus(str, Enum):
 
 class EventSource(str, Enum):
     GMAIL = "GMAIL"
+    OUTLOOK = "OUTLOOK"
     MANUAL = "MANUAL"
     API = "API"
     SYSTEM = "SYSTEM"

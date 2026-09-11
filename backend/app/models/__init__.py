@@ -6,6 +6,7 @@ from app.models.intake import (
     ProcessingJob,
     RawEmailEvent,
 )
+from app.models.integrations import IntegrationCredential
 from app.models.org import (
     Asset,
     BusinessRule,
@@ -66,4 +67,5 @@ __all__ = [
     "Communication",
     "AuditLog",
     "VendorIssue",
+    "IntegrationCredential",
 ]

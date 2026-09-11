@@ -3,6 +3,7 @@ from sqlmodel import select
 
 from app.api.deps import SessionDep, TenantDep, UserDep
 from app.audit.service import AuditService
+from app.connectors.factory import get_email_provider
 from app.core.enums import AuditAction
 from app.engine.pipeline import ProcessingPipeline
 from app.engine.scenarios import ScenarioOrchestrator
@@ -77,7 +78,9 @@ def decide_review(
         item.status = "ACCEPTED"
     elif payload.action == "CLARIFY" and conversation:
         questions = [payload.reason or "Please provide additional details."]
-        CommunicationService(session, tenant_id).send_clarification(
+        email = get_email_provider(session, tenant_id)
+        sender = email if email.is_connected() else None
+        CommunicationService(session, tenant_id, email_sender=sender).send_clarification(
             conversation=conversation,
             questions=questions,
         )

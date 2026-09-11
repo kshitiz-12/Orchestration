@@ -11,22 +11,32 @@ class RawEmailEvent(TimestampMixin, table=True):
     """Immutable storage of original email before any AI processing."""
 
     __tablename__ = "raw_email_events"
-    __table_args__ = (UniqueConstraint("gmail_message_id", name="uq_gmail_message_id"),)
+    __table_args__ = (
+        UniqueConstraint("source", "provider_message_id", name="uq_source_provider_message"),
+    )
 
     event_id: str = Field(default_factory=lambda: new_id("evt_"), primary_key=True)
     tenant_id: str = Field(foreign_key="tenants.tenant_id", index=True)
     processing_id: str = Field(default_factory=lambda: new_id("proc_"), index=True, unique=True)
     idempotency_key: str = Field(index=True, unique=True)
+
+    # Provider-agnostic identifiers (Outlook conversationId, Gmail threadId, …)
+    provider: str = Field(default="OUTLOOK", index=True)
+    provider_message_id: str = Field(index=True)
+    provider_conversation_id: Optional[str] = Field(default=None, index=True)
+
+    # Legacy aliases — dual-written for compatibility with earlier prototype columns
     gmail_message_id: str = Field(index=True)
     gmail_thread_id: Optional[str] = Field(default=None, index=True)
-    source: str = "GMAIL"
+
+    source: str = "OUTLOOK"
     sender: str
     recipients: list = Field(default_factory=list, sa_column=Column(JSON))
     cc: list = Field(default_factory=list, sa_column=Column(JSON))
     subject: str = ""
     body_text: str = Field(default="", sa_column=Column(Text))
     body_html: Optional[str] = Field(default=None, sa_column=Column(Text))
-    body_for_ai: str = Field(default="", sa_column=Column(Text))  # stripped signatures/quotes
+    body_for_ai: str = Field(default="", sa_column=Column(Text))
     received_at: datetime = Field(default_factory=utcnow, index=True)
     attachments: list = Field(default_factory=list, sa_column=Column(JSON))
     headers: dict = Field(default_factory=dict, sa_column=Column(JSON))
@@ -45,7 +55,6 @@ class Conversation(TimestampMixin, table=True):
     thread_id: str = Field(index=True)
     requester_email: str = Field(index=True)
     requester_person_id: Optional[str] = Field(default=None, foreign_key="persons.person_id")
-    # Soft reference (no FK) to avoid circular dependency with Outcome.conversation_id
     current_outcome_id: Optional[str] = Field(default=None, index=True)
     status: str = "OPEN"
     subject: str = ""
@@ -54,8 +63,6 @@ class Conversation(TimestampMixin, table=True):
 
 
 class ProcessingJob(TimestampMixin, table=True):
-    """Durable database-backed job queue."""
-
     __tablename__ = "processing_jobs"
 
     job_id: str = Field(default_factory=lambda: new_id("job_"), primary_key=True)
@@ -76,8 +83,6 @@ class ProcessingJob(TimestampMixin, table=True):
 
 
 class DownstreamAction(TimestampMixin, table=True):
-    """Tracks external/downstream actions for idempotent retries."""
-
     __tablename__ = "downstream_actions"
     __table_args__ = (UniqueConstraint("idempotency_key", name="uq_downstream_idempotency"),)
 
@@ -119,7 +124,7 @@ class HumanReviewItem(TimestampMixin, table=True):
     event_id: str = Field(foreign_key="raw_email_events.event_id", index=True)
     conversation_id: Optional[str] = Field(default=None, foreign_key="conversations.conversation_id")
     ai_decision_id: Optional[str] = Field(default=None, foreign_key="ai_decisions.decision_id")
-    status: str = "PENDING"  # PENDING, ACCEPTED, CORRECTED, CLARIFICATION, REJECTED
+    status: str = "PENDING"
     reason: Optional[str] = Field(default=None, sa_column=Column(Text))
     assigned_to: Optional[str] = Field(default=None, foreign_key="persons.person_id")
     resolution: Optional[dict] = Field(default=None, sa_column=Column(JSON))
