@@ -223,16 +223,24 @@ class HeuristicProvider(LLMProvider):
                 "need a meeting",
                 "room booking",
                 "meeting space",
+                "information required",
+                "evt-",
             ]
-        ) or (("room" in text or "meeting" in text) and any(k in text for k in ["people", "attendees", "pm", "am", "hours", "tomorrow"])):
+        ) or (
+            ("room" in text or "meeting" in text or "members" in text)
+            and any(k in text for k in ["people", "attendees", "members", "pm", "am", "hours", "tomorrow"])
+        ):
             event_type = "MEETING_ROOM"
             confidence = 0.9
             import re
 
-            m_people = re.search(r"(\d+)\s*(?:people|attendees|persons|pax)", text)
+            m_people = re.search(
+                r"(\d+)\s*(?:people|attendees|persons|pax|members)",
+                text,
+            )
             if m_people:
                 entities["attendees"] = int(m_people.group(1))
-            else:
+            elif "attendees" not in entities:
                 missing.append(
                     {
                         "field": "attendees",
@@ -241,9 +249,36 @@ class HeuristicProvider(LLMProvider):
                     }
                 )
 
+            m_date = re.search(
+                r"(\d{1,2}(?:st|nd|rd|th)?\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|"
+                r"may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|"
+                r"nov(?:ember)?|dec(?:ember)?)"
+                r"|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
+                r"aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+                r"\s+\d{1,2}(?:st|nd|rd|th)?)",
+                text,
+                re.I,
+            )
             if "tomorrow" in text:
                 entities["date"] = "tomorrow"
-            elif not any(k in text for k in ["today", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "/"]):
+            elif m_date:
+                entities["date"] = m_date.group(1).strip()
+            elif any(
+                k in text
+                for k in [
+                    "today",
+                    "monday",
+                    "tuesday",
+                    "wednesday",
+                    "thursday",
+                    "friday",
+                    "saturday",
+                    "sunday",
+                    "/",
+                ]
+            ):
+                pass  # date mentioned loosely; leave to Gemini when available
+            elif "date" not in entities:
                 missing.append(
                     {
                         "field": "date",
@@ -252,14 +287,33 @@ class HeuristicProvider(LLMProvider):
                     }
                 )
 
-            m_time = re.search(
-                r"(\d{1,2}(?::\d{2})?\s*(?:am|pm))(?:\s*(?:to|-|–|for)\s*)?",
+            m_range = re.search(
+                r"(\d{1,2}(?::\d{2})?\s*(?:am|pm))\s*(?:to|-|–)\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm))",
                 text,
                 re.I,
             )
-            if m_time:
+            m_time = re.search(r"(\d{1,2}(?::\d{2})?\s*(?:am|pm))", text, re.I)
+            if m_range:
+                entities["preferred_time"] = m_range.group(1).strip()
+                entities["end_time"] = m_range.group(2).strip()
+                # Approximate duration when both ends look like whole hours
+                try:
+                    def _hour(tok: str) -> float:
+                        tok = tok.lower().replace(" ", "")
+                        ampm = "pm" if "pm" in tok else "am"
+                        num = float(tok.replace("am", "").replace("pm", "").split(":")[0])
+                        if ampm == "pm" and num != 12:
+                            num += 12
+                        if ampm == "am" and num == 12:
+                            num = 0
+                        return num
+
+                    entities["duration_hours"] = max(0.5, _hour(m_range.group(2)) - _hour(m_range.group(1)))
+                except Exception:  # noqa: BLE001
+                    pass
+            elif m_time:
                 entities["preferred_time"] = m_time.group(1).strip()
-            elif not any(k in text for k in ["am", "pm", ":"]):
+            elif "preferred_time" not in entities and not any(k in text for k in ["am", "pm", ":"]):
                 missing.append(
                     {
                         "field": "preferred_time",
@@ -271,7 +325,7 @@ class HeuristicProvider(LLMProvider):
             m_dur = re.search(r"(\d+(?:\.\d+)?)\s*(?:hours?|hrs?)", text)
             if m_dur:
                 entities["duration_hours"] = float(m_dur.group(1))
-            else:
+            elif "duration_hours" not in entities and "end_time" not in entities:
                 missing.append(
                     {
                         "field": "duration",

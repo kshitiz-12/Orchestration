@@ -27,7 +27,7 @@ class ExtractionResult(BaseModel):
     """Structured AI output — extensible for all prototype scenarios."""
 
     event_type: str = Field(
-        description="ONBOARDING | PARKING_CONFLICT | FURNITURE_ISSUE | VENDOR_ESCALATION | INVOICE | GENERAL | UNKNOWN"
+        description="ONBOARDING | PARKING_CONFLICT | FURNITURE_ISSUE | VENDOR_ESCALATION | INVOICE | MEETING_ROOM | GENERAL | UNKNOWN"
     )
     category: str = ""
     summary: str = ""

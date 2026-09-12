@@ -20,11 +20,13 @@ def _looks_like_meeting_room(subject: str, body: str) -> bool:
         "need a meeting",
         "room booking",
         "meeting space",
+        "information required",
+        "evt-",
     ]
     if any(k in text for k in keys):
         return True
-    return ("room" in text or "meeting" in text) and any(
-        k in text for k in ["people", "attendees", "pm", "am", "hours", "tomorrow"]
+    return ("room" in text or "meeting" in text or "members" in text) and any(
+        k in text for k in ["people", "attendees", "members", "pm", "am", "hours", "tomorrow"]
     )
 
 
@@ -75,28 +77,30 @@ class LLMService:
 
     def route(self, extraction: ExtractionResult) -> ConfidenceRoutingResult:
         reasons: list[str] = []
-        route = ConfidenceRoute.AUTO
-
-        if (
+        sensitive = (
             extraction.safety_concern
             or extraction.financial_action
             or extraction.access_control_action
             or extraction.vendor_sanction
             or extraction.human_review_required
-        ):
+        )
+        has_blocking = extraction.missing_information and any(
+            m.blocking for m in extraction.missing_information
+        )
+
+        if sensitive:
             route = ConfidenceRoute.HUMAN_REQUIRED
             reasons.append("Sensitive action class requires human review")
-
-        if extraction.confidence < 0.65:
+        elif has_blocking or extraction.confidence < 0.65:
             route = ConfidenceRoute.CLARIFICATION
-            reasons.append("Confidence below 0.65")
-        elif extraction.confidence < 0.85 and route == ConfidenceRoute.AUTO:
+            if has_blocking:
+                reasons.append("Blocking missing information present")
+            if extraction.confidence < 0.65:
+                reasons.append("Confidence below 0.65")
+        elif extraction.confidence < 0.85:
             route = ConfidenceRoute.OPERATOR_REVIEW
             reasons.append("Confidence between 0.65 and 0.84")
-
-        if extraction.missing_information and any(m.blocking for m in extraction.missing_information):
-            if route == ConfidenceRoute.AUTO:
-                route = ConfidenceRoute.CLARIFICATION
-            reasons.append("Blocking missing information present")
+        else:
+            route = ConfidenceRoute.AUTO
 
         return ConfidenceRoutingResult(route=route.value, reasons=reasons, extraction=extraction)

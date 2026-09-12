@@ -3,6 +3,7 @@
 import { AppShell } from "@/components/AppShell";
 import { ReadinessBar, StatusBadge } from "@/components/Status";
 import { api } from "@/lib/api";
+import { friendlyStatus, friendlyType } from "@/lib/labels";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 
@@ -41,8 +42,8 @@ export default function OutcomesPage() {
 
   return (
     <AppShell
-      title="Outcomes"
-      subtitle="Parent business results — not tickets. Track readiness, blockers, and closure."
+      title="All requests"
+      subtitle="Every email request the system is tracking."
       actions={
         <button className="btn secondary" onClick={load} disabled={busy}>
           {busy ? "Loading…" : "Refresh"}
@@ -54,32 +55,32 @@ export default function OutcomesPage() {
         <div className="toolbar">
           <input
             className="search"
-            placeholder="Filter by case, requester, type…"
+            placeholder="Search by person, case number, or type…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
           <select className="select" value={status} onChange={(e) => setStatus(e.target.value)}>
             {statuses.map((s) => (
               <option key={s} value={s}>
-                {s === "ALL" ? "All statuses" : s}
+                {s === "ALL" ? "All statuses" : friendlyStatus(s)}
               </option>
             ))}
           </select>
         </div>
         {filtered.length === 0 ? (
           <div className="empty">
-            <strong>No matching outcomes</strong>
-            Try clearing filters or ingest a CloudMailin email.
+            <strong>No matching requests</strong>
+            Clear the search, or wait for a new email to arrive.
           </div>
         ) : (
           <table>
             <thead>
               <tr>
-                <th>Case</th>
-                <th>Type</th>
-                <th>Requester</th>
+                <th>Case #</th>
+                <th>What is it?</th>
+                <th>From</th>
                 <th>Opened</th>
-                <th>Readiness</th>
+                <th>Progress</th>
                 <th>Blockers</th>
                 <th>Status</th>
               </tr>
@@ -91,20 +92,26 @@ export default function OutcomesPage() {
                     <Link className="table-link" href={`/outcomes/${o.outcome_id}`}>
                       {o.case_reference}
                     </Link>
+                    <div className="muted" style={{ fontSize: "0.78rem", marginTop: "0.2rem" }}>
+                      {(o.title || "").slice(0, 42)}
+                      {(o.title || "").length > 42 ? "…" : ""}
+                    </div>
                   </td>
                   <td>
-                    <span className="badge">{o.template_code}</span>
+                    <span className="badge">{friendlyType(o.template_code)}</span>
                   </td>
-                  <td className="mono">{o.requester_email}</td>
+                  <td>{o.requester_email}</td>
                   <td className="muted">{new Date(o.created_at).toLocaleString()}</td>
                   <td>
                     <ReadinessBar value={o.readiness_pct} />
                   </td>
                   <td className="muted">
-                    {(o.blockers || []).map((b: any) => b.code).join(", ") || "—"}
+                    {(o.blockers || []).length
+                      ? `${(o.blockers || []).length} blocking`
+                      : "None"}
                   </td>
                   <td>
-                    <StatusBadge status={o.status} />
+                    <StatusBadge status={friendlyStatus(o.status)} />
                   </td>
                 </tr>
               ))}

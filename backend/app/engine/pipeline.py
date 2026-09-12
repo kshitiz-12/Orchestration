@@ -2,6 +2,7 @@ from typing import Optional
 
 from sqlmodel import Session, select
 
+from app.ai.gemini import HeuristicProvider
 from app.ai.service import LLMService
 from app.audit.service import AuditService
 from app.core.config import get_settings
@@ -17,11 +18,19 @@ from app.engine.scenarios import ScenarioOrchestrator
 from app.models.intake import AIDecision, Conversation, HumanReviewItem, ProcessingJob, RawEmailEvent
 from app.models.org import utcnow
 from app.connectors.factory import get_email_provider
+from app.schemas.ai import ExtractionResult, MissingInformation
 from app.services.communication import CommunicationService
 from app.services.context import ContextRetrievalService
 from app.services.intake import JobQueueService
+from app.services.thread_facts import meeting_room_gaps, merge_thread_prior_facts
 
 logger = get_logger(__name__)
+
+_PROCESSED_STAGES = {
+    ProcessingStage.COMPLETED.value,
+    ProcessingStage.COMMUNICATION.value,
+    ProcessingStage.HUMAN_REVIEW.value,
+}
 
 
 class ProcessingPipeline:
@@ -43,10 +52,26 @@ class ProcessingPipeline:
         self.scenarios = ScenarioOrchestrator(session, tenant_id, self.comms)
         self.settings = get_settings()
 
-    def process_event(self, event_id: str) -> dict:
+    def process_event(self, event_id: str, *, force: bool = False) -> dict:
         event = self.session.get(RawEmailEvent, event_id)
         if not event:
             raise ValueError(f"Event not found: {event_id}")
+
+        if not force and event.processing_stage in _PROCESSED_STAGES:
+            outcome_id = None
+            if event.conversation_id:
+                from app.models.outcome import Outcome
+
+                existing = self.session.exec(
+                    select(Outcome).where(Outcome.conversation_id == event.conversation_id)
+                ).first()
+                outcome_id = existing.outcome_id if existing else None
+            return {
+                "status": "already_processed",
+                "stage": event.processing_stage,
+                "event_id": event.event_id,
+                "outcome_id": outcome_id,
+            }
 
         event.processing_stage = ProcessingStage.AI_INTERPRETATION.value
         self.session.add(event)
@@ -56,8 +81,17 @@ class ProcessingPipeline:
         event.conversation_id = conversation.conversation_id
         self.session.add(event)
 
+        prior_facts = merge_thread_prior_facts(
+            self.session,
+            tenant_id=self.tenant_id,
+            conversation=conversation,
+            exclude_event_id=event.event_id,
+        )
+        # Keep any already-stored conversation facts
+        prior_facts = {**(conversation.facts or {}), **prior_facts}
+
         # Light context for first-pass extraction (requester only)
-        preliminary_ctx = self.context.for_extraction(None, event.sender, conversation.facts or {})
+        preliminary_ctx = self.context.for_extraction(None, event.sender, prior_facts)
 
         extraction = self.llm.extract(
             subject=event.subject,
@@ -65,9 +99,10 @@ class ProcessingPipeline:
             attachment_summaries=[
                 a.get("filename", "") for a in (event.attachments or []) if a.get("validation", {}).get("allowed", True)
             ],
-            prior_facts=conversation.facts or {},
+            prior_facts=prior_facts,
             allowed_context=preliminary_ctx,
         )
+        extraction = self._enrich_with_thread_facts(extraction, prior_facts, event)
 
         # Second-pass: relevant context based on detected event type
         relevant_ctx = self.context.for_extraction(
@@ -82,9 +117,10 @@ class ProcessingPipeline:
                     for a in (event.attachments or [])
                     if a.get("validation", {}).get("allowed", True)
                 ],
-                prior_facts=conversation.facts or {},
+                prior_facts=prior_facts,
                 allowed_context=relevant_ctx,
             )
+            extraction = self._enrich_with_thread_facts(extraction, prior_facts, event)
 
         routing = self.llm.route(extraction)
         decision = AIDecision(
@@ -118,10 +154,13 @@ class ProcessingPipeline:
         )
 
         # Merge facts into conversation (reply path — same outcome)
-        conversation.facts = {**(conversation.facts or {}), **extraction.entities}
-        conversation.missing_information = [m.model_dump() for m in extraction.missing_information]
-        if extraction.missing_information and any(m.blocking for m in extraction.missing_information):
+        conversation.facts = {**prior_facts, **(extraction.entities or {})}
+        missing_list = [m.model_dump() for m in extraction.missing_information]
+        conversation.missing_information = missing_list
+        if missing_list and any(m.get("blocking", True) for m in missing_list):
             conversation.status = ConversationStatus.AWAITING_INFORMATION.value
+        elif conversation.status == ConversationStatus.AWAITING_INFORMATION.value:
+            conversation.status = ConversationStatus.ACTIVE.value
         self.session.add(conversation)
 
         if event.safety_flags.get("bank_change_mentioned"):
@@ -247,9 +286,13 @@ class ProcessingPipeline:
         if existing:
             return existing
 
-        # Fallback: subject contains [EVT-2026-0006] from clarification replies
+        # Fallback: subject contains [EVT-2026-0006] / [ROOM-2026-0001] from clarification replies
         subject = event.subject or ""
-        m = re.search(r"\[(EVT-\d{4}-\d+)\]", subject, re.I)
+        m = re.search(
+            r"\[((?:EVT|ROOM|ONB|PARK|FURN|VND|INV)-\d{4}-\d+)\]",
+            subject,
+            re.I,
+        )
         if m:
             from app.models.outcome import Outcome
 
@@ -308,6 +351,53 @@ class ProcessingPipeline:
         )
         self.session.flush()
         return item
+
+    def _enrich_with_thread_facts(
+        self,
+        extraction: ExtractionResult,
+        prior_facts: dict,
+        event: RawEmailEvent,
+    ) -> ExtractionResult:
+        """Merge prior thread facts and recompute meeting-room gaps for short replies."""
+        subject = event.subject or ""
+        body = event.body_for_ai or event.body_text or ""
+        merged = {**(prior_facts or {}), **(extraction.entities or {})}
+
+        # Always run heuristic over current mail with prior facts for meeting-room threads
+        looks_meeting = (
+            extraction.event_type == "MEETING_ROOM"
+            or "information required" in subject.lower()
+            or "meeting" in subject.lower()
+            or "room" in (subject + body).lower()
+            or any(k in merged for k in ("attendees", "preferred_time", "duration_hours"))
+        )
+        if looks_meeting:
+            heuristic = HeuristicProvider().extract(
+                subject=subject,
+                body=body,
+                prior_facts=merged,
+            )
+            if heuristic.event_type == "MEETING_ROOM" or looks_meeting:
+                extraction.event_type = "MEETING_ROOM"
+                extraction.category = "MEETING_ROOM"
+            for key, value in (heuristic.entities or {}).items():
+                if value is not None and value != "":
+                    merged[key] = value
+
+            gaps = meeting_room_gaps(merged)
+            extraction.entities = merged
+            extraction.missing_information = [MissingInformation(**g) for g in gaps]
+            extraction.clarification_questions = [g["question"] for g in gaps]
+            if not gaps:
+                extraction.confidence = max(extraction.confidence, 0.9)
+                extraction.human_review_required = False
+                extraction.recommended_next_action = "route_to_outcome_engine"
+                extraction.reason = (extraction.reason or "") + " | thread facts complete for meeting room"
+            else:
+                extraction.recommended_next_action = "clarification"
+        else:
+            extraction.entities = merged
+        return extraction
 
 
 def process_claimed_job(session: Session, job: ProcessingJob, tenant_id: str) -> None:

@@ -101,6 +101,11 @@ class OutcomeEngine:
                 existing.summary = summary or existing.summary
                 existing.updated_at = utcnow()
                 self.session.add(existing)
+                if conversation_id:
+                    conv = self.session.get(Conversation, conversation_id)
+                    if conv:
+                        conv.current_outcome_id = existing.outcome_id
+                        self.session.add(conv)
                 self.audit.record(
                     tenant_id=self.tenant_id,
                     actor=actor,

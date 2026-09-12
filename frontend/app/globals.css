@@ -255,6 +255,52 @@ button, input, select, textarea { font: inherit; }
   line-height: 1.4;
 }
 
+.next-card {
+  display: grid;
+  gap: 0.25rem;
+  padding: 0.9rem 1rem;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: #fff;
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+
+.next-card:hover {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
+.next-card strong {
+  font-family: var(--font-display);
+  font-size: 1rem;
+  letter-spacing: -0.02em;
+}
+
+.next-card span {
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.4;
+}
+
+.next-card.tone-warn {
+  background: var(--warn-soft);
+  border-color: #fdba74;
+}
+
+.next-card.tone-danger {
+  background: var(--danger-soft);
+  border-color: #fecdd3;
+}
+
+.next-card.tone-ok {
+  background: var(--ok-soft);
+  border-color: #86efac;
+}
+
+.next-card.tone-neutral {
+  background: #f8fafc;
+}
+
 .panel {
   padding: 1.15rem 1.2rem;
 }

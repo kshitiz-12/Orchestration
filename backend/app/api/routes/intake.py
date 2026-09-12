@@ -34,12 +34,18 @@ def ingest_email(
 
 
 @router.post("/emails/{event_id}/process")
-def process_email_now(event_id: str, session: SessionDep, tenant_id: TenantDep, _user: UserDep):
+def process_email_now(
+    event_id: str,
+    session: SessionDep,
+    tenant_id: TenantDep,
+    _user: UserDep,
+    force: bool = False,
+):
     event = session.get(RawEmailEvent, event_id)
     if not event:
         raise HTTPException(404, "Event not found")
     pipeline = ProcessingPipeline(session, tenant_id)
-    return pipeline.process_event(event_id)
+    return pipeline.process_event(event_id, force=force)
 
 
 @router.get("/emails")

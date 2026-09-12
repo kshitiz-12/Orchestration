@@ -7,28 +7,28 @@ import { useEffect, useState } from "react";
 
 const GROUPS = [
   {
-    label: "Overview",
-    links: [{ href: "/", label: "Operations" }],
+    label: "Start here",
+    links: [{ href: "/", label: "Home" }],
   },
   {
-    label: "Intake",
-    links: [{ href: "/email", label: "CloudMailin" }],
-  },
-  {
-    label: "Work",
+    label: "Daily work",
     links: [
-      { href: "/outcomes", label: "Outcomes" },
-      { href: "/reviews", label: "Human review" },
-      { href: "/tasks", label: "Tasks" },
-      { href: "/resources", label: "Resources" },
-      { href: "/invoices", label: "Invoices" },
+      { href: "/reviews", label: "Needs your decision" },
+      { href: "/outcomes", label: "All requests" },
+      { href: "/tasks", label: "Team tasks" },
     ],
   },
   {
-    label: "System",
+    label: "Email",
+    links: [{ href: "/email", label: "Email intake" }],
+  },
+  {
+    label: "More",
     links: [
-      { href: "/failures", label: "Failures" },
-      { href: "/config", label: "Configuration" },
+      { href: "/resources", label: "Rooms & seats" },
+      { href: "/invoices", label: "Invoices" },
+      { href: "/failures", label: "Problems" },
+      { href: "/config", label: "Settings" },
     ],
   },
 ];
@@ -91,7 +91,7 @@ export function AppShell({
           <h1 className="brand">
             Outcome <span>Orchestrate</span>
           </h1>
-          <div className="brand-sub">Email → AI → governed outcomes</div>
+          <div className="brand-sub">Email requests → clear next steps</div>
         </div>
 
         {GROUPS.map((g) => (
@@ -109,12 +109,14 @@ export function AppShell({
           <div className="panel" style={{ padding: "0.75rem 0.85rem", marginBottom: "0.75rem" }}>
             <div className="row" style={{ gap: "0.45rem" }}>
               <span className={`live-dot ${mailin?.smtp_configured ? "" : "off"}`} />
-              <strong style={{ fontSize: "0.82rem" }}>CloudMailin</strong>
+              <strong style={{ fontSize: "0.82rem" }}>Email</strong>
             </div>
             <div className="muted" style={{ fontSize: "0.75rem", marginTop: "0.35rem" }}>
-              {mailin?.address || "Address not set"}
+              {mailin?.address || "Intake address not set"}
               <br />
-              {mailin?.smtp_configured ? "SMTP replies on" : "Inbound only"}
+              {mailin?.can_send_replies || mailin?.smtp_configured
+                ? "Can send replies"
+                : "Receiving only"}
             </div>
           </div>
           <button

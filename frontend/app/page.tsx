@@ -3,6 +3,7 @@
 import { AppShell } from "@/components/AppShell";
 import { ReadinessBar, StatusBadge } from "@/components/Status";
 import { api } from "@/lib/api";
+import { friendlyStatus, friendlyType } from "@/lib/labels";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 
@@ -44,19 +45,58 @@ export default function HomePage() {
       .some((v) => String(v).toLowerCase().includes(q));
   });
 
-  const kpiCards = [
-    { label: "Active outcomes", value: kpis?.outcomes_active, href: "/outcomes", hint: "Open cases" },
-    { label: "At risk", value: kpis?.at_risk, href: "/outcomes", hint: "Needs attention" },
-    { label: "Overdue tasks", value: kpis?.overdue_tasks, href: "/tasks", hint: "Past due" },
-    { label: "Approvals", value: kpis?.pending_approvals, href: "/reviews", hint: "Waiting humans" },
-    { label: "Human reviews", value: kpis?.human_reviews, href: "/reviews", hint: "AI queue" },
-    { label: "Failures", value: kpis?.failures, href: "/failures", hint: "Reprocess" },
-  ];
+  const waitingYou = Number(kpis?.human_reviews || 0) + Number(kpis?.pending_approvals || 0);
+  const late = Number(kpis?.overdue_tasks || 0);
+  const problems = Number(kpis?.failures || 0);
+  const openCases = Number(kpis?.outcomes_active || 0);
+  const needsAttention = Number(kpis?.at_risk || 0);
+
+  const nextSteps: { title: string; detail: string; href: string; tone: "warn" | "danger" | "ok" | "neutral" }[] = [];
+  if (waitingYou > 0) {
+    nextSteps.push({
+      title: `${waitingYou} item${waitingYou === 1 ? "" : "s"} waiting for your decision`,
+      detail: "Open these first — the system paused until someone confirms.",
+      href: "/reviews",
+      tone: "warn",
+    });
+  }
+  if (late > 0) {
+    nextSteps.push({
+      title: `${late} late task${late === 1 ? "" : "s"}`,
+      detail: "Someone still needs to finish work on these requests.",
+      href: "/tasks",
+      tone: "warn",
+    });
+  }
+  if (problems > 0) {
+    nextSteps.push({
+      title: `${problems} processing problem${problems === 1 ? "" : "s"}`,
+      detail: "An email or job failed. Tech can retry from Failures.",
+      href: "/failures",
+      tone: "danger",
+    });
+  }
+  if (nextSteps.length === 0 && openCases > 0) {
+    nextSteps.push({
+      title: "Nothing urgent right now",
+      detail: `${openCases} open request${openCases === 1 ? "" : "s"} are moving along.`,
+      href: "/outcomes",
+      tone: "ok",
+    });
+  }
+  if (nextSteps.length === 0) {
+    nextSteps.push({
+      title: "No open requests yet",
+      detail: "When someone emails the intake address, their request will show up here.",
+      href: "/email",
+      tone: "neutral",
+    });
+  }
 
   return (
     <AppShell
-      title="Operations"
-      subtitle="Live view of email intake, AI interpretation, and governed outcomes."
+      title="Home"
+      subtitle="See what needs your attention, then open the request."
       actions={
         <>
           <span className="muted" style={{ fontSize: "0.82rem" }}>
@@ -65,89 +105,113 @@ export default function HomePage() {
           <button className="btn secondary" onClick={load} disabled={busy}>
             {busy ? "Refreshing…" : "Refresh"}
           </button>
-          <Link className="btn accent" href="/email">
-            CloudMailin
-          </Link>
         </>
       }
     >
       {error && (
         <div className="panel" style={{ marginBottom: "1rem", borderColor: "#fecdd3" }}>
-          <strong style={{ color: "var(--danger)" }}>Could not load dashboard</strong>
+          <strong style={{ color: "var(--danger)" }}>Couldn’t load the page</strong>
           <p className="muted" style={{ margin: "0.35rem 0 0" }}>{error}</p>
           <button className="btn secondary" style={{ marginTop: "0.75rem" }} onClick={load}>
-            Retry
+            Try again
           </button>
         </div>
       )}
 
       {busy && !kpis && !error && (
         <div className="panel" style={{ marginBottom: "1rem" }}>
-          <strong>Loading from Render…</strong>
+          <strong>Loading…</strong>
           <p className="muted" style={{ margin: "0.35rem 0 0" }}>
-            Free tier may take 30–60s to wake. Keep this tab open.
+            First load can take up to a minute if the server was asleep.
           </p>
         </div>
       )}
 
+      <div className="panel next-panel" style={{ marginBottom: "1.1rem" }}>
+        <div className="panel-head">
+          <h2>What should I do next?</h2>
+        </div>
+        <div className="stack">
+          {nextSteps.map((step) => (
+            <Link key={step.title} href={step.href} className={`next-card tone-${step.tone}`}>
+              <strong>{step.title}</strong>
+              <span>{step.detail}</span>
+            </Link>
+          ))}
+        </div>
+      </div>
+
       <div className="grid kpis">
-        {kpiCards.map((k) => (
-          <Link key={k.label} href={k.href} className="kpi clickable">
-            <div className="label">{k.label}</div>
-            <div className="value">{k.value ?? "—"}</div>
-            <div className="hint">{k.hint}</div>
-          </Link>
-        ))}
+        <Link href="/outcomes" className="kpi clickable">
+          <div className="label">Open requests</div>
+          <div className="value">{openCases || "—"}</div>
+          <div className="hint">Cases still being handled</div>
+        </Link>
+        <Link href="/outcomes" className="kpi clickable">
+          <div className="label">Need attention</div>
+          <div className="value">{needsAttention || "—"}</div>
+          <div className="hint">At risk or stuck</div>
+        </Link>
+        <Link href="/reviews" className="kpi clickable">
+          <div className="label">Waiting on you</div>
+          <div className="value">{waitingYou || "—"}</div>
+          <div className="hint">Approve or ask for more info</div>
+        </Link>
+        <Link href="/tasks" className="kpi clickable">
+          <div className="label">Late work</div>
+          <div className="value">{late || "—"}</div>
+          <div className="hint">Tasks past their due time</div>
+        </Link>
       </div>
 
       <div className="grid actions">
-        <Link href="/email" className="action-tile">
-          <strong>Ingest email</strong>
-          <span>CloudMailin webhook status, SMTP replies, and setup checklist.</span>
-        </Link>
         <Link href="/reviews" className="action-tile">
-          <strong>Clear review queue</strong>
-          <span>Accept, clarify, or reject low-confidence AI interpretations.</span>
+          <strong>Decide on pending items</strong>
+          <span>Approve, ask a follow-up question, or reject.</span>
         </Link>
         <Link href="/outcomes" className="action-tile">
-          <strong>Browse outcomes</strong>
-          <span>Parent business results with readiness, blockers, and audit.</span>
+          <strong>Browse all requests</strong>
+          <span>See every case, emails, and progress.</span>
         </Link>
-        <Link href="/failures" className="action-tile">
-          <strong>Failure console</strong>
-          <span>Inspect failed processing jobs and retry safely.</span>
+        <Link href="/email" className="action-tile">
+          <strong>Email intake</strong>
+          <span>Check the address people mail into.</span>
+        </Link>
+        <Link href="/tasks" className="action-tile">
+          <strong>Team tasks</strong>
+          <span>Work assigned to operators.</span>
         </Link>
       </div>
 
       <div className="panel">
         <div className="panel-head">
-          <h2>Recent cases</h2>
+          <h2>Recent requests</h2>
           <Link href="/outcomes" className="btn ghost">
-            View all
+            See all
           </Link>
         </div>
         <div className="toolbar">
           <input
             className="search"
-            placeholder="Search case, requester, type, status…"
+            placeholder="Search by person, case number, or type…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
         </div>
         {filtered.length === 0 ? (
           <div className="empty">
-            <strong>No cases yet</strong>
-            Send mail to your CloudMailin address to create the first outcome.
+            <strong>No requests yet</strong>
+            When someone emails the intake address, their request appears here.
           </div>
         ) : (
           <table>
             <thead>
               <tr>
-                <th>Case</th>
-                <th>Type</th>
-                <th>Requester</th>
+                <th>Case #</th>
+                <th>What is it?</th>
+                <th>From</th>
                 <th>Status</th>
-                <th>Readiness</th>
+                <th>Progress</th>
               </tr>
             </thead>
             <tbody>
@@ -157,13 +221,17 @@ export default function HomePage() {
                     <Link className="table-link" href={`/outcomes/${o.outcome_id}`}>
                       {o.case_reference}
                     </Link>
+                    <div className="muted" style={{ fontSize: "0.78rem", marginTop: "0.2rem" }}>
+                      {(o.title || "").slice(0, 48)}
+                      {(o.title || "").length > 48 ? "…" : ""}
+                    </div>
                   </td>
                   <td>
-                    <span className="badge">{o.template_code}</span>
+                    <span className="badge">{friendlyType(o.template_code)}</span>
                   </td>
-                  <td className="mono">{o.requester_email}</td>
+                  <td>{o.requester_email}</td>
                   <td>
-                    <StatusBadge status={o.status} />
+                    <StatusBadge status={friendlyStatus(o.status)} />
                   </td>
                   <td>
                     <ReadinessBar value={o.readiness_pct} />

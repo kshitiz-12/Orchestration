@@ -1,8 +1,11 @@
 export function statusTone(status?: string): "ok" | "warn" | "danger" | "accent" | "" {
-  const s = (status || "").toUpperCase();
-  if (["CLOSED", "COMPLETED", "VERIFIED", "ACCEPTED", "DONE", "ACTIVE_OK"].includes(s)) return "ok";
-  if (["PENDING", "IN_PROGRESS", "QUEUED", "CLARIFICATION", "WAITING", "DRAFT"].includes(s)) return "warn";
-  if (["FAILED", "REJECTED", "BLOCKED", "OVERDUE", "ERROR"].includes(s)) return "danger";
+  const s = (status || "").toUpperCase().replace(/\s+/g, "_");
+  if (["CLOSED", "COMPLETED", "VERIFIED", "ACCEPTED", "DONE", "ACTIVE_OK", "DONE"].includes(s)) return "ok";
+  if (
+    ["PENDING", "IN_PROGRESS", "QUEUED", "CLARIFICATION", "WAITING", "DRAFT", "ACTIVE"].includes(s)
+  )
+    return "warn";
+  if (["FAILED", "REJECTED", "BLOCKED", "OVERDUE", "ERROR", "CANCELLED"].includes(s)) return "danger";
   if (["AT_RISK", "REVIEW", "HUMAN_REVIEW"].includes(s)) return "accent";
   return "";
 }

@@ -48,10 +48,27 @@ def _default_tenant_id(session) -> str:
     return tenant.tenant_id
 
 
-def _process_event_background(event_id: str, tenant_id: str) -> None:
+def _process_event_background(event_id: str, tenant_id: str, job_id: Optional[str] = None) -> None:
     try:
         with Session(get_engine()) as session:
+            from app.models.intake import ProcessingJob
+            from app.core.enums import JobStatus
+            from app.services.intake import JobQueueService
+
+            queue = JobQueueService(session)
+            job = session.get(ProcessingJob, job_id) if job_id else None
+            if job and job.status == JobStatus.PENDING.value:
+                job.status = JobStatus.RUNNING.value
+                job.locked_at = __import__("app.models.org", fromlist=["utcnow"]).utcnow()
+                session.add(job)
+                session.commit()
+
             result = ProcessingPipeline(session, tenant_id).process_event(event_id)
+            if job:
+                job = session.get(ProcessingJob, job.job_id)
+                if job and job.status in {JobStatus.PENDING.value, JobStatus.RUNNING.value}:
+                    job.payload = {**(job.payload or {}), "result": result}
+                    queue.succeed(job)
             logger.info(
                 "cloudmailin_background_processed",
                 event_id=event_id,
@@ -60,6 +77,23 @@ def _process_event_background(event_id: str, tenant_id: str) -> None:
             )
     except Exception as exc:  # noqa: BLE001
         logger.exception("cloudmailin_background_failed", event_id=event_id, error=str(exc))
+        if job_id:
+            try:
+                with Session(get_engine()) as session:
+                    from app.models.intake import ProcessingJob
+                    from app.core.config import get_settings
+                    from app.services.intake import JobQueueService
+
+                    job = session.get(ProcessingJob, job_id)
+                    if job:
+                        JobQueueService(session).fail(
+                            job,
+                            str(exc),
+                            max_attempts=get_settings().worker_max_retries,
+                            base_delay=get_settings().worker_retry_base_seconds,
+                        )
+            except Exception:  # noqa: BLE001
+                logger.exception("cloudmailin_job_fail_mark_failed", job_id=job_id)
 
 
 @router.get("/cloudmailin")
@@ -162,7 +196,12 @@ async def cloudmailin_inbound(
 
     queued = False
     if process and ingested.get("status") == "queued" and ingested.get("event_id"):
-        background_tasks.add_task(_process_event_background, ingested["event_id"], tenant_id)
+        background_tasks.add_task(
+            _process_event_background,
+            ingested["event_id"],
+            tenant_id,
+            ingested.get("job_id"),
+        )
         queued = True
 
     return {

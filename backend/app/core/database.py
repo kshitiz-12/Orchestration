@@ -163,12 +163,15 @@ def ensure_seeded() -> None:
         return
     from sqlmodel import select
 
+    from app.engine.scenarios import ensure_meeting_room_template
     from app.models.org import Tenant
     from scripts.seed import seed
 
     with Session(get_engine()) as session:
         existing = session.exec(select(Tenant)).first()
         if existing:
+            ensure_meeting_room_template(session, existing.tenant_id)
+            session.commit()
             logger.info("seed_skipped_tenant_exists", tenant_id=existing.tenant_id)
             return
         tid = seed(session)

@@ -102,8 +102,24 @@ def get_outcome(outcome_id: str, session: SessionDep, tenant_id: TenantDep, _use
         .limit(200)
     ).all()
     email = session.get(RawEmailEvent, outcome.business_event_id) if outcome.business_event_id else None
+    thread_emails: list = []
+    if outcome.conversation_id:
+        thread_emails = session.exec(
+            select(RawEmailEvent)
+            .where(RawEmailEvent.conversation_id == outcome.conversation_id)
+            .order_by(RawEmailEvent.created_at.desc())  # type: ignore
+            .limit(20)
+        ).all()
+        if not email and thread_emails:
+            email = thread_emails[0]
     ai = None
-    if email:
+    if outcome.conversation_id:
+        ai = session.exec(
+            select(AIDecision)
+            .where(AIDecision.conversation_id == outcome.conversation_id)
+            .order_by(AIDecision.created_at.desc())  # type: ignore
+        ).first()
+    if not ai and email:
         ai = session.exec(
             select(AIDecision).where(AIDecision.event_id == email.event_id).order_by(AIDecision.created_at.desc())  # type: ignore
         ).first()
@@ -115,10 +131,11 @@ def get_outcome(outcome_id: str, session: SessionDep, tenant_id: TenantDep, _use
         "approvals": approvals,
         "exceptions": exceptions,
         "evidence": evidence,
-        "communications": communications,
+        "communications": sorted(communications, key=lambda c: c.created_at or c.sent_at, reverse=True),
         "vendor_issues": vendor_issues,
         "audit": audit,
         "email": email,
+        "thread_emails": thread_emails,
         "ai_decision": ai,
         "conversation": conversation,
     }
@@ -167,7 +184,7 @@ def resend_clarification(outcome_id: str, session: SessionDep, tenant_id: Tenant
     if not sender or not getattr(sender, "can_send", sender.is_connected)():
         raise HTTPException(
             400,
-            "Outbound email not configured. Set OUTBOUND_SMTP_USERNAME + OUTBOUND_SMTP_PASSWORD (Gmail App Password).",
+            "Outbound email is not configured. Set CLOUDMAILIN_SMTP_URL and CLOUDMAILIN_FROM_EMAIL on the server.",
         )
 
     latest = session.exec(
@@ -187,7 +204,7 @@ def resend_clarification(outcome_id: str, session: SessionDep, tenant_id: Tenant
         body=(
             "We need a few details to continue processing your request:\n\n"
             + "\n".join(f"- {q}" for q in questions)
-            + "\n\nPlease reply to this email thread."
+            + "\n\nPlease reply to this email (use Reply so it stays on the same request)."
         ),
         conversation_id=conversation.conversation_id,
         outcome_id=outcome.outcome_id,

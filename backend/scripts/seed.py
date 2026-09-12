@@ -394,6 +394,25 @@ def seed(session: Session) -> str:
     session.add(
         OutcomeTemplate(
             tenant_id=tid,
+            code="MEETING_ROOM",
+            name="Meeting room booking",
+            category="MEETING_ROOM",
+            case_prefix="ROOM",
+            requirements=[{"code": "BOOKING", "title": "Confirm meeting room booking details", "is_mandatory": True}],
+            tasks=[
+                {
+                    "code": "RESERVE_ROOM",
+                    "title": "Reserve meeting room",
+                    "owner_role": "OPERATOR",
+                    "task_group": "Ops",
+                    "requirement_code": "BOOKING",
+                },
+            ],
+        )
+    )
+    session.add(
+        OutcomeTemplate(
+            tenant_id=tid,
             code="GENERAL",
             name="General request",
             category="GENERAL",

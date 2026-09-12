@@ -17,8 +17,44 @@ EVENT_TO_TEMPLATE = {
     "FURNITURE_ISSUE": "FURNITURE_ISSUE",
     "VENDOR_ESCALATION": "VENDOR_ESCALATION",
     "INVOICE": "INVOICE",
+    "MEETING_ROOM": "MEETING_ROOM",
     "GENERAL": "GENERAL",
 }
+
+MEETING_ROOM_TEMPLATE = {
+    "code": "MEETING_ROOM",
+    "name": "Meeting room booking",
+    "category": "MEETING_ROOM",
+    "case_prefix": "ROOM",
+    "requirements": [
+        {"code": "BOOKING", "title": "Confirm meeting room booking details", "is_mandatory": True},
+    ],
+    "tasks": [
+        {
+            "code": "RESERVE_ROOM",
+            "title": "Reserve meeting room",
+            "owner_role": "OPERATOR",
+            "task_group": "Ops",
+            "requirement_code": "BOOKING",
+        },
+    ],
+}
+
+
+def ensure_meeting_room_template(session: Session, tenant_id: str) -> None:
+    """Idempotent — existing Supabase tenants won't re-run full seed."""
+    from app.models.org import OutcomeTemplate
+
+    existing = session.exec(
+        select(OutcomeTemplate).where(
+            OutcomeTemplate.tenant_id == tenant_id,
+            OutcomeTemplate.code == "MEETING_ROOM",
+        )
+    ).first()
+    if existing:
+        return
+    session.add(OutcomeTemplate(tenant_id=tenant_id, **MEETING_ROOM_TEMPLATE))
+    session.flush()
 
 
 class ScenarioOrchestrator:
@@ -39,6 +75,7 @@ class ScenarioOrchestrator:
         business_event_id: str,
         context: dict[str, Any],
     ) -> Outcome:
+        ensure_meeting_room_template(self.session, self.tenant_id)
         template = EVENT_TO_TEMPLATE.get(extraction.event_type, "GENERAL")
         facts = dict(extraction.entities)
         facts["issues"] = [i.model_dump() for i in extraction.issues]
@@ -63,10 +100,29 @@ class ScenarioOrchestrator:
             self._scenario_c(outcome, extraction)
         elif template == "INVOICE":
             self._scenario_d(outcome, facts, context, extraction)
+        elif template == "MEETING_ROOM":
+            self._scenario_meeting_room(outcome, facts)
 
         self.session.commit()
         self.session.refresh(outcome)
         return outcome
+
+    def _scenario_meeting_room(self, outcome: Outcome, facts: dict) -> None:
+        """Meeting room: facts captured; ops reserves when complete."""
+        attendees = facts.get("attendees")
+        when = facts.get("date")
+        start = facts.get("preferred_time") or facts.get("time_window")
+        duration = facts.get("duration_hours")
+        end = facts.get("end_time")
+        if attendees and when and (start or end or duration):
+            # Mark booking requirement progressing via readiness recompute only
+            outcome.summary = (
+                f"Meeting room for {attendees} on {when}"
+                + (f" at {start}" if start else "")
+                + (f"–{end}" if end else "")
+                + (f" ({duration}h)" if duration else "")
+            )
+            self.session.add(outcome)
 
     def _scenario_a(self, outcome: Outcome, facts: dict, context: dict) -> None:
         available = context.get("available_seats_count", 0)

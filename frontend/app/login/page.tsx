@@ -30,15 +30,15 @@ export default function LoginPage() {
       <section className="login-hero">
         <h1>Outcome Orchestrate</h1>
         <p>
-          Turn unstructured email into governed business outcomes — with AI interpretation, rules,
-          human review, and auditable execution.
+          Emails become clear requests your team can track, reply to, and finish —
+          without digging through inboxes.
         </p>
       </section>
       <section className="login-side">
         <form className="login-card" onSubmit={onSubmit}>
           <h2>Sign in</h2>
           <p className="muted" style={{ marginBottom: "1.25rem" }}>
-            Prototype operations console
+            Operations console
           </p>
           <div className="field">
             <label>Email</label>
