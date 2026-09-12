@@ -230,6 +230,8 @@ class ProcessingPipeline:
         }
 
     def _get_or_create_conversation(self, event: RawEmailEvent) -> Conversation:
+        import re
+
         thread_id = (
             event.provider_conversation_id
             or event.gmail_thread_id
@@ -244,6 +246,30 @@ class ProcessingPipeline:
         ).first()
         if existing:
             return existing
+
+        # Fallback: subject contains [EVT-2026-0006] from clarification replies
+        subject = event.subject or ""
+        m = re.search(r"\[(EVT-\d{4}-\d+)\]", subject, re.I)
+        if m:
+            from app.models.outcome import Outcome
+
+            case_ref = m.group(1).upper()
+            outcome = self.session.exec(
+                select(Outcome).where(
+                    Outcome.tenant_id == self.tenant_id,
+                    Outcome.case_reference == case_ref,
+                )
+            ).first()
+            if outcome and outcome.conversation_id:
+                linked = self.session.get(Conversation, outcome.conversation_id)
+                if linked:
+                    logger.info(
+                        "conversation_linked_by_case_reference",
+                        case_reference=case_ref,
+                        conversation_id=linked.conversation_id,
+                    )
+                    return linked
+
         from app.models.org import Person
 
         person = self.session.exec(

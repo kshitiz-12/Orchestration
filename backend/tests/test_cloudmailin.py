@@ -52,6 +52,25 @@ def test_continuation_uses_in_reply_to_thread():
     assert event.provider_conversation_id == "<abc123@example.com>"
 
 
+def test_continuation_prefers_references_root_over_clarification_id():
+    """Reply to our outbound clarification must stay on the original thread."""
+    reply = {
+        **SAMPLE,
+        "headers": {
+            "message_id": "<gmail-reply@mail.gmail.com>",
+            "in_reply_to": "<clarification-id@cloudmta.net>",
+            "references": "<abc123@example.com> <clarification-id@cloudmta.net>",
+            "subject": "Re: [INFORMATION REQUIRED] [EVT-2026-0006] Additional details needed",
+            "from": "alice@example.com",
+            "to": "inbox@demo.cloudmailin.net",
+        },
+        "plain": "10 members will be there",
+        "reply_plain": "10 members will be there",
+    }
+    event = normalize_cloudmailin_payload(reply)
+    assert event.provider_conversation_id == "<abc123@example.com>"
+
+
 def test_cloudmailin_ingest_idempotent(session):
     tid = session.exec(select(Tenant)).first().tenant_id
     intake = IntakeService(session, tid)

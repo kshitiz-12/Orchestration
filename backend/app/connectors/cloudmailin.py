@@ -60,14 +60,20 @@ def _parse_addr_list(raw: Optional[str]) -> list[str]:
 
 
 def _thread_key(headers: dict[str, Any], message_id: str) -> str:
-    in_reply = _header(headers, "in_reply_to", "In-Reply-To")
-    if in_reply:
-        return in_reply.strip()
+    """Stable conversation key for the email thread.
+
+    Prefer the *root* of References (first Message-ID), not In-Reply-To.
+    In-Reply-To points at our clarification Message-ID and would start a new
+    conversation on every reply.
+    """
     refs = _header(headers, "references", "References")
     if refs:
         tokens = refs.replace(",", " ").split()
         if tokens:
             return tokens[0].strip()
+    in_reply = _header(headers, "in_reply_to", "In-Reply-To")
+    if in_reply:
+        return in_reply.strip()
     return message_id
 
 
