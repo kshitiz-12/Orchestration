@@ -81,7 +81,7 @@ class CommunicationService:
                 logger.warning(
                     "email_sender_not_attached",
                     key=key,
-                    hint="Communication stored only — configure CLOUDMAILIN_SMTP_URL for live replies",
+                    hint="Communication stored only — configure CLOUDMAILIN_SMTP_URL + verified FROM for live replies",
                 )
             self.audit.record(
                 tenant_id=self.tenant_id,

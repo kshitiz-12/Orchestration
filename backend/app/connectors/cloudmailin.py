@@ -203,11 +203,11 @@ class CloudMailinProvider(EmailProvider):
         return None
 
     def _send_config(self) -> Optional[dict[str, Any]]:
-        # Prefer Gmail/outbound SMTP so replies reach real inboxes
-        return self._outbound_gmail_config() or self._cloudmailin_smtp_config()
+        # Prefer CloudMailin (HTTPS API works on Render). Gmail SMTP is local fallback.
+        return self._cloudmailin_smtp_config() or self._outbound_gmail_config()
 
     def is_connected(self) -> bool:
-        """True when live outbound send is configured (Gmail App Password or CloudMailin)."""
+        """True when live outbound send is configured (CloudMailin or Gmail App Password)."""
         return self.can_send()
 
     def can_send(self) -> bool:
@@ -217,12 +217,12 @@ class CloudMailinProvider(EmailProvider):
         return bool((self.settings.cloudmailin_address or "").strip())
 
     def get_account_email(self) -> Optional[str]:
-        gmail = self._outbound_gmail_config()
-        if gmail and gmail.get("from_addr"):
-            return gmail["from_addr"]
+        cfg = self._send_config()
+        if cfg and cfg.get("from_addr"):
+            return cfg["from_addr"]
         return (
-            (self.settings.outbound_smtp_from or "").strip()
-            or (self.settings.cloudmailin_from_email or "").strip()
+            (self.settings.cloudmailin_from_email or "").strip()
+            or (self.settings.outbound_smtp_from or "").strip()
             or (self.settings.cloudmailin_address or "").strip()
             or None
         )

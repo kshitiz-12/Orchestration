@@ -81,10 +81,11 @@ def cloudmailin_status(session: SessionDep):
         "smtp_configured": provider.can_send(),
         "can_send_replies": provider.can_send(),
         "outbound_channel": cfg.get("channel") or None,
-        "outbound": "gmail_smtp" if cfg.get("channel") == "gmail_smtp" else "cloudmailin_or_none",
+        "outbound": "cloudmailin" if cfg.get("channel") == "cloudmailin" else ("gmail_smtp" if cfg.get("channel") == "gmail_smtp" else "none"),
         "note": (
             "Inbound: CloudMailin webhook. "
-            "Outbound: set OUTBOUND_SMTP_* (Gmail App Password) for real inbox delivery."
+            "Outbound: prefer CLOUDMAILIN_SMTP_URL + CLOUDMAILIN_FROM_EMAIL on verified domain "
+            "(HTTPS API works on Render). Gmail SMTP is fallback."
         ),
     }
 
