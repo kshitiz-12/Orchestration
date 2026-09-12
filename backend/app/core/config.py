@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 480
 
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-3.6-flash"
     ai_prompt_version: str = "v1.0.0"
 
     # Active email channel: cloudmailin (prototype default) | outlook | gmail
