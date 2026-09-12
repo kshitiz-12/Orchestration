@@ -268,6 +268,11 @@ class CloudMailinProvider(EmailProvider):
 
         # CloudMailin: try HTTPS API then SMTP (may be test_mode / non-delivering)
         headers: dict[str, Any] = {}
+        reply_to = (self.settings.cloudmailin_address or "").strip()
+        if reply_to:
+            # Replies must land on the inbound CloudMailin address (webhook),
+            # not on the verified From domain (no MX → mail never reaches us).
+            headers["Reply-To"] = reply_to
         if in_reply_to_message_id:
             headers["In-Reply-To"] = in_reply_to_message_id
             headers["References"] = f"{conversation_id or in_reply_to_message_id} {in_reply_to_message_id}".strip()
@@ -366,6 +371,9 @@ class CloudMailinProvider(EmailProvider):
         msg["From"] = formataddr(("Outcome Orchestration", from_addr))
         msg["To"] = ", ".join(to)
         msg["Subject"] = subject
+        reply_to = (self.settings.cloudmailin_address or "").strip()
+        if reply_to:
+            msg["Reply-To"] = reply_to
         new_id = make_msgid(domain=from_addr.split("@")[-1])
         msg["Message-ID"] = new_id
         if in_reply_to_message_id:

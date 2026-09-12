@@ -133,7 +133,7 @@ class CommunicationService:
         body = (
             "We need a few details to continue processing your request:\n\n"
             + "\n".join(f"- {q}" for q in questions)
-            + "\n\nPlease reply to this email thread."
+            + "\n\nPlease reply to this email (use Reply — it routes back to our intake)."
         )
         # Prefer latest inbound provider message for Graph reply
         in_reply_to = None
