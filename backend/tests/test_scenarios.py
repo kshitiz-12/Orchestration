@@ -402,3 +402,89 @@ def test_api_login_and_kpis(client, auth_headers):
     assert resp.status_code == 200
     data = resp.json()
     assert "outcomes_active" in data
+
+
+def test_meeting_room_auto_books_when_available(session: Session):
+    from app.models.org import Resource
+
+    tid = _tenant(session)
+    extraction = ExtractionResult(
+        event_type="MEETING_ROOM",
+        summary="Meeting room for 5 on 15th october at 3 pm",
+        entities={
+            "attendees": 5,
+            "date": "15th october",
+            "preferred_time": "3 pm",
+            "end_time": "7pm",
+            "duration_hours": 4.0,
+        },
+        missing_information=[],
+        confidence=0.95,
+        recommended_next_action="route_to_outcome_engine",
+        reason="complete",
+    )
+    conv = Conversation(
+        tenant_id=tid,
+        thread_id="t-room-auto",
+        requester_email="employee1@acme.demo",
+        subject="Need room",
+    )
+    session.add(conv)
+    session.commit()
+
+    outcome = ScenarioOrchestrator(session, tid).orchestrate(
+        extraction=extraction,
+        requester_email="employee1@acme.demo",
+        conversation_id=conv.conversation_id,
+        business_event_id="evt_room_auto",
+        context={},
+    )
+    session.refresh(outcome)
+    assert outcome.facts.get("booked_room")
+    assert outcome.facts["booked_room"]["assigned_to_email"] == "employee1@acme.demo"
+    assert outcome.status in {"CLOSED", "VERIFIED", "ACTIVE"}
+    task = session.exec(
+        select(Task).where(Task.outcome_id == outcome.outcome_id, Task.code == "RESERVE_ROOM")
+    ).first()
+    assert task.status == "VERIFIED"
+    room = session.get(Resource, outcome.facts["booked_room"]["resource_id"])
+    assert room is not None
+    assert room.status == "RESERVED"
+
+
+def test_meeting_room_extraordinary_stays_with_ops(session: Session):
+    tid = _tenant(session)
+    extraction = ExtractionResult(
+        event_type="MEETING_ROOM",
+        summary="Need boardroom with catering for VIP client visit",
+        entities={
+            "attendees": 4,
+            "date": "tomorrow",
+            "preferred_time": "10 am",
+            "duration_hours": 2,
+            "special_requests": "catering for VIP",
+        },
+        missing_information=[],
+        confidence=0.9,
+        reason="special",
+    )
+    conv = Conversation(
+        tenant_id=tid,
+        thread_id="t-room-vip",
+        requester_email="employee2@acme.demo",
+    )
+    session.add(conv)
+    session.commit()
+    outcome = ScenarioOrchestrator(session, tid).orchestrate(
+        extraction=extraction,
+        requester_email="employee2@acme.demo",
+        conversation_id=conv.conversation_id,
+        business_event_id="evt_room_vip",
+        context={},
+    )
+    assert not outcome.facts.get("booked_room")
+    assert outcome.facts.get("needs_ops") is True
+    task = session.exec(
+        select(Task).where(Task.outcome_id == outcome.outcome_id, Task.code == "RESERVE_ROOM")
+    ).first()
+    assert task.status == "ASSIGNED"

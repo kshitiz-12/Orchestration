@@ -27,18 +27,40 @@ MEETING_ROOM_TEMPLATE = {
     "category": "MEETING_ROOM",
     "case_prefix": "ROOM",
     "requirements": [
-        {"code": "BOOKING", "title": "Confirm meeting room booking details", "is_mandatory": True},
+        {"code": "BOOKING", "title": "Meeting room reserved for requester", "is_mandatory": True},
     ],
     "tasks": [
         {
             "code": "RESERVE_ROOM",
-            "title": "Reserve meeting room",
+            "title": "Reserve meeting room (auto when available)",
             "owner_role": "OPERATOR",
             "task_group": "Ops",
             "requirement_code": "BOOKING",
         },
     ],
 }
+
+# Ordinary auto-book skips human ops unless something special is asked for.
+_EXTRAORDINARY_KEYWORDS = (
+    "catering",
+    "boardroom",
+    "board room",
+    "executive",
+    "vip",
+    "ceo",
+    "av setup",
+    "a/v",
+    "projector",
+    "recording",
+    "livestream",
+    "live stream",
+    "external guest",
+    "external visitors",
+    "client visit",
+    "after hours",
+    "weekend",
+    "security escort",
+)
 
 
 def ensure_meeting_room_template(session: Session, tenant_id: str) -> None:
@@ -54,6 +76,52 @@ def ensure_meeting_room_template(session: Session, tenant_id: str) -> None:
     if existing:
         return
     session.add(OutcomeTemplate(tenant_id=tenant_id, **MEETING_ROOM_TEMPLATE))
+    session.flush()
+
+
+def ensure_meeting_room_resources(session: Session, tenant_id: str) -> None:
+    """Seed bookable meeting-room resources when an existing tenant lacks them."""
+    from app.models.org import Location
+
+    existing = session.exec(
+        select(Resource).where(
+            Resource.tenant_id == tenant_id,
+            Resource.type == "MEETING_ROOM",
+        )
+    ).first()
+    if existing:
+        return
+
+    locations = session.exec(
+        select(Location).where(
+            Location.tenant_id == tenant_id,
+            Location.type == "ROOM",
+        )
+    ).all()
+    capacities = [4, 6, 8, 10, 12, 16]
+    if locations:
+        for i, loc in enumerate(locations[:6]):
+            session.add(
+                Resource(
+                    tenant_id=tenant_id,
+                    type="MEETING_ROOM",
+                    name=f"Meeting Room {loc.name}",
+                    location_id=loc.location_id,
+                    status="AVAILABLE",
+                    attributes={"capacity": capacities[i % len(capacities)]},
+                )
+            )
+    else:
+        for i, cap in enumerate(capacities[:3], start=1):
+            session.add(
+                Resource(
+                    tenant_id=tenant_id,
+                    type="MEETING_ROOM",
+                    name=f"Meeting Room {i}",
+                    status="AVAILABLE",
+                    attributes={"capacity": cap},
+                )
+            )
     session.flush()
 
 
@@ -101,28 +169,232 @@ class ScenarioOrchestrator:
         elif template == "INVOICE":
             self._scenario_d(outcome, facts, context, extraction)
         elif template == "MEETING_ROOM":
-            self._scenario_meeting_room(outcome, facts)
+            self._scenario_meeting_room(outcome, facts, extraction)
 
         self.session.commit()
         self.session.refresh(outcome)
         return outcome
 
-    def _scenario_meeting_room(self, outcome: Outcome, facts: dict) -> None:
-        """Meeting room: facts captured; ops reserves when complete."""
-        attendees = facts.get("attendees")
-        when = facts.get("date")
-        start = facts.get("preferred_time") or facts.get("time_window")
-        duration = facts.get("duration_hours")
-        end = facts.get("end_time")
-        if attendees and when and (start or end or duration):
-            # Mark booking requirement progressing via readiness recompute only
+    def _scenario_meeting_room(
+        self,
+        outcome: Outcome,
+        facts: dict,
+        extraction: Optional[ExtractionResult] = None,
+    ) -> None:
+        """Happy path: auto-reserve an available room for the requester.
+
+        Ops only when no room fits, or the request is extraordinary
+        (catering/VIP/AV/external guests/sensitive flags).
+        """
+        ensure_meeting_room_resources(self.session, self.tenant_id)
+
+        # Prefer outcome.facts (already merged on reply) over this-mail entities alone
+        merged = {**(outcome.facts or {}), **facts}
+        attendees = merged.get("attendees")
+        when = merged.get("date")
+        start = merged.get("preferred_time") or merged.get("time_window")
+        duration = merged.get("duration_hours")
+        end = merged.get("end_time")
+        details_complete = bool(attendees and when and (start or end or duration))
+        if details_complete:
             outcome.summary = (
                 f"Meeting room for {attendees} on {when}"
                 + (f" at {start}" if start else "")
                 + (f"–{end}" if end else "")
                 + (f" ({duration}h)" if duration else "")
             )
+            outcome.facts = merged
             self.session.add(outcome)
+
+        if merged.get("booked_room"):
+            return
+        if not details_complete:
+            return
+
+        extraordinary = self._meeting_room_extraordinary(merged, extraction)
+        if extraordinary:
+            outcome.facts = {
+                **merged,
+                "auto_book_skipped": extraordinary,
+                "needs_ops": True,
+            }
+            self.session.add(outcome)
+            logger.info(
+                "meeting_room_ops_required",
+                outcome_id=outcome.outcome_id,
+                reason=extraordinary,
+            )
+            return
+
+        try:
+            needed = int(attendees)
+        except (TypeError, ValueError):
+            needed = 0
+        room = self._find_available_meeting_room(needed)
+        if not room:
+            outcome.facts = {
+                **merged,
+                "auto_book_skipped": "no_room_available",
+                "needs_ops": True,
+            }
+            self.session.add(outcome)
+            self.engine.create_exception(
+                outcome=outcome,
+                exception_type="NO_MEETING_ROOM",
+                title="No meeting room available",
+                description=(
+                    f"No available room fits {needed or 'requested'} attendees. "
+                    "Operator must arrange an alternative."
+                ),
+                severity="MEDIUM",
+                owner_role="OPERATOR",
+            )
+            return
+
+        requester = (
+            self.engine.find_person_by_email(outcome.requester_email or "")
+            if outcome.requester_email
+            else None
+        )
+        room.status = "RESERVED"
+        if requester:
+            room.allocated_to_person_id = requester.person_id
+        booking = {
+            "resource_id": room.resource_id,
+            "name": room.name,
+            "capacity": (room.attributes or {}).get("capacity"),
+            "attendees": needed,
+            "date": when,
+            "start": start,
+            "end": end,
+            "duration_hours": duration,
+            "assigned_to_email": outcome.requester_email,
+            "assigned_to_person_id": requester.person_id if requester else None,
+            "auto": True,
+        }
+        room.attributes = {**(room.attributes or {}), "booking": booking}
+        self.session.add(room)
+
+        outcome.facts = {
+            **merged,
+            "booked_room": booking,
+            "assigned_to": outcome.requester_email,
+            "needs_ops": False,
+        }
+        if requester and not outcome.requester_person_id:
+            outcome.requester_person_id = requester.person_id
+        self.session.add(outcome)
+
+        task = self.session.exec(
+            select(Task).where(
+                Task.outcome_id == outcome.outcome_id,
+                Task.code == "RESERVE_ROOM",
+            )
+        ).first()
+        if task and task.status not in {"VERIFIED", "CLOSED"}:
+            self.engine.update_task_status(
+                task,
+                "VERIFIED",
+                actor="system",
+                resolution=f"Auto-reserved {room.name} for {outcome.requester_email}",
+            )
+
+        when_bits = f" on {when}" if when else ""
+        time_bits = ""
+        if start and end:
+            time_bits = f" from {start} to {end}"
+        elif start:
+            time_bits = f" at {start}"
+        if duration and not end:
+            time_bits += f" ({duration}h)"
+        body = (
+            f"Your meeting room is confirmed.\n\n"
+            f"Room: {room.name}\n"
+            f"For: {outcome.requester_email}\n"
+            f"Attendees: {needed}{when_bits}{time_bits}\n"
+            f"Case: {outcome.case_reference}\n\n"
+            f"No further action needed unless your plans change."
+        )
+        if outcome.requester_email:
+            self.comms.send_case_update(
+                outcome=outcome,
+                communication_type="COMPLETED",
+                body=body,
+                recipients=[outcome.requester_email],
+                action_label="BOOKING CONFIRMED",
+            )
+
+        try:
+            self.engine.try_close(outcome, actor="system")
+        except ValueError as exc:
+            logger.info(
+                "meeting_room_auto_booked_not_closed",
+                outcome_id=outcome.outcome_id,
+                reason=str(exc),
+            )
+        logger.info(
+            "meeting_room_auto_booked",
+            outcome_id=outcome.outcome_id,
+            room=room.name,
+            requester=outcome.requester_email,
+        )
+
+    def _meeting_room_extraordinary(
+        self,
+        facts: dict,
+        extraction: Optional[ExtractionResult],
+    ) -> Optional[str]:
+        if extraction:
+            if extraction.human_review_required:
+                return "human_review_required"
+            if extraction.safety_concern:
+                return "safety_concern"
+            if extraction.financial_action:
+                return "financial_action"
+            if extraction.access_control_action:
+                return "access_control_action"
+            if extraction.recommended_priority in {"HIGH", "CRITICAL"} and (
+                extraction.human_review_required or extraction.safety_concern
+            ):
+                return "sensitive_priority"
+
+        blob_parts = [
+            str(facts.get("notes") or ""),
+            str(facts.get("special_requests") or ""),
+            str(facts.get("requirements") or ""),
+            " ".join(str(i.get("summary", "")) for i in (facts.get("issues") or []) if isinstance(i, dict)),
+        ]
+        if extraction:
+            blob_parts.append(extraction.summary or "")
+            blob_parts.append(extraction.reason or "")
+        blob = " ".join(blob_parts).lower()
+        for kw in _EXTRAORDINARY_KEYWORDS:
+            if kw in blob:
+                return f"special_request:{kw}"
+        return None
+
+    def _find_available_meeting_room(self, attendees: int) -> Optional[Resource]:
+        rooms = self.session.exec(
+            select(Resource).where(
+                Resource.tenant_id == self.tenant_id,
+                Resource.type == "MEETING_ROOM",
+                Resource.status == "AVAILABLE",
+            )
+        ).all()
+        needed = max(int(attendees or 0), 1)
+        fitting = []
+        for room in rooms:
+            capacity = (room.attributes or {}).get("capacity")
+            try:
+                cap = int(capacity) if capacity is not None else 999
+            except (TypeError, ValueError):
+                cap = 999
+            if cap >= needed:
+                fitting.append((cap, room))
+        if not fitting:
+            return None
+        fitting.sort(key=lambda item: item[0])
+        return fitting[0][1]
 
     def _scenario_a(self, outcome: Outcome, facts: dict, context: dict) -> None:
         available = context.get("available_seats_count", 0)

@@ -180,6 +180,20 @@ def seed(session: Session) -> str:
                 status="AVAILABLE",
             )
         )
+    # Bookable meeting rooms (auto-assigned when request is complete + ordinary)
+    room_locations = [loc for loc in rooms if getattr(loc, "type", None) == "ROOM"]
+    capacities = [4, 6, 8, 10, 12, 16]
+    for i, loc in enumerate(room_locations[:6]):
+        session.add(
+            Resource(
+                tenant_id=tid,
+                type="MEETING_ROOM",
+                name=f"Meeting Room {loc.name}",
+                location_id=loc.location_id,
+                status="AVAILABLE",
+                attributes={"capacity": capacities[i % len(capacities)]},
+            )
+        )
 
     # Vendors / commercial
     vendors = []
@@ -398,11 +412,13 @@ def seed(session: Session) -> str:
             name="Meeting room booking",
             category="MEETING_ROOM",
             case_prefix="ROOM",
-            requirements=[{"code": "BOOKING", "title": "Confirm meeting room booking details", "is_mandatory": True}],
+            requirements=[
+                {"code": "BOOKING", "title": "Meeting room reserved for requester", "is_mandatory": True}
+            ],
             tasks=[
                 {
                     "code": "RESERVE_ROOM",
-                    "title": "Reserve meeting room",
+                    "title": "Reserve meeting room (auto when available)",
                     "owner_role": "OPERATOR",
                     "task_group": "Ops",
                     "requirement_code": "BOOKING",

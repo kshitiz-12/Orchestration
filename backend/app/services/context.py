@@ -74,6 +74,25 @@ class ContextRetrievalService:
                 for s in available_seats[:5]
             ]
 
+        if et in {"", "UNKNOWN", "MEETING_ROOM"}:
+            available_rooms = self.session.exec(
+                select(Resource).where(
+                    Resource.tenant_id == self.tenant_id,
+                    Resource.type == "MEETING_ROOM",
+                    Resource.status == "AVAILABLE",
+                )
+            ).all()
+            ctx["available_meeting_rooms"] = [
+                {
+                    "resource_id": r.resource_id,
+                    "name": r.name,
+                    "capacity": (r.attributes or {}).get("capacity"),
+                    "location_id": r.location_id,
+                }
+                for r in available_rooms
+            ]
+            ctx["available_meeting_rooms_count"] = len(available_rooms)
+
         if et in {"", "UNKNOWN", "VENDOR_ESCALATION", "INVOICE"}:
             vendors = self.session.exec(
                 select(Vendor).where(Vendor.tenant_id == self.tenant_id, Vendor.status == "ACTIVE")
