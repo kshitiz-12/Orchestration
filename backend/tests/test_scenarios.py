@@ -453,6 +453,8 @@ def test_meeting_room_auto_books_when_available(session: Session):
 
 
 def test_meeting_room_extraordinary_stays_with_ops(session: Session):
+    from app.models.outcome import Communication
+
     tid = _tenant(session)
     extraction = ExtractionResult(
         event_type="MEETING_ROOM",
@@ -484,7 +486,15 @@ def test_meeting_room_extraordinary_stays_with_ops(session: Session):
     )
     assert not outcome.facts.get("booked_room")
     assert outcome.facts.get("needs_ops") is True
+    assert outcome.facts.get("ops_ack_sent") is True
     task = session.exec(
         select(Task).where(Task.outcome_id == outcome.outcome_id, Task.code == "RESERVE_ROOM")
     ).first()
     assert task.status == "ASSIGNED"
+    msg = session.exec(
+        select(Communication).where(Communication.outcome_id == outcome.outcome_id)
+    ).first()
+    assert msg is not None
+    assert msg.communication_type == "INFORMATION_ONLY"
+    assert "as soon as possible" in (msg.body or "").lower()
+    assert "REQUEST RECEIVED" in (msg.subject or "") or "received" in (msg.subject or "").lower()

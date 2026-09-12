@@ -219,6 +219,15 @@ class ScenarioOrchestrator:
                 "needs_ops": True,
             }
             self.session.add(outcome)
+            self._send_meeting_room_ops_ack(
+                outcome,
+                reason="special_request",
+                when=when,
+                start=start,
+                end=end,
+                duration=duration,
+                attendees=attendees,
+            )
             logger.info(
                 "meeting_room_ops_required",
                 outcome_id=outcome.outcome_id,
@@ -248,6 +257,15 @@ class ScenarioOrchestrator:
                 ),
                 severity="MEDIUM",
                 owner_role="OPERATOR",
+            )
+            self._send_meeting_room_ops_ack(
+                outcome,
+                reason="no_room_available",
+                when=when,
+                start=start,
+                end=end,
+                duration=duration,
+                attendees=attendees,
             )
             return
 
@@ -338,6 +356,64 @@ class ScenarioOrchestrator:
             room=room.name,
             requester=outcome.requester_email,
         )
+
+    def _send_meeting_room_ops_ack(
+        self,
+        outcome: Outcome,
+        *,
+        reason: str,
+        when: Any = None,
+        start: Any = None,
+        end: Any = None,
+        duration: Any = None,
+        attendees: Any = None,
+    ) -> None:
+        """Professional holding reply while an operator finalises the booking."""
+        if not outcome.requester_email:
+            return
+        facts = dict(outcome.facts or {})
+        if facts.get("ops_ack_sent"):
+            return
+
+        when_bits = f" on {when}" if when else ""
+        time_bits = ""
+        if start and end:
+            time_bits = f" from {start} to {end}"
+        elif start:
+            time_bits = f" starting {start}"
+        if duration and not end:
+            time_bits += f" ({duration}h)"
+        attendee_bits = f" for {attendees} attendees" if attendees else ""
+
+        if reason == "no_room_available":
+            detail = (
+                "We are checking alternative rooms and availability against your request"
+                f"{attendee_bits}{when_bits}{time_bits}."
+            )
+        else:
+            detail = (
+                "Your request includes details that need a short review by our workplace team"
+                f"{attendee_bits}{when_bits}{time_bits}."
+            )
+
+        body = (
+            "Thank you for your meeting room request.\n\n"
+            f"{detail}\n\n"
+            "We have received your details and will contact you with a confirmation "
+            "as soon as possible.\n\n"
+            f"Reference: {outcome.case_reference}\n\n"
+            "If anything changes (time, attendees, or requirements), simply reply to this email."
+        )
+        self.comms.send_case_update(
+            outcome=outcome,
+            communication_type="INFORMATION_ONLY",
+            body=body,
+            recipients=[outcome.requester_email],
+            action_label="REQUEST RECEIVED",
+        )
+        facts["ops_ack_sent"] = True
+        outcome.facts = facts
+        self.session.add(outcome)
 
     def _meeting_room_extraordinary(
         self,
