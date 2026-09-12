@@ -313,6 +313,8 @@ class CloudMailinProvider(EmailProvider):
             "subject": subject,
             "plain": body,
             "tags": ["orchestration", "clarification"],
+            # Account-level test mode overrides this; we still request live send.
+            "test_mode": False,
         }
         if headers:
             payload["headers"] = headers
@@ -329,6 +331,12 @@ class CloudMailinProvider(EmailProvider):
             if resp.status_code >= 400:
                 raise RuntimeError(f"CloudMailin API {resp.status_code}: {resp.text[:400]}")
             data = resp.json() if resp.content else {}
+            if data.get("test_mode") is True:
+                raise RuntimeError(
+                    "CloudMailin SMTP account is in TEST MODE — message was not delivered. "
+                    "Open CloudMailin → SMTP Accounts → disable Test Mode (switch to Live), "
+                    "then resend."
+                )
             msg_id = (
                 data.get("message_id")
                 or data.get("id")
