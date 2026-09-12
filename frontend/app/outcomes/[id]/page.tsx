@@ -14,6 +14,8 @@ export default function OutcomeDetailPage() {
   const [msg, setMsg] = useState("");
   const [msgTone, setMsgTone] = useState<"ok" | "danger">("ok");
   const [busy, setBusy] = useState("");
+  const [roomName, setRoomName] = useState("");
+  const [confirmNote, setConfirmNote] = useState("");
 
   function load() {
     api(`/outcomes/${id}`)
@@ -69,6 +71,12 @@ export default function OutcomeDetailPage() {
     outcome.summary ||
     "The system is still gathering details.";
 
+  const needsOpsConfirm =
+    outcome.template_code === "MEETING_ROOM" &&
+    !facts.booked_room &&
+    (facts.needs_ops === true ||
+      (tasks || []).some((t: any) => t.code === "RESERVE_ROOM" && !["VERIFIED", "CLOSED"].includes(t.status)));
+
   return (
     <AppShell
       title={outcome.case_reference}
@@ -76,8 +84,36 @@ export default function OutcomeDetailPage() {
       actions={
         <>
           <StatusBadge status={friendlyStatus(outcome.status)} />
+          {needsOpsConfirm && (
+            <button
+              className="btn accent"
+              disabled={busy === "confirm"}
+              onClick={async () => {
+                setBusy("confirm");
+                try {
+                  await api(`/outcomes/${id}/confirm-booking`, {
+                    method: "POST",
+                    body: JSON.stringify({
+                      room_name: roomName || undefined,
+                      note: confirmNote || undefined,
+                    }),
+                  });
+                  setMsgTone("ok");
+                  setMsg("Booking confirmed — confirmation email sent to the requester.");
+                  load();
+                } catch (e: any) {
+                  setMsgTone("danger");
+                  setMsg(e.message);
+                } finally {
+                  setBusy("");
+                }
+              }}
+            >
+              Confirm booking & notify
+            </button>
+          )}
           <button
-            className="btn accent"
+            className="btn secondary"
             disabled={busy === "close"}
             onClick={async () => {
               setBusy("close");
@@ -124,6 +160,49 @@ export default function OutcomeDetailPage() {
       }
     >
       {msg && <p className={`badge ${msgTone === "ok" ? "ok" : "danger"}`}>{msg}</p>}
+
+      {needsOpsConfirm && (
+        <div className="panel" style={{ marginBottom: "1.25rem" }}>
+          <h2 style={{ marginBottom: "0.5rem" }}>Confirm this booking</h2>
+          <p style={{ marginTop: 0 }}>
+            The requester was told you will confirm soon. Choose a room (optional) and click{" "}
+            <strong>Confirm booking & notify</strong> — they get a confirmation email and this case closes.
+          </p>
+          <div className="row" style={{ gap: "0.75rem", flexWrap: "wrap", alignItems: "flex-end" }}>
+            <label style={{ display: "grid", gap: "0.25rem", minWidth: "220px" }}>
+              <span className="muted" style={{ fontSize: "0.8rem" }}>
+                Room name (optional)
+              </span>
+              <input
+                className="input"
+                placeholder="e.g. Boardroom A"
+                value={roomName}
+                onChange={(e) => setRoomName(e.target.value)}
+              />
+            </label>
+            <label style={{ display: "grid", gap: "0.25rem", flex: 1, minWidth: "220px" }}>
+              <span className="muted" style={{ fontSize: "0.8rem" }}>
+                Note to requester (optional)
+              </span>
+              <input
+                className="input"
+                placeholder="e.g. Catering arranged for 10am"
+                value={confirmNote}
+                onChange={(e) => setConfirmNote(e.target.value)}
+              />
+            </label>
+          </div>
+        </div>
+      )}
+
+      {facts.booked_room && typeof facts.booked_room === "object" && (
+        <div className="panel" style={{ marginBottom: "1.25rem" }}>
+          <h2 style={{ marginBottom: "0.5rem" }}>Booking confirmed</h2>
+          <p style={{ marginTop: 0 }}>
+            {(facts.booked_room as any).name} · assigned to {outcome.requester_email}
+          </p>
+        </div>
+      )}
 
       <div className="grid kpis" style={{ marginBottom: "1.25rem" }}>
         <div className="kpi">

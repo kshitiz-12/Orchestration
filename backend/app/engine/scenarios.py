@@ -357,6 +357,141 @@ class ScenarioOrchestrator:
             requester=outcome.requester_email,
         )
 
+    def confirm_meeting_room_booking(
+        self,
+        outcome: Outcome,
+        *,
+        actor: str,
+        room_name: Optional[str] = None,
+        note: Optional[str] = None,
+    ) -> Outcome:
+        """Operator confirmation: reserve room, email requester, close case."""
+        if outcome.template_code != "MEETING_ROOM":
+            raise ValueError("This action is only for meeting room requests")
+        ensure_meeting_room_resources(self.session, self.tenant_id)
+
+        facts = dict(outcome.facts or {})
+        if facts.get("booked_room"):
+            raise ValueError("This booking is already confirmed")
+
+        attendees = facts.get("attendees")
+        when = facts.get("date")
+        start = facts.get("preferred_time") or facts.get("time_window")
+        duration = facts.get("duration_hours")
+        end = facts.get("end_time")
+        try:
+            needed = int(attendees or 1)
+        except (TypeError, ValueError):
+            needed = 1
+
+        room: Optional[Resource] = None
+        if room_name and room_name.strip():
+            wanted = room_name.strip().lower()
+            candidates = self.session.exec(
+                select(Resource).where(
+                    Resource.tenant_id == self.tenant_id,
+                    Resource.type == "MEETING_ROOM",
+                )
+            ).all()
+            room = next((r for r in candidates if (r.name or "").lower() == wanted), None)
+            if room is None:
+                room = next((r for r in candidates if wanted in (r.name or "").lower()), None)
+        if room is None:
+            room = self._find_available_meeting_room(needed)
+
+        display_name = (room.name if room else None) or (room_name and room_name.strip()) or "Assigned meeting room"
+        requester = (
+            self.engine.find_person_by_email(outcome.requester_email or "")
+            if outcome.requester_email
+            else None
+        )
+        if room:
+            room.status = "RESERVED"
+            if requester:
+                room.allocated_to_person_id = requester.person_id
+
+        booking = {
+            "resource_id": room.resource_id if room else None,
+            "name": display_name,
+            "capacity": (room.attributes or {}).get("capacity") if room else None,
+            "attendees": needed,
+            "date": when,
+            "start": start,
+            "end": end,
+            "duration_hours": duration,
+            "assigned_to_email": outcome.requester_email,
+            "assigned_to_person_id": requester.person_id if requester else None,
+            "auto": False,
+            "confirmed_by": actor,
+            "note": note,
+        }
+        if room:
+            room.attributes = {**(room.attributes or {}), "booking": booking}
+            self.session.add(room)
+
+        outcome.facts = {
+            **facts,
+            "booked_room": booking,
+            "assigned_to": outcome.requester_email,
+            "needs_ops": False,
+        }
+        if requester and not outcome.requester_person_id:
+            outcome.requester_person_id = requester.person_id
+        self.session.add(outcome)
+
+        task = self.session.exec(
+            select(Task).where(
+                Task.outcome_id == outcome.outcome_id,
+                Task.code == "RESERVE_ROOM",
+            )
+        ).first()
+        if task and task.status not in {"VERIFIED", "CLOSED"}:
+            self.engine.update_task_status(
+                task,
+                "VERIFIED",
+                actor=actor,
+                resolution=f"Confirmed {display_name} for {outcome.requester_email}",
+            )
+
+        when_bits = f" on {when}" if when else ""
+        time_bits = ""
+        if start and end:
+            time_bits = f" from {start} to {end}"
+        elif start:
+            time_bits = f" at {start}"
+        if duration and not end:
+            time_bits += f" ({duration}h)"
+        note_bits = f"\nNote: {note}" if note else ""
+        body = (
+            f"Your meeting room is confirmed.\n\n"
+            f"Room: {display_name}\n"
+            f"For: {outcome.requester_email}\n"
+            f"Attendees: {needed}{when_bits}{time_bits}\n"
+            f"Case: {outcome.case_reference}"
+            f"{note_bits}\n\n"
+            f"Please reply to this email if you need to change anything."
+        )
+        if outcome.requester_email:
+            self.comms.send_case_update(
+                outcome=outcome,
+                communication_type="COMPLETED",
+                body=body,
+                recipients=[outcome.requester_email],
+                action_label="BOOKING CONFIRMED",
+            )
+
+        try:
+            self.engine.try_close(outcome, actor=actor)
+        except ValueError as exc:
+            logger.info(
+                "meeting_room_ops_confirmed_not_closed",
+                outcome_id=outcome.outcome_id,
+                reason=str(exc),
+            )
+        self.session.commit()
+        self.session.refresh(outcome)
+        return outcome
+
     def _send_meeting_room_ops_ack(
         self,
         outcome: Outcome,

@@ -17,6 +17,7 @@ from app.models.outcome import (
 )
 from app.schemas.api import (
     ApprovalDecisionRequest,
+    ConfirmBookingRequest,
     EvidenceCreate,
     ExceptionResolveRequest,
     TaskStatusUpdate,
@@ -153,6 +154,46 @@ def close_outcome(outcome_id: str, session: SessionDep, tenant_id: TenantDep, us
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     return outcome
+
+
+@router.post("/outcomes/{outcome_id}/confirm-booking")
+def confirm_booking(
+    outcome_id: str,
+    payload: ConfirmBookingRequest,
+    session: SessionDep,
+    tenant_id: TenantDep,
+    user: UserDep,
+):
+    """Ops confirms a meeting room and emails BOOKING CONFIRMED to the requester."""
+    from app.connectors.factory import get_email_provider
+    from app.engine.scenarios import ScenarioOrchestrator
+    from app.services.communication import CommunicationService
+
+    outcome = session.get(Outcome, outcome_id)
+    if not outcome or outcome.tenant_id != tenant_id:
+        raise HTTPException(404, "Outcome not found")
+    if outcome.template_code != "MEETING_ROOM":
+        raise HTTPException(400, "Only meeting room requests can be confirmed this way")
+
+    email = get_email_provider(session, tenant_id)
+    sender = email if email.is_connected() else None
+    comms = CommunicationService(session, tenant_id, email_sender=sender)
+    try:
+        updated = ScenarioOrchestrator(session, tenant_id, comms).confirm_meeting_room_booking(
+            outcome,
+            actor=user.email,
+            room_name=payload.room_name,
+            note=payload.note,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {
+        "ok": True,
+        "outcome_id": updated.outcome_id,
+        "status": updated.status,
+        "booked_room": (updated.facts or {}).get("booked_room"),
+        "delivered": True,
+    }
 
 
 @router.post("/outcomes/{outcome_id}/resend-clarification")

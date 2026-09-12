@@ -37,6 +37,13 @@ class TaskStatusUpdate(BaseModel):
     resolution: Optional[str] = None
 
 
+class ConfirmBookingRequest(BaseModel):
+    """Operator confirms a meeting-room request and emails the requester."""
+
+    room_name: Optional[str] = None
+    note: Optional[str] = None
+
+
 class EvidenceCreate(BaseModel):
     evidence_type: str
     description: Optional[str] = None
