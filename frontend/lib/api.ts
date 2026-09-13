@@ -13,6 +13,23 @@ export function clearToken() {
   localStorage.removeItem("oop_token");
 }
 
+async function fetchWithColdStartRetry(url: string, options: RequestInit): Promise<Response> {
+  // Render free tier can take 30–90s to wake; retry a couple of times.
+  const attempts = 3;
+  let lastError: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fetch(url, options);
+    } catch (err) {
+      lastError = err;
+      if (i < attempts - 1) {
+        await new Promise((r) => setTimeout(r, 2500 * (i + 1)));
+      }
+    }
+  }
+  throw lastError;
+}
+
 export async function api<T = any>(path: string, options: RequestInit = {}): Promise<T> {
   const token = getToken();
   const headers: Record<string, string> = {
@@ -22,9 +39,9 @@ export async function api<T = any>(path: string, options: RequestInit = {}): Pro
   if (token) headers.Authorization = `Bearer ${token}`;
   let res: Response;
   try {
-    res = await fetch(`${API_BASE}${path}`, { ...options, headers });
+    res = await fetchWithColdStartRetry(`${API_BASE}${path}`, { ...options, headers });
   } catch {
-    throw new Error(`Cannot reach API at ${API_BASE}. Is Render awake?`);
+    throw new Error(`Cannot reach API at ${API_BASE}. Is Render awake? Refresh in ~30s if it was sleeping.`);
   }
   if (!res.ok) {
     const text = await res.text();

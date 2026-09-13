@@ -8,6 +8,13 @@ from sqlmodel import Session, select
 
 from app.ai.gemini import HeuristicProvider
 from app.models.intake import Conversation, RawEmailEvent
+from app.services.meeting_room import (  # noqa: F401 — re-export for existing imports
+    MEETING_ROOM_REQUIRED,
+    default_meeting_room_questions,
+    is_booking_confirmation,
+    meeting_room_details_complete,
+    meeting_room_gaps,
+)
 
 
 def merge_thread_prior_facts(
@@ -45,44 +52,3 @@ def merge_thread_prior_facts(
     # Drop non-fact noise
     facts.pop("issues", None)
     return facts
-
-
-MEETING_ROOM_REQUIRED = ("attendees", "date", "preferred_time")
-
-
-def meeting_room_gaps(facts: dict[str, Any]) -> list[dict[str, Any]]:
-    """Blocking gaps for a meeting-room booking after fact merge."""
-    gaps: list[dict[str, Any]] = []
-    if "attendees" not in facts:
-        gaps.append(
-            {
-                "field": "attendees",
-                "question": "How many people / attendees will attend?",
-                "blocking": True,
-            }
-        )
-    if "date" not in facts:
-        gaps.append(
-            {
-                "field": "date",
-                "question": "Which date do you need the room?",
-                "blocking": True,
-            }
-        )
-    if "preferred_time" not in facts and "time_window" not in facts:
-        gaps.append(
-            {
-                "field": "preferred_time",
-                "question": "What preferred start time (e.g. 3 PM)?",
-                "blocking": True,
-            }
-        )
-    if "duration_hours" not in facts and "end_time" not in facts:
-        gaps.append(
-            {
-                "field": "duration",
-                "question": "How long do you need the room (duration)?",
-                "blocking": True,
-            }
-        )
-    return gaps

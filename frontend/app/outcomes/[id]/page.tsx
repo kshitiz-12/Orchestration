@@ -75,6 +75,7 @@ export default function OutcomeDetailPage() {
     outcome.template_code === "MEETING_ROOM" &&
     !facts.booked_room &&
     (facts.needs_ops === true ||
+      facts.pending_confirmation === true ||
       (tasks || []).some((t: any) => t.code === "RESERVE_ROOM" && !["VERIFIED", "CLOSED"].includes(t.status)));
 
   return (
@@ -161,12 +162,28 @@ export default function OutcomeDetailPage() {
     >
       {msg && <p className={`badge ${msgTone === "ok" ? "ok" : "danger"}`}>{msg}</p>}
 
+      {facts.pending_confirmation && facts.proposed_room && typeof facts.proposed_room === "object" && (
+        <div className="panel" style={{ marginBottom: "1.25rem" }}>
+          <h2 style={{ marginBottom: "0.5rem" }}>Awaiting requester confirmation</h2>
+          <p style={{ marginTop: 0 }}>
+            Proposed {(facts.proposed_room as any).name}. Requester was asked to reply{" "}
+            <strong>confirm</strong> (or you can confirm here for them).
+          </p>
+        </div>
+      )}
+
       {needsOpsConfirm && (
         <div className="panel" style={{ marginBottom: "1.25rem" }}>
           <h2 style={{ marginBottom: "0.5rem" }}>Confirm this booking</h2>
           <p style={{ marginTop: 0 }}>
-            The requester was told you will confirm soon. Choose a room (optional) and click{" "}
-            <strong>Confirm booking & notify</strong> — they get a confirmation email and this case closes.
+            {facts.pending_confirmation
+              ? "Requester was offered a room. Confirm for them if needed, or wait for their reply."
+              : "The requester was told you will confirm soon. Choose a room (optional) and click"}{" "}
+            {!facts.pending_confirmation && (
+              <>
+                <strong>Confirm booking & notify</strong> — they get a confirmation email and this case closes.
+              </>
+            )}
           </p>
           <div className="row" style={{ gap: "0.75rem", flexWrap: "wrap", alignItems: "flex-end" }}>
             <label style={{ display: "grid", gap: "0.25rem", minWidth: "220px" }}>

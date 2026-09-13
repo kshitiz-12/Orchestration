@@ -40,27 +40,7 @@ MEETING_ROOM_TEMPLATE = {
     ],
 }
 
-# Ordinary auto-book skips human ops unless something special is asked for.
-_EXTRAORDINARY_KEYWORDS = (
-    "catering",
-    "boardroom",
-    "board room",
-    "executive",
-    "vip",
-    "ceo",
-    "av setup",
-    "a/v",
-    "projector",
-    "recording",
-    "livestream",
-    "live stream",
-    "external guest",
-    "external visitors",
-    "client visit",
-    "after hours",
-    "weekend",
-    "security escort",
-)
+# Sensitive flags only — catering/AV/location are normal captured fields now.
 
 
 def ensure_meeting_room_template(session: Session, tenant_id: str) -> None:
@@ -181,42 +161,116 @@ class ScenarioOrchestrator:
         facts: dict,
         extraction: Optional[ExtractionResult] = None,
     ) -> None:
-        """Happy path: auto-reserve an available room for the requester.
+        """Core facts → assume silence on facilities → propose → await confirm.
 
-        Ops only when no room fits, or the request is extraordinary
-        (catering/VIP/AV/external guests/sensitive flags).
+        Dynamic: later replies can add catering/AV/etc. before or after booking.
         """
+        from app.services.meeting_room import (
+            apply_meeting_room_defaults,
+            meeting_room_details_complete,
+            meeting_room_gaps,
+            requirement_fingerprint,
+        )
+
         ensure_meeting_room_resources(self.session, self.tenant_id)
 
-        # Prefer outcome.facts (already merged on reply) over this-mail entities alone
         merged = {**(outcome.facts or {}), **facts}
+        if extraction and extraction.entities:
+            for key, value in extraction.entities.items():
+                if value is not None and value != "":
+                    merged[key] = value
+
         attendees = merged.get("attendees")
         when = merged.get("date")
         start = merged.get("preferred_time") or merged.get("time_window")
         duration = merged.get("duration_hours")
         end = merged.get("end_time")
-        details_complete = bool(attendees and when and (start or end or duration))
-        if details_complete:
+
+        if attendees and when and (start or end or duration):
             outcome.summary = (
                 f"Meeting room for {attendees} on {when}"
                 + (f" at {start}" if start else "")
                 + (f"–{end}" if end else "")
                 + (f" ({duration}h)" if duration else "")
             )
-            outcome.facts = merged
-            self.session.add(outcome)
+        outcome.facts = merged
+        self.session.add(outcome)
 
+        # Already booked — still accept late add-on requests
         if merged.get("booked_room"):
-            return
-        if not details_complete:
+            incoming = (extraction.entities if extraction else {}) or {}
+            deltas = {
+                k: incoming[k]
+                for k in (
+                    "catering",
+                    "hybrid_av",
+                    "special_access",
+                    "location_preference",
+                    "meeting_type",
+                )
+                if k in incoming
+                and incoming.get(k) not in (None, "")
+                and incoming.get(k) != (merged.get("booked_room") or {}).get(k)
+            }
+            if deltas:
+                self._handle_post_booking_updates(outcome, {**merged, **deltas})
             return
 
-        extraordinary = self._meeting_room_extraordinary(merged, extraction)
-        if extraordinary:
+        # Confirm path (may also include new extras in the same reply)
+        confirmed = bool(
+            merged.get("booking_confirmed")
+            or (extraction and (extraction.entities or {}).get("booking_confirmed"))
+        )
+        if merged.get("pending_confirmation") and confirmed:
+            merged = apply_meeting_room_defaults(merged)
+            if merged.get("proposed_room"):
+                # Refresh proposal snapshot with any last-minute extras
+                proposed = dict(merged["proposed_room"])
+                for key in (
+                    "meeting_type",
+                    "hybrid_av",
+                    "location_preference",
+                    "catering",
+                    "special_access",
+                    "attendees",
+                    "date",
+                    "preferred_time",
+                    "end_time",
+                    "duration_hours",
+                ):
+                    if merged.get(key) is not None:
+                        proposed[key if key != "preferred_time" else "start"] = (
+                            merged.get("preferred_time") if key == "preferred_time" else merged.get(key)
+                        )
+                if merged.get("preferred_time"):
+                    proposed["start"] = merged["preferred_time"]
+                merged["proposed_room"] = proposed
+                outcome.facts = merged
+                self.session.add(outcome)
+            self._finalize_proposed_meeting_room(outcome, actor="requester")
+            return
+
+        if not meeting_room_details_complete(merged):
+            gaps = meeting_room_gaps(merged)
             outcome.facts = {
                 **merged,
-                "auto_book_skipped": extraordinary,
+                "checklist_missing": [g["field"] for g in gaps],
+            }
+            self.session.add(outcome)
+            return
+
+        # Core complete — apply silence defaults (no AV, no catering, etc.)
+        merged = apply_meeting_room_defaults(merged)
+        outcome.facts = merged
+        self.session.add(outcome)
+
+        sensitive = self._meeting_room_extraordinary(merged, extraction)
+        if sensitive:
+            outcome.facts = {
+                **merged,
+                "auto_book_skipped": sensitive,
                 "needs_ops": True,
+                "pending_confirmation": False,
             }
             self.session.add(outcome)
             self._send_meeting_room_ops_ack(
@@ -231,15 +285,40 @@ class ScenarioOrchestrator:
             logger.info(
                 "meeting_room_ops_required",
                 outcome_id=outcome.outcome_id,
-                reason=extraordinary,
+                reason=sensitive,
             )
+            return
+
+        # Pending proposal: if requirements changed, refresh and re-ask confirm
+        if merged.get("pending_confirmation") and merged.get("proposed_room"):
+            prev_fp = (merged.get("proposed_room") or {}).get("fingerprint")
+            new_fp = requirement_fingerprint(merged)
+            if prev_fp and prev_fp != new_fp:
+                room = None
+                rid = (merged.get("proposed_room") or {}).get("resource_id")
+                if rid:
+                    room = self.session.get(Resource, rid)
+                if room is None:
+                    try:
+                        needed = int(attendees or 1)
+                    except (TypeError, ValueError):
+                        needed = 1
+                    room = self._find_available_meeting_room(
+                        needed,
+                        location_preference=merged.get("location_preference"),
+                    )
+                if room:
+                    self._propose_meeting_room(outcome, room, merged, updated=True)
             return
 
         try:
             needed = int(attendees)
         except (TypeError, ValueError):
             needed = 0
-        room = self._find_available_meeting_room(needed)
+        room = self._find_available_meeting_room(
+            needed,
+            location_preference=merged.get("location_preference"),
+        )
         if not room:
             outcome.facts = {
                 **merged,
@@ -269,15 +348,60 @@ class ScenarioOrchestrator:
             )
             return
 
-        requester = (
-            self.engine.find_person_by_email(outcome.requester_email or "")
-            if outcome.requester_email
-            else None
+        self._propose_meeting_room(outcome, room, merged, updated=False)
+
+    def _handle_post_booking_updates(self, outcome: Outcome, facts: dict) -> None:
+        """Requester added needs after confirmation — record and acknowledge."""
+        extras = {
+            k: facts.get(k)
+            for k in ("catering", "hybrid_av", "special_access", "location_preference", "meeting_type")
+            if facts.get(k) is not None
+        }
+        history = list(facts.get("post_booking_requests") or [])
+        history.append(extras)
+        outcome.facts = {
+            **facts,
+            "post_booking_requests": history,
+            "needs_ops": True,
+        }
+        self.session.add(outcome)
+        body = (
+            "Thanks — we’ve noted your additional request against the confirmed booking.\n\n"
+            + "\n".join(f"- {k.replace('_', ' ')}: {v}" for k, v in extras.items())
+            + f"\n\nCase: {outcome.case_reference}\n"
+            "Our workplace team will follow up shortly if anything else is needed."
         )
-        room.status = "RESERVED"
-        if requester:
-            room.allocated_to_person_id = requester.person_id
-        booking = {
+        if outcome.requester_email:
+            self.comms.send_case_update(
+                outcome=outcome,
+                communication_type="INFORMATION_ONLY",
+                body=body,
+                recipients=[outcome.requester_email],
+                action_label="UPDATE NOTED",
+            )
+
+    def _propose_meeting_room(
+        self,
+        outcome: Outcome,
+        room: Resource,
+        facts: dict,
+        *,
+        updated: bool = False,
+    ) -> None:
+        """Hold an available room and ask the requester to confirm the summary."""
+        from app.services.meeting_room import requirement_fingerprint, summarize_meeting_requirements
+
+        attendees = facts.get("attendees")
+        when = facts.get("date")
+        start = facts.get("preferred_time") or facts.get("time_window")
+        duration = facts.get("duration_hours")
+        end = facts.get("end_time")
+        try:
+            needed = int(attendees or 1)
+        except (TypeError, ValueError):
+            needed = 1
+
+        proposal = {
             "resource_id": room.resource_id,
             "name": room.name,
             "capacity": (room.attributes or {}).get("capacity"),
@@ -286,18 +410,108 @@ class ScenarioOrchestrator:
             "start": start,
             "end": end,
             "duration_hours": duration,
+            "meeting_type": facts.get("meeting_type"),
+            "hybrid_av": facts.get("hybrid_av"),
+            "location_preference": facts.get("location_preference"),
+            "catering": facts.get("catering"),
+            "special_access": facts.get("special_access"),
             "assigned_to_email": outcome.requester_email,
-            "assigned_to_person_id": requester.person_id if requester else None,
-            "auto": True,
+            "fingerprint": requirement_fingerprint(facts),
         }
-        room.attributes = {**(room.attributes or {}), "booking": booking}
+        room.status = "RESERVED"
+        room.attributes = {
+            **(room.attributes or {}),
+            "booking": {**proposal, "pending_confirmation": True},
+        }
         self.session.add(room)
 
         outcome.facts = {
-            **merged,
+            **facts,
+            "proposed_room": proposal,
+            "pending_confirmation": True,
+            "needs_ops": False,
+            "checklist_missing": [],
+        }
+        self.session.add(outcome)
+
+        req_lines = summarize_meeting_requirements(facts)
+        req_block = "\n".join(f"- {line}" for line in req_lines)
+        intro = (
+            "Thanks — we’ve updated what we have on file for your request.\n\n"
+            if updated
+            else "Good news — a room is available for your request.\n\n"
+        )
+        body = (
+            f"{intro}"
+            f"Proposed room: {room.name}\n"
+            f"Case: {outcome.case_reference}\n\n"
+            f"Here’s what we understood as your requirements:\n{req_block}\n\n"
+            "Should we confirm this booking?\n"
+            "Reply \"confirm\" (or \"yes\") to lock it in.\n"
+            "If you need any other facilities — AV, catering, a different floor, visitor passes, "
+            "etc. — mention them in your reply and we’ll update before confirming."
+        )
+        if outcome.requester_email:
+            self.comms.send_case_update(
+                outcome=outcome,
+                communication_type="ACTION_REQUIRED",
+                body=body,
+                recipients=[outcome.requester_email],
+                action_label="CONFIRM BOOKING",
+            )
+        if outcome.conversation_id:
+            from app.models.intake import Conversation as ConvModel
+
+            conv = self.session.get(ConvModel, outcome.conversation_id)
+            if conv:
+                conv.facts = {**(conv.facts or {}), **(outcome.facts or {})}
+                self.session.add(conv)
+        logger.info(
+            "meeting_room_proposed",
+            outcome_id=outcome.outcome_id,
+            room=room.name,
+            requester=outcome.requester_email,
+            updated=updated,
+        )
+
+    def _finalize_proposed_meeting_room(self, outcome: Outcome, *, actor: str) -> None:
+        """Convert a proposed hold into a confirmed booking after requester/ops confirm."""
+        facts = dict(outcome.facts or {})
+        proposal = facts.get("proposed_room") or {}
+        if not proposal:
+            raise ValueError("No proposed room to confirm")
+
+        room = None
+        if proposal.get("resource_id"):
+            room = self.session.get(Resource, proposal["resource_id"])
+
+        requester = (
+            self.engine.find_person_by_email(outcome.requester_email or "")
+            if outcome.requester_email
+            else None
+        )
+        booking = {
+            **proposal,
+            "assigned_to_email": outcome.requester_email,
+            "assigned_to_person_id": requester.person_id if requester else None,
+            "auto": actor == "system" or actor == "requester",
+            "confirmed_by": actor,
+            "pending_confirmation": False,
+        }
+        if room:
+            room.status = "RESERVED"
+            if requester:
+                room.allocated_to_person_id = requester.person_id
+            room.attributes = {**(room.attributes or {}), "booking": booking}
+            self.session.add(room)
+
+        outcome.facts = {
+            **facts,
             "booked_room": booking,
             "assigned_to": outcome.requester_email,
+            "pending_confirmation": False,
             "needs_ops": False,
+            "booking_confirmed": True,
         }
         if requester and not outcome.requester_person_id:
             outcome.requester_person_id = requester.person_id
@@ -313,10 +527,14 @@ class ScenarioOrchestrator:
             self.engine.update_task_status(
                 task,
                 "VERIFIED",
-                actor="system",
-                resolution=f"Auto-reserved {room.name} for {outcome.requester_email}",
+                actor=actor,
+                resolution=f"Confirmed {booking.get('name')} for {outcome.requester_email}",
             )
 
+        when = booking.get("date")
+        start = booking.get("start")
+        end = booking.get("end")
+        duration = booking.get("duration_hours")
         when_bits = f" on {when}" if when else ""
         time_bits = ""
         if start and end:
@@ -326,12 +544,12 @@ class ScenarioOrchestrator:
         if duration and not end:
             time_bits += f" ({duration}h)"
         body = (
-            f"Your meeting room is confirmed.\n\n"
-            f"Room: {room.name}\n"
+            f"Your meeting room booking is confirmed.\n\n"
+            f"Room: {booking.get('name')}\n"
             f"For: {outcome.requester_email}\n"
-            f"Attendees: {needed}{when_bits}{time_bits}\n"
+            f"Attendees: {booking.get('attendees')}{when_bits}{time_bits}\n"
             f"Case: {outcome.case_reference}\n\n"
-            f"No further action needed unless your plans change."
+            "No further action needed unless your plans change."
         )
         if outcome.requester_email:
             self.comms.send_case_update(
@@ -341,20 +559,19 @@ class ScenarioOrchestrator:
                 recipients=[outcome.requester_email],
                 action_label="BOOKING CONFIRMED",
             )
-
         try:
-            self.engine.try_close(outcome, actor="system")
+            self.engine.try_close(outcome, actor=actor)
         except ValueError as exc:
             logger.info(
-                "meeting_room_auto_booked_not_closed",
+                "meeting_room_confirmed_not_closed",
                 outcome_id=outcome.outcome_id,
                 reason=str(exc),
             )
         logger.info(
-            "meeting_room_auto_booked",
+            "meeting_room_confirmed",
             outcome_id=outcome.outcome_id,
-            room=room.name,
-            requester=outcome.requester_email,
+            room=booking.get("name"),
+            actor=actor,
         )
 
     def confirm_meeting_room_booking(
@@ -373,6 +590,17 @@ class ScenarioOrchestrator:
         facts = dict(outcome.facts or {})
         if facts.get("booked_room"):
             raise ValueError("This booking is already confirmed")
+
+        # If a proposal is waiting, finalize that (optionally override room name)
+        if facts.get("proposed_room") and not room_name:
+            if note:
+                facts["ops_note"] = note
+                outcome.facts = facts
+                self.session.add(outcome)
+            self._finalize_proposed_meeting_room(outcome, actor=actor)
+            self.session.commit()
+            self.session.refresh(outcome)
+            return outcome
 
         attendees = facts.get("attendees")
         when = facts.get("date")
@@ -397,20 +625,13 @@ class ScenarioOrchestrator:
             if room is None:
                 room = next((r for r in candidates if wanted in (r.name or "").lower()), None)
         if room is None:
-            room = self._find_available_meeting_room(needed)
+            room = self._find_available_meeting_room(
+                needed,
+                location_preference=facts.get("location_preference"),
+            )
 
         display_name = (room.name if room else None) or (room_name and room_name.strip()) or "Assigned meeting room"
-        requester = (
-            self.engine.find_person_by_email(outcome.requester_email or "")
-            if outcome.requester_email
-            else None
-        )
-        if room:
-            room.status = "RESERVED"
-            if requester:
-                room.allocated_to_person_id = requester.person_id
-
-        booking = {
+        proposal = {
             "resource_id": room.resource_id if room else None,
             "name": display_name,
             "capacity": (room.attributes or {}).get("capacity") if room else None,
@@ -419,75 +640,16 @@ class ScenarioOrchestrator:
             "start": start,
             "end": end,
             "duration_hours": duration,
-            "assigned_to_email": outcome.requester_email,
-            "assigned_to_person_id": requester.person_id if requester else None,
-            "auto": False,
-            "confirmed_by": actor,
+            "meeting_type": facts.get("meeting_type"),
+            "hybrid_av": facts.get("hybrid_av"),
+            "location_preference": facts.get("location_preference"),
+            "catering": facts.get("catering"),
+            "special_access": facts.get("special_access"),
             "note": note,
         }
-        if room:
-            room.attributes = {**(room.attributes or {}), "booking": booking}
-            self.session.add(room)
-
-        outcome.facts = {
-            **facts,
-            "booked_room": booking,
-            "assigned_to": outcome.requester_email,
-            "needs_ops": False,
-        }
-        if requester and not outcome.requester_person_id:
-            outcome.requester_person_id = requester.person_id
+        outcome.facts = {**facts, "proposed_room": proposal, "pending_confirmation": True}
         self.session.add(outcome)
-
-        task = self.session.exec(
-            select(Task).where(
-                Task.outcome_id == outcome.outcome_id,
-                Task.code == "RESERVE_ROOM",
-            )
-        ).first()
-        if task and task.status not in {"VERIFIED", "CLOSED"}:
-            self.engine.update_task_status(
-                task,
-                "VERIFIED",
-                actor=actor,
-                resolution=f"Confirmed {display_name} for {outcome.requester_email}",
-            )
-
-        when_bits = f" on {when}" if when else ""
-        time_bits = ""
-        if start and end:
-            time_bits = f" from {start} to {end}"
-        elif start:
-            time_bits = f" at {start}"
-        if duration and not end:
-            time_bits += f" ({duration}h)"
-        note_bits = f"\nNote: {note}" if note else ""
-        body = (
-            f"Your meeting room is confirmed.\n\n"
-            f"Room: {display_name}\n"
-            f"For: {outcome.requester_email}\n"
-            f"Attendees: {needed}{when_bits}{time_bits}\n"
-            f"Case: {outcome.case_reference}"
-            f"{note_bits}\n\n"
-            f"Please reply to this email if you need to change anything."
-        )
-        if outcome.requester_email:
-            self.comms.send_case_update(
-                outcome=outcome,
-                communication_type="COMPLETED",
-                body=body,
-                recipients=[outcome.requester_email],
-                action_label="BOOKING CONFIRMED",
-            )
-
-        try:
-            self.engine.try_close(outcome, actor=actor)
-        except ValueError as exc:
-            logger.info(
-                "meeting_room_ops_confirmed_not_closed",
-                outcome_id=outcome.outcome_id,
-                reason=str(exc),
-            )
+        self._finalize_proposed_meeting_room(outcome, actor=actor)
         self.session.commit()
         self.session.refresh(outcome)
         return outcome
@@ -555,36 +717,25 @@ class ScenarioOrchestrator:
         facts: dict,
         extraction: Optional[ExtractionResult],
     ) -> Optional[str]:
-        if extraction:
-            if extraction.human_review_required:
-                return "human_review_required"
-            if extraction.safety_concern:
-                return "safety_concern"
-            if extraction.financial_action:
-                return "financial_action"
-            if extraction.access_control_action:
-                return "access_control_action"
-            if extraction.recommended_priority in {"HIGH", "CRITICAL"} and (
-                extraction.human_review_required or extraction.safety_concern
-            ):
-                return "sensitive_priority"
-
-        blob_parts = [
-            str(facts.get("notes") or ""),
-            str(facts.get("special_requests") or ""),
-            str(facts.get("requirements") or ""),
-            " ".join(str(i.get("summary", "")) for i in (facts.get("issues") or []) if isinstance(i, dict)),
-        ]
-        if extraction:
-            blob_parts.append(extraction.summary or "")
-            blob_parts.append(extraction.reason or "")
-        blob = " ".join(blob_parts).lower()
-        for kw in _EXTRAORDINARY_KEYWORDS:
-            if kw in blob:
-                return f"special_request:{kw}"
+        """Ops only for sensitive flags — facility needs are normal checklist fields."""
+        del facts  # checklist fields are handled elsewhere
+        if not extraction:
+            return None
+        if extraction.human_review_required:
+            return "human_review_required"
+        if extraction.safety_concern:
+            return "safety_concern"
+        if extraction.financial_action:
+            return "financial_action"
+        if extraction.access_control_action:
+            return "access_control_action"
         return None
 
-    def _find_available_meeting_room(self, attendees: int) -> Optional[Resource]:
+    def _find_available_meeting_room(
+        self,
+        attendees: int,
+        location_preference: Optional[str] = None,
+    ) -> Optional[Resource]:
         rooms = self.session.exec(
             select(Resource).where(
                 Resource.tenant_id == self.tenant_id,
@@ -604,6 +755,17 @@ class ScenarioOrchestrator:
                 fitting.append((cap, room))
         if not fitting:
             return None
+        pref = (location_preference or "").strip().lower()
+        if pref and pref not in {"any", "none", "n/a", "na", "no preference", "wherever"}:
+            preferred = [
+                (cap, room)
+                for cap, room in fitting
+                if pref in (room.name or "").lower()
+                or pref in str((room.attributes or {}).get("floor") or "").lower()
+                or pref in str((room.attributes or {}).get("building") or "").lower()
+            ]
+            if preferred:
+                fitting = preferred
         fitting.sort(key=lambda item: item[0])
         return fitting[0][1]
 

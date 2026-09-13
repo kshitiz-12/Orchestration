@@ -131,9 +131,14 @@ class GeminiProvider(LLMProvider):
             "instructions": (
                 "Extract structured information. Identify missing mandatory fields. "
                 "If this is a meeting room / conference room / booking request, set event_type=MEETING_ROOM "
-                "and extract attendees, date, start time, duration when present. "
-                "If attendees, preferred time, or duration are missing, add blocking missing_information "
-                "with clear questions. "
+                "and extract when present: attendees, date, preferred_time, end_time or duration_hours, "
+                "meeting_type, hybrid_av, location_preference, catering, special_access. "
+                "Do NOT invent facility needs — if AV/catering/access are not mentioned, leave them unset "
+                "(the system will assume none and ask the user to confirm). "
+                "Only attendees/date/time/duration are mandatory missing_information. "
+                "If the user is confirming a proposed booking (yes/confirm/go ahead), set "
+                "entities.booking_confirmed=true. "
+                "If they add new facilities in a reply, extract those fields. "
                 "If multiple issues exist, list each separately. "
                 "Do not invent facts not present in the email or allowed_context."
             ),
@@ -240,14 +245,6 @@ class HeuristicProvider(LLMProvider):
             )
             if m_people:
                 entities["attendees"] = int(m_people.group(1))
-            elif "attendees" not in entities:
-                missing.append(
-                    {
-                        "field": "attendees",
-                        "question": "How many people / attendees will attend?",
-                        "blocking": True,
-                    }
-                )
 
             m_date = re.search(
                 r"(\d{1,2}(?:st|nd|rd|th)?\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|"
@@ -261,31 +258,10 @@ class HeuristicProvider(LLMProvider):
             )
             if "tomorrow" in text:
                 entities["date"] = "tomorrow"
+            elif "today" in text:
+                entities["date"] = "today"
             elif m_date:
                 entities["date"] = m_date.group(1).strip()
-            elif any(
-                k in text
-                for k in [
-                    "today",
-                    "monday",
-                    "tuesday",
-                    "wednesday",
-                    "thursday",
-                    "friday",
-                    "saturday",
-                    "sunday",
-                    "/",
-                ]
-            ):
-                pass  # date mentioned loosely; leave to Gemini when available
-            elif "date" not in entities:
-                missing.append(
-                    {
-                        "field": "date",
-                        "question": "Which date do you need the room?",
-                        "blocking": True,
-                    }
-                )
 
             m_range = re.search(
                 r"(\d{1,2}(?::\d{2})?\s*(?:am|pm))\s*(?:to|-|–)\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm))",
@@ -296,7 +272,6 @@ class HeuristicProvider(LLMProvider):
             if m_range:
                 entities["preferred_time"] = m_range.group(1).strip()
                 entities["end_time"] = m_range.group(2).strip()
-                # Approximate duration when both ends look like whole hours
                 try:
                     def _hour(tok: str) -> float:
                         tok = tok.lower().replace(" ", "")
@@ -313,26 +288,133 @@ class HeuristicProvider(LLMProvider):
                     pass
             elif m_time:
                 entities["preferred_time"] = m_time.group(1).strip()
-            elif "preferred_time" not in entities and not any(k in text for k in ["am", "pm", ":"]):
-                missing.append(
-                    {
-                        "field": "preferred_time",
-                        "question": "What preferred start time (e.g. 3 PM)?",
-                        "blocking": True,
-                    }
-                )
 
             m_dur = re.search(r"(\d+(?:\.\d+)?)\s*(?:hours?|hrs?)", text)
             if m_dur:
                 entities["duration_hours"] = float(m_dur.group(1))
-            elif "duration_hours" not in entities and "end_time" not in entities:
-                missing.append(
-                    {
-                        "field": "duration",
-                        "question": "How long do you need the room (duration)?",
-                        "blocking": True,
-                    }
-                )
+
+            # Meeting type / purpose
+            if any(k in text for k in ["board meeting", "boardroom", "board room", "executive"]):
+                entities["meeting_type"] = "executive / board meeting"
+            elif any(k in text for k in ["client pitch", "client visit", "external client", "pitch"]):
+                entities["meeting_type"] = "external client pitch"
+            elif "workshop" in text:
+                entities["meeting_type"] = "workshop"
+            elif any(k in text for k in ["huddle", "standup", "stand-up", "internal meeting", "internal huddle"]):
+                entities["meeting_type"] = "internal huddle"
+            elif "interview" in text:
+                entities["meeting_type"] = "interview"
+            elif "training" in text:
+                entities["meeting_type"] = "training"
+
+            # Hybrid / AV
+            if any(
+                k in text
+                for k in [
+                    "zoom",
+                    "teams room",
+                    "microsoft teams",
+                    "video conference",
+                    "videocall",
+                    "hybrid",
+                    "remote participant",
+                    "dial-in",
+                    "av setup",
+                    "a/v",
+                    "projector",
+                ]
+            ):
+                entities["hybrid_av"] = "yes — video/AV needed"
+            elif any(
+                k in text
+                for k in [
+                    "in person only",
+                    "in-person only",
+                    "no remote",
+                    "no hybrid",
+                    "no zoom",
+                    "no teams",
+                    "no av",
+                    "no a/v",
+                ]
+            ) or re.search(r"\bhybrid\s*/\s*av[^a-z]*:\s*no\b", text):
+                entities["hybrid_av"] = "no"
+            elif re.search(r"\b(no remote|without video)\b", text):
+                entities["hybrid_av"] = "no"
+
+            # Location preference
+            m_floor = re.search(
+                r"(?:floor|building|wing|block)\s*([a-z0-9-]+)|"
+                r"\b(f\d+|ground floor|1st floor|2nd floor|3rd floor)\b|"
+                r"\bany\s+(?:floor|building|location)\b|"
+                r"\bno\s+preference\b|"
+                r"\bany\b(?=.*(?:floor|building|location|wing))",
+                text,
+                re.I,
+            )
+            if re.search(r"\b(any|no preference|wherever)\b", text) and (
+                "floor" in text or "building" in text or "location" in text or "wing" in text or "prefer" in text
+            ):
+                entities["location_preference"] = "any"
+            elif "any" in text and len(text.strip()) < 80 and "floor" not in text:
+                # short reply "any" to location question
+                if "location" in text or prior.get("attendees"):
+                    pass
+            if m_floor:
+                entities["location_preference"] = m_floor.group(0).strip()
+            if re.search(r"^\s*any\s*\.?\s*$", text.strip()) or text.strip() in {"any", "any floor", "no preference"}:
+                entities["location_preference"] = "any"
+
+            # Catering
+            if any(
+                k in text
+                for k in ["no catering", "no food", "no snacks", "no coffee", "without catering", "catering: none"]
+            ) or re.search(r"\bcatering\b[^a-z]{0,12}\b(none|no)\b", text):
+                entities["catering"] = "none"
+            elif any(k in text for k in ["catering", "coffee", "snacks", "lunch", "tea", "meals", "refreshment"]):
+                entities["catering"] = "requested"
+            elif re.search(r"^\s*none\s*\.?\s*$", text.strip()):
+                # ambiguous short "none" — apply to open facility gaps from prior
+                if "catering" not in entities:
+                    entities["catering"] = "none"
+                if "special_access" not in entities:
+                    entities["special_access"] = "none"
+
+            # Special access / security
+            if any(
+                k in text
+                for k in [
+                    "no visitor",
+                    "no visitors",
+                    "no special access",
+                    "no security",
+                    "no guest",
+                    "no external",
+                    "special access: none",
+                ]
+            ):
+                entities["special_access"] = "none"
+            elif any(
+                k in text
+                for k in [
+                    "visitor pass",
+                    "visitor passes",
+                    "external guest",
+                    "external guests",
+                    "client access",
+                    "security clearance",
+                    "badge",
+                    "restricted room",
+                ]
+            ):
+                entities["special_access"] = "required"
+
+            from app.services.meeting_room import is_booking_confirmation, meeting_room_gaps
+
+            if is_booking_confirmation(f"{subject}\n{body}"):
+                entities["booking_confirmed"] = True
+
+            missing = meeting_room_gaps(entities)
 
             # Complete request → high confidence auto path
             if not missing:

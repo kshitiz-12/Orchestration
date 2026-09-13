@@ -123,11 +123,9 @@ class CommunicationService:
     ) -> Communication:
         questions = [q for q in questions if q]
         if not questions:
-            questions = [
-                "How many people will attend?",
-                "What date and preferred start time?",
-                "How long do you need the room (duration)?",
-            ]
+            from app.services.meeting_room import default_meeting_room_questions
+
+            questions = default_meeting_room_questions()
         ref = case_reference or "PENDING"
         subject = f"[INFORMATION REQUIRED] [{ref}] Additional details needed"
         body = (

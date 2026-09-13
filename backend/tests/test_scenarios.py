@@ -404,10 +404,29 @@ def test_api_login_and_kpis(client, auth_headers):
     assert "outcomes_active" in data
 
 
-def test_meeting_room_auto_books_when_available(session: Session):
+def _complete_meeting_room_entities(**extra):
+    base = {
+        "attendees": 5,
+        "date": "15th october",
+        "preferred_time": "3 pm",
+        "end_time": "7pm",
+        "duration_hours": 4.0,
+        "meeting_type": "internal huddle",
+        "hybrid_av": "no",
+        "location_preference": "any",
+        "catering": "none",
+        "special_access": "none",
+    }
+    base.update(extra)
+    return base
+
+
+def test_meeting_room_proposes_then_confirms(session: Session):
     from app.models.org import Resource
+    from app.models.outcome import Communication
 
     tid = _tenant(session)
+    # Core only — silence on AV/catering should default and still propose
     extraction = ExtractionResult(
         event_type="MEETING_ROOM",
         summary="Meeting room for 5 on 15th october at 3 pm",
@@ -432,7 +451,8 @@ def test_meeting_room_auto_books_when_available(session: Session):
     session.add(conv)
     session.commit()
 
-    outcome = ScenarioOrchestrator(session, tid).orchestrate(
+    orch = ScenarioOrchestrator(session, tid)
+    outcome = orch.orchestrate(
         extraction=extraction,
         requester_email="employee1@acme.demo",
         conversation_id=conv.conversation_id,
@@ -440,35 +460,127 @@ def test_meeting_room_auto_books_when_available(session: Session):
         context={},
     )
     session.refresh(outcome)
-    assert outcome.facts.get("booked_room")
-    assert outcome.facts["booked_room"]["assigned_to_email"] == "employee1@acme.demo"
-    assert outcome.status in {"CLOSED", "VERIFIED", "ACTIVE"}
-    task = session.exec(
-        select(Task).where(Task.outcome_id == outcome.outcome_id, Task.code == "RESERVE_ROOM")
+    assert outcome.facts.get("pending_confirmation") is True
+    assert outcome.facts.get("proposed_room")
+    assert outcome.facts.get("hybrid_av") == "no"
+    assert outcome.facts.get("catering") == "none"
+    assert not outcome.facts.get("booked_room")
+    propose_mail = session.exec(
+        select(Communication).where(Communication.outcome_id == outcome.outcome_id)
     ).first()
-    assert task.status == "VERIFIED"
-    room = session.get(Resource, outcome.facts["booked_room"]["resource_id"])
+    assert propose_mail is not None
+    assert "CONFIRM BOOKING" in (propose_mail.subject or "")
+    assert "should we confirm" in (propose_mail.body or "").lower()
+    assert "hybrid / av: no" in (propose_mail.body or "").lower()
+
+    confirm = ExtractionResult(
+        event_type="MEETING_ROOM",
+        summary="confirm",
+        entities={**outcome.facts, "booking_confirmed": True},
+        missing_information=[],
+        confidence=0.95,
+        recommended_next_action="route_to_outcome_engine",
+        reason="confirmed",
+    )
+    outcome2 = orch.orchestrate(
+        extraction=confirm,
+        requester_email="employee1@acme.demo",
+        conversation_id=conv.conversation_id,
+        business_event_id="evt_room_confirm",
+        context={},
+    )
+    session.refresh(outcome2)
+    assert outcome2.facts.get("booked_room")
+    assert outcome2.facts.get("pending_confirmation") is False
+    assert outcome2.status in {"CLOSED", "VERIFIED", "ACTIVE"}
+    room = session.get(Resource, outcome2.facts["booked_room"]["resource_id"])
     assert room is not None
     assert room.status == "RESERVED"
 
 
-def test_meeting_room_extraordinary_stays_with_ops(session: Session):
+def test_meeting_room_addon_before_confirm_updates_proposal(session: Session):
+    from app.models.outcome import Communication
+
+    tid = _tenant(session)
+    orch = ScenarioOrchestrator(session, tid)
+    conv = Conversation(
+        tenant_id=tid,
+        thread_id="t-room-addon",
+        requester_email="employee3@acme.demo",
+    )
+    session.add(conv)
+    session.commit()
+    first = ExtractionResult(
+        event_type="MEETING_ROOM",
+        summary="room for 4",
+        entities={
+            "attendees": 4,
+            "date": "tomorrow",
+            "preferred_time": "10 am",
+            "duration_hours": 2,
+        },
+        missing_information=[],
+        confidence=0.9,
+        reason="core",
+    )
+    outcome = orch.orchestrate(
+        extraction=first,
+        requester_email="employee3@acme.demo",
+        conversation_id=conv.conversation_id,
+        business_event_id="evt_a1",
+        context={},
+    )
+    assert outcome.facts.get("pending_confirmation")
+    addon = ExtractionResult(
+        event_type="MEETING_ROOM",
+        summary="also need catering and zoom",
+        entities={
+            **outcome.facts,
+            "catering": "coffee and snacks",
+            "hybrid_av": "yes — video/AV needed",
+        },
+        missing_information=[],
+        confidence=0.9,
+        reason="addon",
+    )
+    outcome2 = orch.orchestrate(
+        extraction=addon,
+        requester_email="employee3@acme.demo",
+        conversation_id=conv.conversation_id,
+        business_event_id="evt_a2",
+        context={},
+    )
+    assert outcome2.facts.get("catering") == "coffee and snacks"
+    assert outcome2.facts.get("pending_confirmation") is True
+    assert not outcome2.facts.get("booked_room")
+    mails = session.exec(
+        select(Communication).where(Communication.outcome_id == outcome2.outcome_id)
+    ).all()
+    assert len(mails) >= 2
+    assert any("updated" in (m.body or "").lower() for m in mails)
+
+
+def test_meeting_room_full_checklist_with_catering_proposes(session: Session):
     from app.models.outcome import Communication
 
     tid = _tenant(session)
     extraction = ExtractionResult(
         event_type="MEETING_ROOM",
         summary="Need boardroom with catering for VIP client visit",
-        entities={
-            "attendees": 4,
-            "date": "tomorrow",
-            "preferred_time": "10 am",
-            "duration_hours": 2,
-            "special_requests": "catering for VIP",
-        },
+        entities=_complete_meeting_room_entities(
+            attendees=4,
+            date="tomorrow",
+            preferred_time="10 am",
+            duration_hours=2,
+            meeting_type="external client pitch",
+            catering="requested",
+            special_access="required",
+            hybrid_av="yes — video/AV needed",
+            location_preference="boardroom",
+        ),
         missing_information=[],
         confidence=0.9,
-        reason="special",
+        reason="complete",
     )
     conv = Conversation(
         tenant_id=tid,
@@ -484,17 +596,12 @@ def test_meeting_room_extraordinary_stays_with_ops(session: Session):
         business_event_id="evt_room_vip",
         context={},
     )
-    assert not outcome.facts.get("booked_room")
-    assert outcome.facts.get("needs_ops") is True
-    assert outcome.facts.get("ops_ack_sent") is True
-    task = session.exec(
-        select(Task).where(Task.outcome_id == outcome.outcome_id, Task.code == "RESERVE_ROOM")
-    ).first()
-    assert task.status == "ASSIGNED"
+    assert outcome.facts.get("pending_confirmation") is True
+    assert outcome.facts.get("proposed_room")
+    assert not outcome.facts.get("needs_ops")
     msg = session.exec(
         select(Communication).where(Communication.outcome_id == outcome.outcome_id)
     ).first()
     assert msg is not None
-    assert msg.communication_type == "INFORMATION_ONLY"
-    assert "as soon as possible" in (msg.body or "").lower()
-    assert "REQUEST RECEIVED" in (msg.subject or "") or "received" in (msg.subject or "").lower()
+    assert "CONFIRM BOOKING" in (msg.subject or "")
+    assert "should we confirm" in (msg.body or "").lower()

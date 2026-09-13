@@ -22,7 +22,12 @@ from app.schemas.ai import ExtractionResult, MissingInformation
 from app.services.communication import CommunicationService
 from app.services.context import ContextRetrievalService
 from app.services.intake import JobQueueService
-from app.services.thread_facts import meeting_room_gaps, merge_thread_prior_facts
+from app.services.meeting_room import (
+    default_meeting_room_questions,
+    is_booking_confirmation,
+    meeting_room_gaps,
+)
+from app.services.thread_facts import merge_thread_prior_facts
 
 logger = get_logger(__name__)
 
@@ -87,8 +92,14 @@ class ProcessingPipeline:
             conversation=conversation,
             exclude_event_id=event.event_id,
         )
-        # Keep any already-stored conversation facts
+        # Keep stored conversation + outcome facts (pending confirmation, checklist, etc.)
         prior_facts = {**(conversation.facts or {}), **prior_facts}
+        if conversation.current_outcome_id:
+            from app.models.outcome import Outcome
+
+            current = self.session.get(Outcome, conversation.current_outcome_id)
+            if current and current.facts:
+                prior_facts = {**(current.facts or {}), **prior_facts}
 
         # Light context for first-pass extraction (requester only)
         preliminary_ctx = self.context.for_extraction(None, event.sender, prior_facts)
@@ -211,11 +222,7 @@ class ProcessingPipeline:
                 if q
             ]
             if not questions:
-                questions = [
-                    "How many people will attend?",
-                    "What date and preferred start time?",
-                    "How long do you need the room (duration)?",
-                ]
+                questions = default_meeting_room_questions()
             self.comms.send_clarification(
                 conversation=conversation,
                 questions=questions,
@@ -384,11 +391,23 @@ class ProcessingPipeline:
                 if value is not None and value != "":
                     merged[key] = value
 
+            body_text = f"{subject}\n{body}"
+            if is_booking_confirmation(body_text) or merged.get("booking_confirmed"):
+                merged["booking_confirmed"] = True
+
             gaps = meeting_room_gaps(merged)
+            # While awaiting confirm, don't re-ask checklist questions
+            if merged.get("pending_confirmation") and merged.get("proposed_room"):
+                gaps = []
             extraction.entities = merged
             extraction.missing_information = [MissingInformation(**g) for g in gaps]
             extraction.clarification_questions = [g["question"] for g in gaps]
-            if not gaps:
+            if merged.get("booking_confirmed") and merged.get("pending_confirmation"):
+                extraction.confidence = max(extraction.confidence, 0.95)
+                extraction.human_review_required = False
+                extraction.recommended_next_action = "route_to_outcome_engine"
+                extraction.reason = (extraction.reason or "") + " | requester confirmed meeting room booking"
+            elif not gaps:
                 extraction.confidence = max(extraction.confidence, 0.9)
                 extraction.human_review_required = False
                 extraction.recommended_next_action = "route_to_outcome_engine"
