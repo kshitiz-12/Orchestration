@@ -172,6 +172,78 @@ export default function OutcomeDetailPage() {
         </div>
       )}
 
+      {outcome.template_code === "MEETING_ROOM" && (
+        <div className="panel" style={{ marginBottom: "1.25rem" }}>
+          <h2 style={{ marginBottom: "0.5rem" }}>Meeting outcome stages</h2>
+          <p className="muted" style={{ marginTop: 0 }}>
+            Ops: {String(facts.operational_status || "ACTIVE")} · Finance:{" "}
+            {String(facts.financial_status || "NOT_STARTED")} · Readiness: {outcome.readiness_pct ?? 0}%
+            {facts.auto_booked_low_risk ? " · Low-risk auto-book" : ""}
+          </p>
+          {Array.isArray(facts.checklist_missing) && facts.checklist_missing.length > 0 && (
+            <p style={{ marginTop: 0 }}>
+              Incomplete — waiting on: {(facts.checklist_missing as string[]).join(", ")}. No room booked
+              until mandatory facts are provided.
+            </p>
+          )}
+          {Array.isArray(facts.policy_assumptions) && facts.policy_assumptions.length > 0 && (
+            <ul style={{ margin: "0.5rem 0", paddingLeft: "1.1rem" }}>
+              {(facts.policy_assumptions as { message?: string; code?: string }[]).map((a, i) => (
+                <li key={i}>{a.message || a.code}</li>
+              ))}
+            </ul>
+          )}
+          {Array.isArray(facts.execution_plan) && facts.execution_plan.length > 0 && (
+            <ul style={{ margin: "0.5rem 0 0", paddingLeft: "1.1rem" }}>
+              {(facts.execution_plan as string[]).map((step, i) => (
+                <li key={i}>{step}</li>
+              ))}
+            </ul>
+          )}
+          {facts.booked_room && typeof facts.booked_room === "object" && (
+            <p style={{ marginBottom: 0 }}>
+              Room: {(facts.booked_room as any).name}
+              {facts.hold_start ? ` · Hold: ${facts.hold_start} – ${facts.hold_end || ""}` : ""}
+            </p>
+          )}
+          {Array.isArray(facts.visitors) && facts.visitors.length > 0 && (
+            <p className="muted">Visitors prepared: {(facts.visitors as any[]).length}</p>
+          )}
+          {Array.isArray(facts.parking_allocation) && (
+            <p className="muted">Parking spaces: {(facts.parking_allocation as any[]).length}</p>
+          )}
+          {facts.catering_quote && typeof facts.catering_quote === "object" && (
+            <p className="muted">
+              Catering quote: INR {(facts.catering_quote as any).amount_ex_tax} (
+              {(facts.catering_quote as any).vendor})
+            </p>
+          )}
+          {facts.operational_status === "CLOSED" && facts.financial_status !== "CLOSED" && (
+            <button
+              className="btn secondary"
+              style={{ marginTop: "0.75rem" }}
+              disabled={busy === "fin"}
+              onClick={async () => {
+                setBusy("fin");
+                try {
+                  await api(`/outcomes/${id}/close-financial`, { method: "POST" });
+                  setMsgTone("ok");
+                  setMsg("Financial close completed.");
+                  load();
+                } catch (e: any) {
+                  setMsgTone("danger");
+                  setMsg(e.message);
+                } finally {
+                  setBusy("");
+                }
+              }}
+            >
+              Close financials
+            </button>
+          )}
+        </div>
+      )}
+
       {needsOpsConfirm && (
         <div className="panel" style={{ marginBottom: "1.25rem" }}>
           <h2 style={{ marginBottom: "0.5rem" }}>Confirm this booking</h2>

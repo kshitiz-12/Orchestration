@@ -180,18 +180,48 @@ def seed(session: Session) -> str:
                 status="AVAILABLE",
             )
         )
-    # Bookable meeting rooms (auto-assigned when request is complete + ordinary)
+    # Bookable meeting rooms with VC/display attributes
+    room_specs = [
+        (8, False, True, False, "Focus Room 5A", "5", "finance"),
+        (8, True, True, False, "Focus Room 5B", "5", "finance"),
+        (10, True, True, False, "Meeting Room 5C", "5", ""),
+        (16, True, True, False, "Conference Room 8B", "8", ""),
+        (20, True, True, False, "Conference Room 12A", "12", ""),
+        (16, True, True, True, "Conference Room 10B", "10", ""),
+        (12, True, False, False, "Meeting Room F1-R1", "1", ""),
+        (10, False, True, False, "Meeting Room F1-R2", "1", ""),
+        (8, True, True, False, "Meeting Room F2-R1", "2", ""),
+        (6, False, False, False, "Huddle Room F2-R2", "2", ""),
+    ]
     room_locations = [loc for loc in rooms if getattr(loc, "type", None) == "ROOM"]
-    capacities = [4, 6, 8, 10, 12, 16]
-    for i, loc in enumerate(room_locations[:6]):
+    for i, (cap, vc, display, complaint, name, floor, near) in enumerate(room_specs):
+        loc = room_locations[i] if i < len(room_locations) else None
         session.add(
             Resource(
                 tenant_id=tid,
                 type="MEETING_ROOM",
-                name=f"Meeting Room {loc.name}",
-                location_id=loc.location_id,
+                name=name,
+                location_id=loc.location_id if loc else None,
                 status="AVAILABLE",
-                attributes={"capacity": capacities[i % len(capacities)]},
+                attributes={
+                    "capacity": cap,
+                    "video_conferencing": vc,
+                    "presentation_display": display,
+                    "display": display,
+                    "open_complaint": complaint,
+                    "floor": floor,
+                    "near_department": near,
+                },
+            )
+        )
+    for i in range(1, 6):
+        session.add(
+            Resource(
+                tenant_id=tid,
+                type="PARKING_SLOT",
+                name=f"Guest-P-{i:02d}",
+                status="AVAILABLE",
+                attributes={"guest": True},
             )
         )
 
@@ -201,6 +231,7 @@ def seed(session: Session) -> str:
         ("BrightFurniture Co", "Furniture", "orders@brightfurniture.demo"),
         ("SecureChips Ltd", "IT Hardware", "billing@securechips.demo"),
         ("CleanSupply Partners", "Facilities", "support@cleansupply.demo"),
+        ("FreshServe Catering Pvt. Ltd.", "Catering", "orders@freshserve.demo"),
     ]:
         v = Vendor(
             tenant_id=tid,
@@ -210,18 +241,18 @@ def seed(session: Session) -> str:
             location="Bengaluru",
             status="ACTIVE",
             approved_services=[cat],
-            pricing={"currency": "INR"},
+            pricing={"currency": "INR", "per_person": 450} if cat == "Catering" else {"currency": "INR"},
         )
         session.add(v)
         vendors.append(v)
     session.flush()
 
     contracts = []
-    for v, rate in zip(vendors, [1200.0, 45000.0, 800.0]):
+    for v, rate in zip(vendors, [1200.0, 45000.0, 800.0, 450.0]):
         c = Contract(
             tenant_id=tid,
             vendor_id=v.vendor_id,
-            name=f"{v.name} MSA",
+            name=f"{v.name} MSA" if v.category != "Catering" else "CAT-GGN-2026-04",
             rate_card={"unit_rate": rate, "currency": "INR"},
             status="ACTIVE",
         )
@@ -230,7 +261,7 @@ def seed(session: Session) -> str:
     session.flush()
 
     pos = []
-    for i, (v, c) in enumerate(zip(vendors, contracts), start=1):
+    for i, (v, c) in enumerate(zip(vendors[:3], contracts[:3]), start=1):
         for j in range(1, 3 if i < 3 else 2):
             po = PurchaseOrder(
                 tenant_id=tid,
@@ -405,25 +436,12 @@ def seed(session: Session) -> str:
             ],
         )
     )
+    from app.engine.meeting_scenario import MEETING_ROOM_TEMPLATE
+
     session.add(
         OutcomeTemplate(
             tenant_id=tid,
-            code="MEETING_ROOM",
-            name="Meeting room booking",
-            category="MEETING_ROOM",
-            case_prefix="ROOM",
-            requirements=[
-                {"code": "BOOKING", "title": "Meeting room reserved for requester", "is_mandatory": True}
-            ],
-            tasks=[
-                {
-                    "code": "RESERVE_ROOM",
-                    "title": "Reserve meeting room (auto when available)",
-                    "owner_role": "OPERATOR",
-                    "task_group": "Ops",
-                    "requirement_code": "BOOKING",
-                },
-            ],
+            **MEETING_ROOM_TEMPLATE,
         )
     )
     session.add(

@@ -342,13 +342,20 @@ class HeuristicProvider(LLMProvider):
             elif re.search(r"\b(no remote|without video)\b", text):
                 entities["hybrid_av"] = "no"
 
+            # Presentation / VC keywords already partly handled; display
+            if any(k in text for k in ["presentation", "projector", "display screen", "screen share"]):
+                entities["presentation_display"] = "yes"
+            if any(k in text for k in ["video-conferencing", "video conferencing", "videoconferencing", "vc required"]):
+                entities["hybrid_av"] = "yes — video/AV needed"
+
             # Location preference
+            if "corporate office" in text:
+                entities["location_preference"] = "Corporate Office"
             m_floor = re.search(
                 r"(?:floor|building|wing|block)\s*([a-z0-9-]+)|"
                 r"\b(f\d+|ground floor|1st floor|2nd floor|3rd floor)\b|"
                 r"\bany\s+(?:floor|building|location)\b|"
-                r"\bno\s+preference\b|"
-                r"\bany\b(?=.*(?:floor|building|location|wing))",
+                r"\bno\s+preference\b",
                 text,
                 re.I,
             )
@@ -356,67 +363,81 @@ class HeuristicProvider(LLMProvider):
                 "floor" in text or "building" in text or "location" in text or "wing" in text or "prefer" in text
             ):
                 entities["location_preference"] = "any"
-            elif "any" in text and len(text.strip()) < 80 and "floor" not in text:
-                # short reply "any" to location question
-                if "location" in text or prior.get("attendees"):
-                    pass
-            if m_floor:
+            if m_floor and "location_preference" not in entities:
                 entities["location_preference"] = m_floor.group(0).strip()
             if re.search(r"^\s*any\s*\.?\s*$", text.strip()) or text.strip() in {"any", "any floor", "no preference"}:
                 entities["location_preference"] = "any"
 
-            # Catering
+            # Catering / high tea
             if any(
                 k in text
                 for k in ["no catering", "no food", "no snacks", "no coffee", "without catering", "catering: none"]
             ) or re.search(r"\bcatering\b[^a-z]{0,12}\b(none|no)\b", text):
                 entities["catering"] = "none"
-            elif any(k in text for k in ["catering", "coffee", "snacks", "lunch", "tea", "meals", "refreshment"]):
-                entities["catering"] = "requested"
-            elif re.search(r"^\s*none\s*\.?\s*$", text.strip()):
-                # ambiguous short "none" — apply to open facility gaps from prior
-                if "catering" not in entities:
-                    entities["catering"] = "none"
-                if "special_access" not in entities:
-                    entities["special_access"] = "none"
+            elif any(k in text for k in ["high tea", "catering", "coffee", "snacks", "lunch", "tea", "meals", "refreshment"]):
+                entities["catering"] = "high tea" if "high tea" in text else "requested"
 
-            # Special access / security
-            if any(
-                k in text
-                for k in [
-                    "no visitor",
-                    "no visitors",
-                    "no special access",
-                    "no security",
-                    "no guest",
-                    "no external",
-                    "special access: none",
-                ]
-            ):
+            m_veg = re.search(r"(\d+)\s*vegetarian", text)
+            m_nonveg = re.search(r"(\d+)\s*non[-\s]?vegetarian", text)
+            if m_veg or m_nonveg:
+                parts = []
+                if m_veg:
+                    parts.append(f"{m_veg.group(1)} vegetarian")
+                if m_nonveg:
+                    parts.append(f"{m_nonveg.group(1)} non-vegetarian")
+                if "sugar-free" in text or "sugar free" in text:
+                    parts.append("sugar-free required")
+                entities["dietary"] = ", ".join(parts)
+            elif "no allergies" in text or "no allergy" in text:
+                entities["dietary"] = entities.get("dietary") or "no allergies"
+
+            # External visitors / clients
+            m_ext = re.search(r"(\d+)\s*(?:client|external|visitor|guests?)", text)
+            if m_ext:
+                entities["external_visitors"] = int(m_ext.group(1))
+                entities["special_access"] = "required"
+            elif any(k in text for k in ["client representatives", "external visitors", "visitor names"]):
+                entities["special_access"] = "required"
+            if "visitor names" in text or "abc industries" in text:
+                entities["visitor_details"] = body[:500]
+
+            # Guest vehicles / parking
+            m_veh = re.search(r"(\d+)\s*(?:guest\s+)?(?:vehicles?|cars?|parking)", text)
+            if m_veh:
+                entities["guest_vehicles"] = int(m_veh.group(1))
+            vehicle_nos = re.findall(r"\b[A-Z]{2}\d{2}[A-Z]{0,3}\d{3,4}\b", body.upper())
+            if vehicle_nos:
+                entities["vehicle_numbers"] = ", ".join(vehicle_nos)
+                entities["guest_vehicles"] = entities.get("guest_vehicles") or len(vehicle_nos)
+
+            # Confidentiality
+            if "business confidential" in text or "confidential" in text:
+                entities["confidentiality"] = "business confidential"
+
+            # Special access defaults
+            if any(k in text for k in ["no visitor", "no visitors", "no special access", "no guest", "no external"]):
                 entities["special_access"] = "none"
-            elif any(
-                k in text
-                for k in [
-                    "visitor pass",
-                    "visitor passes",
-                    "external guest",
-                    "external guests",
-                    "client access",
-                    "security clearance",
-                    "badge",
-                    "restricted room",
-                ]
-            ):
+            elif any(k in text for k in ["visitor pass", "visitor passes", "external guest", "client access", "badge"]):
                 entities["special_access"] = "required"
 
-            from app.services.meeting_room import is_booking_confirmation, meeting_room_gaps
+            from app.services.meeting_room import (
+                is_booking_confirmation,
+                is_employee_satisfied,
+                meeting_room_gaps,
+            )
 
-            if is_booking_confirmation(f"{subject}\n{body}"):
+            blob = f"{subject}\n{body}"
+            if is_booking_confirmation(blob):
                 entities["booking_confirmed"] = True
+            if is_employee_satisfied(blob):
+                entities["employee_satisfied"] = True
+            if re.search(r"\bnew\s+meeting\b", text):
+                entities["new_request"] = True
+            if re.search(r"\bupdate\s+(room|mtg|evt)-", text):
+                entities["update_existing"] = True
 
             missing = meeting_room_gaps(entities)
 
-            # Complete request → high confidence auto path
             if not missing:
                 confidence = 0.93
             elif len(missing) >= 2:

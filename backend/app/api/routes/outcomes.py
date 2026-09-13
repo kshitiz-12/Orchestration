@@ -373,8 +373,37 @@ def decide_approval(
         after=payload.model_dump(),
         correlation_id=approval.outcome_id,
     )
+    if payload.decision == "APPROVED" and approval.approval_type == "CATERING_SPEND":
+        from app.connectors.factory import get_email_provider
+        from app.engine.meeting_scenario import ClientMeetingOrchestrator
+        from app.engine.outcome_engine import OutcomeEngine
+        from app.services.communication import CommunicationService
+
+        outcome = session.get(Outcome, approval.outcome_id)
+        if outcome:
+            email = get_email_provider(session, tenant_id)
+            sender = email if email.is_connected() else None
+            ClientMeetingOrchestrator(
+                session,
+                tenant_id,
+                OutcomeEngine(session, tenant_id),
+                CommunicationService(session, tenant_id, email_sender=sender),
+            ).on_catering_approved(outcome)
     session.commit()
     return approval
+
+
+@router.post("/outcomes/{outcome_id}/close-financial")
+def close_financial(outcome_id: str, session: SessionDep, tenant_id: TenantDep, user: UserDep):
+    outcome = session.get(Outcome, outcome_id)
+    if not outcome or outcome.tenant_id != tenant_id:
+        raise HTTPException(404, "Outcome not found")
+    try:
+        updated = OutcomeEngine(session, tenant_id).close_financial(outcome, actor=user.email)
+        session.commit()
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return updated
 
 
 @router.post("/exceptions/{exception_id}/resolve")

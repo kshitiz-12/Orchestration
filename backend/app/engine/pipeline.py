@@ -25,6 +25,7 @@ from app.services.intake import JobQueueService
 from app.services.meeting_room import (
     default_meeting_room_questions,
     is_booking_confirmation,
+    is_employee_satisfied,
     meeting_room_gaps,
 )
 from app.services.thread_facts import merge_thread_prior_facts
@@ -221,7 +222,11 @@ class ProcessingPipeline:
                 )
                 if q
             ]
-            if not questions:
+            # Prefer one consolidated clarification for meeting-room (avoid drip Q&A)
+            if outcome and (outcome.category or "").upper() == "MEETING_ROOM":
+                facts_for_q = {**(outcome.facts or {}), **(extraction.entities or {})}
+                questions = default_meeting_room_questions(facts_for_q)
+            elif not questions:
                 questions = default_meeting_room_questions()
             self.comms.send_clarification(
                 conversation=conversation,
@@ -394,15 +399,24 @@ class ProcessingPipeline:
             body_text = f"{subject}\n{body}"
             if is_booking_confirmation(body_text) or merged.get("booking_confirmed"):
                 merged["booking_confirmed"] = True
+            if is_employee_satisfied(body_text) or merged.get("employee_satisfied"):
+                merged["employee_satisfied"] = True
 
             gaps = meeting_room_gaps(merged)
-            # While awaiting confirm, don't re-ask checklist questions
+            # While awaiting confirm / after book, don't re-ask checklist
             if merged.get("pending_confirmation") and merged.get("proposed_room"):
+                gaps = []
+            if merged.get("booked_room"):
                 gaps = []
             extraction.entities = merged
             extraction.missing_information = [MissingInformation(**g) for g in gaps]
             extraction.clarification_questions = [g["question"] for g in gaps]
-            if merged.get("booking_confirmed") and merged.get("pending_confirmation"):
+            if merged.get("employee_satisfied") and merged.get("booked_room"):
+                extraction.confidence = max(extraction.confidence, 0.95)
+                extraction.human_review_required = False
+                extraction.recommended_next_action = "route_to_outcome_engine"
+                extraction.reason = (extraction.reason or "") + " | employee satisfied"
+            elif merged.get("booking_confirmed") and merged.get("pending_confirmation"):
                 extraction.confidence = max(extraction.confidence, 0.95)
                 extraction.human_review_required = False
                 extraction.recommended_next_action = "route_to_outcome_engine"

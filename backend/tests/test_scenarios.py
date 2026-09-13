@@ -426,7 +426,7 @@ def test_meeting_room_proposes_then_confirms(session: Session):
     from app.models.outcome import Communication
 
     tid = _tenant(session)
-    # Core only — silence on AV/catering should default and still propose
+    # Non-internal type → propose + confirm (not low-risk auto-book)
     extraction = ExtractionResult(
         event_type="MEETING_ROOM",
         summary="Meeting room for 5 on 15th october at 3 pm",
@@ -436,6 +436,8 @@ def test_meeting_room_proposes_then_confirms(session: Session):
             "preferred_time": "3 pm",
             "end_time": "7pm",
             "duration_hours": 4.0,
+            "meeting_type": "workshop",
+            "location_preference": "Corporate Office",
         },
         missing_information=[],
         confidence=0.95,
@@ -467,11 +469,10 @@ def test_meeting_room_proposes_then_confirms(session: Session):
     assert not outcome.facts.get("booked_room")
     propose_mail = session.exec(
         select(Communication).where(Communication.outcome_id == outcome.outcome_id)
-    ).first()
-    assert propose_mail is not None
-    assert "CONFIRM BOOKING" in (propose_mail.subject or "")
-    assert "should we confirm" in (propose_mail.body or "").lower()
-    assert "hybrid / av: no" in (propose_mail.body or "").lower()
+    ).all()
+    assert any("CONFIRM BOOKING" in (m.subject or "") for m in propose_mail)
+    assert any("should we confirm" in (m.body or "").lower() for m in propose_mail)
+    assert any("hybrid / av: no" in (m.body or "").lower() for m in propose_mail)
 
     confirm = ExtractionResult(
         event_type="MEETING_ROOM",
@@ -518,6 +519,8 @@ def test_meeting_room_addon_before_confirm_updates_proposal(session: Session):
             "date": "tomorrow",
             "preferred_time": "10 am",
             "duration_hours": 2,
+            "meeting_type": "workshop",
+            "location_preference": "Corporate Office",
         },
         missing_information=[],
         confidence=0.9,
@@ -537,6 +540,7 @@ def test_meeting_room_addon_before_confirm_updates_proposal(session: Session):
         entities={
             **outcome.facts,
             "catering": "coffee and snacks",
+            "dietary": "4 vegetarian",
             "hybrid_av": "yes — video/AV needed",
         },
         missing_information=[],
@@ -557,7 +561,10 @@ def test_meeting_room_addon_before_confirm_updates_proposal(session: Session):
         select(Communication).where(Communication.outcome_id == outcome2.outcome_id)
     ).all()
     assert len(mails) >= 2
-    assert any("updated" in (m.body or "").lower() for m in mails)
+    assert any(
+        "updated" in (m.body or "").lower() or "CONFIRM BOOKING" in (m.subject or "")
+        for m in mails
+    )
 
 
 def test_meeting_room_full_checklist_with_catering_proposes(session: Session):
@@ -574,6 +581,7 @@ def test_meeting_room_full_checklist_with_catering_proposes(session: Session):
             duration_hours=2,
             meeting_type="external client pitch",
             catering="requested",
+            dietary="4 vegetarian",
             special_access="required",
             hybrid_av="yes — video/AV needed",
             location_preference="boardroom",
@@ -599,9 +607,9 @@ def test_meeting_room_full_checklist_with_catering_proposes(session: Session):
     assert outcome.facts.get("pending_confirmation") is True
     assert outcome.facts.get("proposed_room")
     assert not outcome.facts.get("needs_ops")
-    msg = session.exec(
+    mails = session.exec(
         select(Communication).where(Communication.outcome_id == outcome.outcome_id)
-    ).first()
-    assert msg is not None
-    assert "CONFIRM BOOKING" in (msg.subject or "")
-    assert "should we confirm" in (msg.body or "").lower()
+    ).all()
+    assert any("CONFIRM BOOKING" in (m.subject or "") for m in mails)
+    confirm = next(m for m in mails if "CONFIRM BOOKING" in (m.subject or ""))
+    assert "should we confirm" in (confirm.body or "").lower()

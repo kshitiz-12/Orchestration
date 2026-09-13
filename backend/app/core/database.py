@@ -163,7 +163,7 @@ def ensure_seeded() -> None:
         return
     from sqlmodel import select
 
-    from app.engine.scenarios import ensure_meeting_room_resources, ensure_meeting_room_template
+    from app.engine.meeting_scenario import ensure_meeting_room_resources, ensure_meeting_room_template
     from app.models.org import Tenant
     from scripts.seed import seed
 

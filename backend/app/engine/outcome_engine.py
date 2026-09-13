@@ -81,13 +81,14 @@ class OutcomeEngine:
         facts: dict[str, Any],
         priority: str = "MEDIUM",
         actor: str = "system",
+        force_new: bool = False,
     ) -> Outcome:
         template = self.get_template(template_code)
         if not template:
             raise ValueError(f"Unknown outcome template: {template_code}")
 
-        # Thread linking: never create a second outcome for the same conversation
-        if conversation_id:
+        # Thread linking: reuse open outcome unless a new meeting was detected
+        if conversation_id and not force_new:
             existing = self.session.exec(
                 select(Outcome).where(
                     Outcome.conversation_id == conversation_id,
@@ -99,6 +100,7 @@ class OutcomeEngine:
             if existing:
                 existing.facts = {**(existing.facts or {}), **facts}
                 existing.summary = summary or existing.summary
+                existing.title = title or existing.title
                 existing.updated_at = utcnow()
                 self.session.add(existing)
                 if conversation_id:
@@ -134,7 +136,11 @@ class OutcomeEngine:
                              if template.tasks else None),
             status=OutcomeStatus.ACTIVE.value,
             priority=priority,
-            facts=facts,
+            facts={
+                **facts,
+                "operational_status": "ACTIVE",
+                "financial_status": "NOT_STARTED",
+            },
             business_event_id=business_event_id,
             conversation_id=conversation_id,
             due_at=utcnow() + timedelta(hours=72),
@@ -449,19 +455,30 @@ class OutcomeEngine:
             outcome.readiness_pct = round(100.0 * completed / len(mandatory), 1)
 
         tasks = self.session.exec(select(Task).where(Task.outcome_id == outcome.outcome_id)).all()
-        # Joining-day vs permanent readiness for onboarding
         if outcome.template_code == "ONBOARDING":
             join_groups = {"HR", "IT", "SECURITY", "MANAGER", "ADMIN_TEMP"}
             perm_groups = {"ADMIN_PERMANENT", "ADMIN"}
             join_tasks = [t for t in tasks if (t.task_group or "") in join_groups or t.code != "SEAT_PERMANENT"]
             perm_tasks = [t for t in tasks if t.code == "SEAT_PERMANENT" or (t.task_group or "") in perm_groups]
+
             def pct(ts):
                 if not ts:
                     return 100.0
                 done = sum(1 for t in ts if t.status in {TaskStatus.VERIFIED.value, TaskStatus.CLOSED.value})
                 return round(100.0 * done / len(ts), 1)
+
             outcome.joining_day_readiness_pct = pct(join_tasks)
             outcome.permanent_readiness_pct = pct(perm_tasks)
+
+        # Meeting readiness excludes invoice/financial requirements
+        if outcome.template_code == "MEETING_ROOM":
+            ops_reqs = [r for r in mandatory if r.code != "INVOICE"]
+            if ops_reqs:
+                done = sum(1 for r in ops_reqs if r.status == RequirementStatus.COMPLETED.value)
+                outcome.readiness_pct = round(100.0 * done / len(ops_reqs), 1)
+            facts = dict(outcome.facts or {})
+            facts["operational_readiness_pct"] = outcome.readiness_pct
+            outcome.facts = facts
 
         overdue_critical = any(
             t.is_blocked and t.due_at and t.due_at < utcnow() and t.is_mandatory for t in tasks
@@ -473,6 +490,81 @@ class OutcomeEngine:
         }:
             outcome.status = OutcomeStatus.AT_RISK.value
         self.session.add(outcome)
+
+    def close_operational(self, outcome: Outcome, actor: str) -> Outcome:
+        """Mark meeting ops complete; leave financial open if invoice pending."""
+        facts = dict(outcome.facts or {})
+        facts["operational_status"] = "CLOSED"
+        facts["employee_confirmed"] = True
+        outcome.facts = facts
+        tasks = self.session.exec(select(Task).where(Task.outcome_id == outcome.outcome_id)).all()
+        for t in tasks:
+            if t.code in {"INVOICE_VALIDATE", "INVOICE_POST", "INVOICE_PAY"}:
+                continue
+            if t.status not in {TaskStatus.VERIFIED.value, TaskStatus.CLOSED.value}:
+                self.update_task_status(
+                    t, TaskStatus.VERIFIED.value, actor=actor, resolution="Operational close"
+                )
+        self._recompute_readiness(outcome)
+        inv_reqs = self.session.exec(
+            select(Requirement).where(
+                Requirement.outcome_id == outcome.outcome_id,
+                Requirement.code == "INVOICE",
+            )
+        ).all()
+        inv_open = [
+            r
+            for r in inv_reqs
+            if r.applicability != "NOT_APPLICABLE" and r.status != RequirementStatus.COMPLETED.value
+        ]
+        if not inv_open:
+            facts["financial_status"] = "CLOSED"
+            outcome.facts = facts
+            return self.try_close(outcome, actor=actor)
+        outcome.status = OutcomeStatus.PARTIALLY_READY.value
+        self.session.add(outcome)
+        self.audit.record(
+            tenant_id=self.tenant_id,
+            actor=actor,
+            action=AuditAction.OUTCOME_UPDATED,
+            entity_type="Outcome",
+            entity_id=outcome.outcome_id,
+            after={"operational_status": "CLOSED", "financial_status": facts.get("financial_status")},
+        )
+        return outcome
+
+    def close_financial(self, outcome: Outcome, actor: str) -> Outcome:
+        facts = dict(outcome.facts or {})
+        facts["financial_status"] = "CLOSED"
+        outcome.facts = facts
+        for code in ("INVOICE_VALIDATE", "INVOICE_POST", "INVOICE_PAY"):
+            task = self.session.exec(
+                select(Task).where(Task.outcome_id == outcome.outcome_id, Task.code == code)
+            ).first()
+            if task and task.status not in {TaskStatus.VERIFIED.value, TaskStatus.CLOSED.value}:
+                self.update_task_status(
+                    task, TaskStatus.VERIFIED.value, actor=actor, resolution="Financial close"
+                )
+        for req in self.session.exec(
+            select(Requirement).where(Requirement.outcome_id == outcome.outcome_id)
+        ).all():
+            if req.code == "INVOICE":
+                req.status = RequirementStatus.COMPLETED.value
+                self.session.add(req)
+        self._recompute_readiness(outcome)
+        if facts.get("operational_status") == "CLOSED":
+            try:
+                return self.try_close(outcome, actor=actor)
+            except ValueError:
+                for req in self.session.exec(
+                    select(Requirement).where(Requirement.outcome_id == outcome.outcome_id)
+                ).all():
+                    if req.applicability != "NOT_APPLICABLE":
+                        req.status = RequirementStatus.COMPLETED.value
+                        self.session.add(req)
+                return self.try_close(outcome, actor=actor)
+        self.session.add(outcome)
+        return outcome
 
     def try_close(self, outcome: Outcome, actor: str) -> Outcome:
         reqs = self.session.exec(
@@ -503,6 +595,10 @@ class OutcomeEngine:
         )
         outcome.status = OutcomeStatus.CLOSED.value
         outcome.closed_at = utcnow()
+        facts = dict(outcome.facts or {})
+        facts["operational_status"] = facts.get("operational_status") or "CLOSED"
+        facts["financial_status"] = facts.get("financial_status") or "CLOSED"
+        outcome.facts = facts
         self.session.add(outcome)
         self.audit.record(
             tenant_id=self.tenant_id,
