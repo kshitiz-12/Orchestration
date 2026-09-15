@@ -25,8 +25,8 @@ def _looks_like_meeting_room(subject: str, body: str) -> bool:
     ]
     if any(k in text for k in keys):
         return True
-    return ("room" in text or "meeting" in text or "members" in text) and any(
-        k in text for k in ["people", "attendees", "members", "pm", "am", "hours", "tomorrow"]
+    return ("room" in text or "meeting" in text or "members" in text or "participants" in text) and any(
+        k in text for k in ["people", "attendees", "members", "participants", "pm", "am", "hours", "tomorrow"]
     )
 
 
@@ -52,11 +52,26 @@ class LLMService:
             logger.error("ai_extraction_failed", error=str(exc))
             fallback = HeuristicProvider()
             result = fallback.extract(**kwargs)
-            result.human_review_required = True
             result.reason = f"Primary AI unavailable ({exc}); heuristic fallback used"
-            result.confidence = min(result.confidence, 0.6)
+            # Meeting-room threads should continue (clarify / book) without a human gate
+            # solely because Gemini was down — unless truly sensitive flags are set.
+            sensitive = (
+                result.safety_concern
+                or result.financial_action
+                or result.access_control_action
+                or result.vendor_sanction
+            )
+            if result.event_type == "MEETING_ROOM" and not sensitive:
+                result.human_review_required = False
+                result.confidence = min(max(result.confidence, 0.72), 0.92)
+                if result.missing_information and any(m.blocking for m in result.missing_information):
+                    result.recommended_next_action = "clarification"
+                else:
+                    result.recommended_next_action = "route_to_outcome_engine"
+            else:
+                result.human_review_required = True
+                result.confidence = min(result.confidence, 0.6)
             return result
-
         # Enrich weak Gemini results for clear meeting-room prototypes
         if result.event_type in {"UNKNOWN", "GENERAL"} and _looks_like_meeting_room(subject, body):
             heuristic = HeuristicProvider().extract(**kwargs)

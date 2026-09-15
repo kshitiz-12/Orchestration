@@ -361,7 +361,37 @@ def meeting_room_details_complete(facts: dict[str, Any]) -> bool:
 def is_booking_confirmation(text: str) -> bool:
     if not text:
         return False
-    lowered = text.lower()
+    lowered = text.lower().strip()
+    # Bare "yes" in a long requirements reply (e.g. "yes external visitors") is not confirm
+    if re.search(r"\byes\b", lowered) and not re.search(
+        r"^\s*yes(?:\s+please)?\s*[.!]?$",
+        lowered,
+        re.I,
+    ):
+        # Allow yes only when clearly confirming the booking
+        if not re.search(
+            r"\b(yes(?:\s+please)?\s*,?\s*)?(confirm|confirmed|go ahead|book it|please book|proceed)\b",
+            lowered,
+            re.I,
+        ):
+            # Strip bare-yes matches by checking remaining confirm patterns only
+            confirm_without_yes = re.compile(
+                r"\b("
+                r"confirm(?:\s+my\s+booking)?|"
+                r"confirmed|"
+                r"please\s+(?:confirm|proceed|book|go\s+ahead)|"
+                r"go\s+ahead|"
+                r"book\s+it|"
+                r"looks\s+good|"
+                r"that\s+works|"
+                r"ok(?:ay)?\s+to\s+book|"
+                r"proceed|"
+                r"please\s+book|"
+                r"do\s+it"
+                r")\b",
+                re.I,
+            )
+            return bool(confirm_without_yes.search(text))
     if "should we confirm" in lowered and len(text.strip()) > 220:
         if not re.search(
             r"^\s*(yes|confirm|confirmed|go ahead|book it|please book)\b",

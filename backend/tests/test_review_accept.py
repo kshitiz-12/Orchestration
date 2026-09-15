@@ -72,6 +72,40 @@ def test_route_sensitive_not_overwritten_by_low_confidence():
     assert routed.route == ConfidenceRoute.HUMAN_REQUIRED.value
 
 
+def test_heuristic_parses_participants_and_not_false_confirm():
+    from app.ai.gemini import HeuristicProvider
+    from app.services.meeting_room import is_booking_confirmation
+
+    body = (
+        "2 pm to 8 pm , 30 participants , confidential , yes external visitors will "
+        "attend , 2 special seatings , whiteboard , microphone , vc , catering is "
+        "required , digital board ,"
+    )
+    assert not is_booking_confirmation(body)
+    r = HeuristicProvider().extract(
+        subject="Re: [INFORMATION REQUIRED] [ROOM-2026-0005] Additional details needed",
+        body=body,
+        prior_facts={
+            "date": "25th october",
+            "primary_office": "Corporate Office, Gurugram",
+            "registration_ack_sent": True,
+        },
+    )
+    assert r.event_type == "MEETING_ROOM"
+    assert r.entities.get("attendees") == 30
+    assert r.entities.get("preferred_time")
+    assert r.entities.get("meeting_type") == "confidential"
+    assert r.entities.get("location_preference")
+    assert r.entities.get("hybrid_av")
+    assert r.entities.get("presentation_display") == "yes"
+    assert not r.entities.get("booking_confirmed")
+    missing = {m.field for m in r.missing_information}
+    assert "attendees" not in missing
+    assert "meeting_type" not in missing
+    assert "location_preference" not in missing
+    assert "dietary" in missing  # catering still needs dietary
+
+
 def test_heuristic_reply_with_prior_facts_completes():
     p = HeuristicProvider()
     r = p.extract(

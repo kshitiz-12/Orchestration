@@ -240,9 +240,16 @@ class HeuristicProvider(LLMProvider):
             import re
 
             m_people = re.search(
-                r"(\d+)\s*(?:people|attendees|persons|pax|members)",
+                r"(\d+)\s*(?:people|attendees|persons|person|pax|members|participants|heads|guests)",
                 text,
+                re.I,
             )
+            if not m_people:
+                m_people = re.search(
+                    r"(?:people|attendees|persons|pax|members|participants)\s*[:=]?\s*(\d+)",
+                    text,
+                    re.I,
+                )
             if m_people:
                 entities["attendees"] = int(m_people.group(1))
 
@@ -306,6 +313,9 @@ class HeuristicProvider(LLMProvider):
                 entities["meeting_type"] = "interview"
             elif "training" in text:
                 entities["meeting_type"] = "training"
+            elif re.search(r"\bconfidential\b", text):
+                entities["meeting_type"] = "confidential"
+                entities["confidentiality"] = "business confidential"
 
             # Hybrid / AV
             if any(
@@ -323,7 +333,7 @@ class HeuristicProvider(LLMProvider):
                     "a/v",
                     "projector",
                 ]
-            ):
+            ) or re.search(r"\bvc\b", text):
                 entities["hybrid_av"] = "yes — video/AV needed"
             elif any(
                 k in text
@@ -343,13 +353,25 @@ class HeuristicProvider(LLMProvider):
                 entities["hybrid_av"] = "no"
 
             # Presentation / VC keywords already partly handled; display
-            if any(k in text for k in ["presentation", "projector", "display screen", "screen share"]):
+            if any(
+                k in text
+                for k in [
+                    "presentation",
+                    "projector",
+                    "display screen",
+                    "screen share",
+                    "whiteboard",
+                    "digital board",
+                    "microphone",
+                    "display",
+                ]
+            ):
                 entities["presentation_display"] = "yes"
             if any(k in text for k in ["video-conferencing", "video conferencing", "videoconferencing", "vc required"]):
                 entities["hybrid_av"] = "yes — video/AV needed"
 
             # Location preference
-            if "corporate office" in text:
+            if "corporate office" in text or "gurugram" in text:
                 entities["location_preference"] = "Corporate Office"
             m_floor = re.search(
                 r"(?:floor|building|wing|block)\s*([a-z0-9-]+)|"
@@ -367,6 +389,12 @@ class HeuristicProvider(LLMProvider):
                 entities["location_preference"] = m_floor.group(0).strip()
             if re.search(r"^\s*any\s*\.?\s*$", text.strip()) or text.strip() in {"any", "any floor", "no preference"}:
                 entities["location_preference"] = "any"
+            # Reply omitted office → use known primary office from prior facts
+            if "location_preference" not in entities and prior.get("primary_office"):
+                entities["location_preference"] = prior.get("primary_office")
+                entities.setdefault("defaults_applied", [])
+                if isinstance(entities["defaults_applied"], list) and "primary_office" not in entities["defaults_applied"]:
+                    entities["defaults_applied"] = list(entities["defaults_applied"]) + ["primary_office"]
 
             # Catering / high tea
             if any(
@@ -396,10 +424,20 @@ class HeuristicProvider(LLMProvider):
             if m_ext:
                 entities["external_visitors"] = int(m_ext.group(1))
                 entities["special_access"] = "required"
+            elif re.search(r"\byes\b.*\b(external\s+visitors?|visitors?)\b", text) or re.search(
+                r"\b(external\s+visitors?|visitors?)\b.*\b(will\s+attend|attending|yes)\b",
+                text,
+            ):
+                entities["external_visitors"] = entities.get("external_visitors") or 1
+                entities["special_access"] = "required"
             elif any(k in text for k in ["client representatives", "external visitors", "visitor names"]):
                 entities["special_access"] = "required"
+                entities["external_visitors"] = entities.get("external_visitors") or 1
             if "visitor names" in text or "abc industries" in text:
                 entities["visitor_details"] = body[:500]
+
+            if re.search(r"\bspecial\s+seat", text):
+                entities["special_access"] = "required"
 
             # Guest vehicles / parking
             m_veh = re.search(r"(\d+)\s*(?:guest\s+)?(?:vehicles?|cars?|parking)", text)
