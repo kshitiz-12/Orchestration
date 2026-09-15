@@ -409,7 +409,7 @@ class HeuristicProvider(LLMProvider):
                 entities["catering"] = "high tea" if "high tea" in text else "requested"
 
             m_veg = re.search(r"(\d+)\s*vegetarian", text)
-            m_nonveg = re.search(r"(\d+)\s*non[-\s]?vegetarian", text)
+            m_nonveg = re.search(r"(\d+)\s*non[-\s]?veg(?:etarian)?", text)
             if m_veg or m_nonveg:
                 parts = []
                 if m_veg:
@@ -419,6 +419,12 @@ class HeuristicProvider(LLMProvider):
                 if "sugar-free" in text or "sugar free" in text:
                     parts.append("sugar-free required")
                 entities["dietary"] = ", ".join(parts)
+            elif re.search(r"\bnon[-\s]?veg(etarian)?\b", text):
+                entities["dietary"] = "non-vegetarian"
+            elif re.search(r"\b(veg only|all vegetarian|vegetarian only|only veg)\b", text):
+                entities["dietary"] = "vegetarian"
+            elif re.search(r"\bveg\b", text) and "non" not in text:
+                entities["dietary"] = "vegetarian"
             elif "no allergies" in text or "no allergy" in text:
                 entities["dietary"] = entities.get("dietary") or "no allergies"
 
@@ -437,8 +443,32 @@ class HeuristicProvider(LLMProvider):
             elif any(k in text for k in ["client representatives", "external visitors", "visitor names"]):
                 entities["special_access"] = "required"
                 entities["external_visitors_indicated"] = True
+
+            # Names after visitor mention: "2 external visitors rahul and aman"
+            m_names = re.search(
+                r"(?:external\s+)?visitors?\s+(?:\d+\s+)?(.+?)(?:,\s*(?:non|veg|dietary|catering)|$)",
+                body,
+                re.I | re.S,
+            )
+            if not m_names:
+                m_names = re.search(
+                    r"(\d+)\s+(?:external\s+)?visitors?\s+([A-Za-z][A-Za-z\s,.&]+?)(?:,\s*(?:non|veg)|$)",
+                    body,
+                    re.I,
+                )
+            if m_names:
+                raw_names = (m_names.group(m_names.lastindex) or "").strip(" ,.")
+                # Drop leading count words already captured
+                raw_names = re.sub(
+                    r"^(?:\d+\s+)?(?:external\s+)?visitors?\s+",
+                    "",
+                    raw_names,
+                    flags=re.I,
+                ).strip(" ,.")
+                if raw_names and not re.match(r"^(will|yes|attend|required)\b", raw_names, re.I):
+                    entities["visitor_details"] = raw_names[:500]
             if "visitor names" in text or "abc industries" in text:
-                entities["visitor_details"] = body[:500]
+                entities["visitor_details"] = entities.get("visitor_details") or body[:500]
 
             if re.search(r"\bspecial\s+seat", text):
                 entities["special_access"] = "required"
