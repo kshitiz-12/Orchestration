@@ -229,6 +229,38 @@ def ensure_meeting_room_resources(session: Session, tenant_id: str) -> None:
                 session.add(room)
         session.flush()
 
+    # Always ensure a large room exists (prototype demos often request 20–40 people)
+    large = session.exec(
+        select(Resource).where(
+            Resource.tenant_id == tenant_id,
+            Resource.type == "MEETING_ROOM",
+            Resource.name == "Auditorium A",
+        )
+    ).first()
+    if not large:
+        session.add(
+            Resource(
+                tenant_id=tenant_id,
+                type="MEETING_ROOM",
+                name="Auditorium A",
+                status="AVAILABLE",
+                attributes={
+                    "capacity": 40,
+                    "video_conferencing": True,
+                    "presentation_display": True,
+                    "display": True,
+                    "open_complaint": False,
+                    "floor": "G",
+                    "near_department": "",
+                },
+            )
+        )
+        session.flush()
+    elif large.status != "AVAILABLE" and not (large.attributes or {}).get("booking"):
+        large.status = "AVAILABLE"
+        session.add(large)
+        session.flush()
+
     # Ensure enough parking for demos
     parking = session.exec(
         select(Resource).where(
@@ -408,6 +440,7 @@ class ClientMeetingOrchestrator:
             self.session.add(outcome)
             return
 
+        merged["checklist_missing"] = []
         merged = apply_meeting_room_defaults(merged)
         merged = apply_internal_vc_policy(merged)
         hold = compute_hold_window(merged)
@@ -448,11 +481,27 @@ class ClientMeetingOrchestrator:
                 outcome=outcome,
                 exception_type="NO_MEETING_ROOM",
                 title="No suitable meeting room available",
-                description="No available room met capacity/VC/display constraints.",
+                description=(
+                    f"No available room met capacity/equipment for {merged.get('attendees')} attendees."
+                ),
                 severity="MEDIUM",
                 owner_role="OPERATOR",
             )
             self._ops_ack(outcome, merged, reason="no_room_available")
+            if outcome.requester_email:
+                self.comms.send_case_update(
+                    outcome=outcome,
+                    communication_type="INFORMATION_ONLY",
+                    body=(
+                        "We could not find a room that fits this request "
+                        f"({merged.get('attendees')} people"
+                        f"{', display/VC as needed' if merged.get('hybrid_av') or merged.get('presentation_display') else ''}).\n\n"
+                        "Please reply with a smaller headcount, a different time, or confirm if a larger venue / split rooms is acceptable.\n\n"
+                        f"Case: {outcome.case_reference}"
+                    ),
+                    recipients=[outcome.requester_email],
+                    action_label="NO ROOM AVAILABLE",
+                )
             return
 
         self._propose(outcome, room, merged, updated=False)
