@@ -319,14 +319,26 @@ def meeting_room_gaps(facts: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
 
-    # Conditional: external visitors mentioned/count>0 without visitor details
-    if external_visitor_count(facts) > 0 and not _answered(facts.get("visitor_details")):
+    # Conditional: visitors indicated without a count
+    if facts.get("external_visitors_indicated") and external_visitor_count(facts) <= 0:
+        gaps.append(
+            {
+                "field": "external_visitors",
+                "question": (
+                    "How many external visitors will attend? "
+                    "Please also share their names, organisations and emails."
+                ),
+                "blocking": True,
+            }
+        )
+    elif external_visitor_count(facts) > 0 and not _answered(facts.get("visitor_details")):
         gaps.append(
             {
                 "field": "visitor_details",
                 "question": (
                     "Please share visitor names, organisations and emails "
-                    f"(you indicated {external_visitor_count(facts)} external visitors)."
+                    f"(you indicated {external_visitor_count(facts)} external visitor"
+                    f"{'s' if external_visitor_count(facts) != 1 else ''})."
                 ),
                 "blocking": True,
             }

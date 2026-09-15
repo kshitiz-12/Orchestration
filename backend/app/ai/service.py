@@ -2,6 +2,7 @@ from typing import Optional
 
 from app.ai.base import LLMProvider
 from app.ai.gemini import GeminiProvider, HeuristicProvider
+from app.ai.meeting_extract import refine_meeting_room_extraction
 from app.core.config import get_settings
 from app.core.enums import ConfidenceRoute
 from app.core.logging import get_logger
@@ -10,8 +11,12 @@ from app.schemas.ai import ConfidenceRoutingResult, ExtractionResult
 logger = get_logger(__name__)
 
 
-def _looks_like_meeting_room(subject: str, body: str) -> bool:
+def _looks_like_meeting_room(subject: str, body: str, prior_facts: Optional[dict] = None) -> bool:
     text = f"{subject}\n{body}".lower()
+    prior = prior_facts or {}
+    if prior.get("date") or prior.get("attendees") or prior.get("registration_ack_sent"):
+        if any(k in text for k in ["room", "meeting", "information required", "room-"]):
+            return True
     keys = [
         "meeting room",
         "conference room",
@@ -22,6 +27,7 @@ def _looks_like_meeting_room(subject: str, body: str) -> bool:
         "meeting space",
         "information required",
         "evt-",
+        "room-",
     ]
     if any(k in text for k in keys):
         return True
@@ -46,59 +52,61 @@ class LLMService:
     def extract(self, **kwargs) -> ExtractionResult:
         subject = kwargs.get("subject") or ""
         body = kwargs.get("body") or ""
+        prior_facts = kwargs.get("prior_facts") or {}
+        used_fallback = False
         try:
             result = self.provider.extract(**kwargs)
         except Exception as exc:  # noqa: BLE001
             logger.error("ai_extraction_failed", error=str(exc))
-            fallback = HeuristicProvider()
-            result = fallback.extract(**kwargs)
+            used_fallback = True
+            result = HeuristicProvider().extract(**kwargs)
             result.reason = f"Primary AI unavailable ({exc}); heuristic fallback used"
-            # Meeting-room threads should continue (clarify / book) without a human gate
-            # solely because Gemini was down — unless truly sensitive flags are set.
+
+        looks_meeting = result.event_type == "MEETING_ROOM" or _looks_like_meeting_room(
+            subject, body, prior_facts
+        )
+        if looks_meeting:
+            heuristic = HeuristicProvider().extract(**kwargs)
+            # Gemini (or primary) leads; heuristic only fills blanks — refine enforces no invented counts
+            result = refine_meeting_room_extraction(
+                result,
+                subject=subject,
+                body=body,
+                prior_facts=prior_facts,
+                heuristic_entities=heuristic.entities if heuristic.event_type == "MEETING_ROOM" else {},
+            )
+            if used_fallback:
+                result.reason = (result.reason or "") + " | smart heuristic refine"
+            else:
+                result.reason = (result.reason or "") + " | gemini+heuristic refine"
+            return result
+
+        if used_fallback:
             sensitive = (
                 result.safety_concern
                 or result.financial_action
                 or result.access_control_action
                 or result.vendor_sanction
             )
-            if result.event_type == "MEETING_ROOM" and not sensitive:
-                result.human_review_required = False
-                result.confidence = min(max(result.confidence, 0.72), 0.92)
-                if result.missing_information and any(m.blocking for m in result.missing_information):
-                    result.recommended_next_action = "clarification"
-                else:
-                    result.recommended_next_action = "route_to_outcome_engine"
-            else:
+            if not sensitive:
                 result.human_review_required = True
                 result.confidence = min(result.confidence, 0.6)
-            return result
-        # Enrich weak Gemini results for clear meeting-room prototypes
-        if result.event_type in {"UNKNOWN", "GENERAL"} and _looks_like_meeting_room(subject, body):
-            heuristic = HeuristicProvider().extract(**kwargs)
-            if heuristic.event_type == "MEETING_ROOM":
-                logger.info("ai_enriched_with_meeting_room_heuristic")
-                result.event_type = "MEETING_ROOM"
-                result.category = "MEETING_ROOM"
-                result.entities = {**(result.entities or {}), **(heuristic.entities or {})}
-                if not result.missing_information and heuristic.missing_information:
-                    result.missing_information = heuristic.missing_information
-                if not result.clarification_questions and heuristic.clarification_questions:
-                    result.clarification_questions = heuristic.clarification_questions
-                result.confidence = max(result.confidence, heuristic.confidence)
-                result.reason = (result.reason or "") + " | enriched with meeting-room heuristic"
-                if heuristic.missing_information and any(m.blocking for m in heuristic.missing_information):
-                    result.recommended_next_action = "clarification"
         return result
 
     def route(self, extraction: ExtractionResult) -> ConfidenceRoutingResult:
         reasons: list[str] = []
-        sensitive = (
-            extraction.safety_concern
-            or extraction.financial_action
-            or extraction.access_control_action
-            or extraction.vendor_sanction
-            or extraction.human_review_required
-        )
+        is_meeting = (extraction.event_type or "").upper() == "MEETING_ROOM"
+        # Meeting-room visitors/catering/confidential are platform modules, not email human-gates
+        if is_meeting:
+            sensitive = bool(extraction.safety_concern or extraction.vendor_sanction)
+        else:
+            sensitive = (
+                extraction.safety_concern
+                or extraction.financial_action
+                or extraction.access_control_action
+                or extraction.vendor_sanction
+                or extraction.human_review_required
+            )
         has_blocking = extraction.missing_information and any(
             m.blocking for m in extraction.missing_information
         )
@@ -112,6 +120,10 @@ class LLMService:
                 reasons.append("Blocking missing information present")
             if extraction.confidence < 0.65:
                 reasons.append("Confidence below 0.65")
+        elif is_meeting and extraction.confidence >= 0.78:
+            # Meeting room: skip operator limbo — clarify or auto-orchestrate
+            route = ConfidenceRoute.AUTO
+            reasons.append("Meeting room facts ready for orchestration")
         elif extraction.confidence < 0.85:
             route = ConfidenceRoute.OPERATOR_REVIEW
             reasons.append("Confidence between 0.65 and 0.84")

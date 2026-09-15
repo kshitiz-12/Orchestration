@@ -18,16 +18,11 @@ from app.engine.scenarios import ScenarioOrchestrator
 from app.models.intake import AIDecision, Conversation, HumanReviewItem, ProcessingJob, RawEmailEvent
 from app.models.org import utcnow
 from app.connectors.factory import get_email_provider
-from app.schemas.ai import ExtractionResult, MissingInformation
+from app.schemas.ai import ExtractionResult
 from app.services.communication import CommunicationService
 from app.services.context import ContextRetrievalService
 from app.services.intake import JobQueueService
-from app.services.meeting_room import (
-    default_meeting_room_questions,
-    is_booking_confirmation,
-    is_employee_satisfied,
-    meeting_room_gaps,
-)
+from app.services.meeting_room import default_meeting_room_questions
 from app.services.thread_facts import merge_thread_prior_facts
 
 logger = get_logger(__name__)
@@ -389,45 +384,23 @@ class ProcessingPipeline:
                 body=body,
                 prior_facts=merged,
             )
-            if heuristic.event_type == "MEETING_ROOM" or looks_meeting:
-                extraction.event_type = "MEETING_ROOM"
-                extraction.category = "MEETING_ROOM"
-            for key, value in (heuristic.entities or {}).items():
-                if value is not None and value != "":
-                    merged[key] = value
+            from app.ai.meeting_extract import refine_meeting_room_extraction
 
-            body_text = f"{subject}\n{body}"
-            if is_booking_confirmation(body_text) or merged.get("booking_confirmed"):
-                merged["booking_confirmed"] = True
-            if is_employee_satisfied(body_text) or merged.get("employee_satisfied"):
-                merged["employee_satisfied"] = True
-
-            gaps = meeting_room_gaps(merged)
-            # While awaiting confirm / after book, don't re-ask checklist
-            if merged.get("pending_confirmation") and merged.get("proposed_room"):
-                gaps = []
-            if merged.get("booked_room"):
-                gaps = []
-            extraction.entities = merged
-            extraction.missing_information = [MissingInformation(**g) for g in gaps]
-            extraction.clarification_questions = [g["question"] for g in gaps]
-            if merged.get("employee_satisfied") and merged.get("booked_room"):
-                extraction.confidence = max(extraction.confidence, 0.95)
-                extraction.human_review_required = False
+            extraction = refine_meeting_room_extraction(
+                extraction,
+                subject=subject,
+                body=body,
+                prior_facts=prior_facts,
+                heuristic_entities=heuristic.entities if heuristic.event_type == "MEETING_ROOM" else {},
+            )
+            if extraction.entities.get("employee_satisfied") and extraction.entities.get("booked_room"):
                 extraction.recommended_next_action = "route_to_outcome_engine"
                 extraction.reason = (extraction.reason or "") + " | employee satisfied"
-            elif merged.get("booking_confirmed") and merged.get("pending_confirmation"):
-                extraction.confidence = max(extraction.confidence, 0.95)
-                extraction.human_review_required = False
+            elif extraction.entities.get("booking_confirmed") and extraction.entities.get(
+                "pending_confirmation"
+            ):
                 extraction.recommended_next_action = "route_to_outcome_engine"
                 extraction.reason = (extraction.reason or "") + " | requester confirmed meeting room booking"
-            elif not gaps:
-                extraction.confidence = max(extraction.confidence, 0.9)
-                extraction.human_review_required = False
-                extraction.recommended_next_action = "route_to_outcome_engine"
-                extraction.reason = (extraction.reason or "") + " | thread facts complete for meeting room"
-            else:
-                extraction.recommended_next_action = "clarification"
         else:
             extraction.entities = merged
         return extraction
