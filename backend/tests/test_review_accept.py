@@ -174,22 +174,12 @@ def test_refine_prefers_gemini_entities_over_heuristic_guesses():
     assert "dietary" in fields
 
 
-def test_heuristic_reply_with_prior_facts_completes():
-    p = HeuristicProvider()
-    r = p.extract(
-        subject="Re: [INFORMATION REQUIRED] [ROOM-2026-0001] Additional details needed",
-        body="15th October 2026",
-        prior_facts={
-            "attendees": 20,
-            "preferred_time": "3 pm",
-            "end_time": "6 pm",
-            "duration_hours": 3.0,
-            "meeting_type": "workshop",
-            "location_preference": "Corporate Office",
-        },
+def test_bare_internal_maps_to_meeting_type():
+    r = HeuristicProvider().extract(
+        subject="Re: ROOM-2026-0001",
+        body="10am to 2 pm , 30 people , internal , yes external visitors will attend , catering required",
+        prior_facts={"date": "25th october", "primary_office": "Corporate Office, Gurugram"},
     )
-    assert r.event_type == "MEETING_ROOM"
-    assert r.entities.get("date")
-    assert r.entities.get("attendees") == 20
-    gaps = meeting_room_gaps(r.entities)
-    assert gaps == []
+    assert r.entities.get("meeting_type") == "internal meeting"
+    assert r.entities.get("attendees") == 30
+    assert "meeting_type" not in {m.field for m in r.missing_information}

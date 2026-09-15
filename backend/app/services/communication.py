@@ -120,6 +120,8 @@ class CommunicationService:
         conversation: Conversation,
         questions: list[str],
         case_reference: Optional[str] = None,
+        understood: Optional[list[str]] = None,
+        force_send_key: Optional[str] = None,
     ) -> Communication:
         questions = [q for q in questions if q]
         if not questions:
@@ -128,11 +130,18 @@ class CommunicationService:
             questions = default_meeting_room_questions()
         ref = case_reference or "PENDING"
         subject = f"[INFORMATION REQUIRED] [{ref}] Additional details needed"
-        body = (
-            "We need a few details to continue processing your request:\n\n"
-            + "\n".join(f"- {q}" for q in questions)
-            + "\n\nPlease reply to this email (use Reply — it routes back to our intake)."
+        parts: list[str] = []
+        if understood:
+            parts.append("Thanks — here’s what we have so far:\n")
+            parts.extend(f"- {line}" for line in understood if line)
+            parts.append("\nWe still need the following to proceed:\n")
+        else:
+            parts.append("We need a few details to continue processing your request:\n")
+        parts.extend(f"- {q}" for q in questions)
+        parts.append(
+            "\nPlease reply to this email (use Reply — it routes back to our intake)."
         )
+        body = "\n".join(parts)
         # Prefer latest inbound provider message for Graph reply
         in_reply_to = None
         event = self.session.exec(
@@ -143,6 +152,9 @@ class CommunicationService:
         if event:
             in_reply_to = event.provider_message_id or event.gmail_message_id
 
+        # force_send_key (e.g. event_id) ensures each inbound reply can trigger a new clarify mail
+        # even if some questions overlap with a prior clarification.
+        key_suffix = force_send_key or str(hash(tuple(questions)))
         return self.send(
             communication_type=CommunicationType.INFORMATION_REQUIRED.value,
             recipients=[conversation.requester_email],
@@ -152,7 +164,7 @@ class CommunicationService:
             outcome_id=conversation.current_outcome_id,
             thread_id=conversation.thread_id,
             in_reply_to_message_id=in_reply_to,
-            idempotency_key=f"clarify:{conversation.conversation_id}:{hash(tuple(questions))}",
+            idempotency_key=f"clarify:{conversation.conversation_id}:{key_suffix}",
         )
 
     def send_case_update(

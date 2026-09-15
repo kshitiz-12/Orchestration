@@ -301,15 +301,15 @@ class HeuristicProvider(LLMProvider):
             if m_dur:
                 entities["duration_hours"] = float(m_dur.group(1))
 
-            # Meeting type / purpose
+            # Meeting type / purpose — natural language, not only exact phrases
             if any(k in text for k in ["board meeting", "boardroom", "board room", "executive"]):
                 entities["meeting_type"] = "executive / board meeting"
             elif any(k in text for k in ["client pitch", "client visit", "external client", "pitch"]):
                 entities["meeting_type"] = "external client pitch"
             elif "workshop" in text:
                 entities["meeting_type"] = "workshop"
-            elif any(k in text for k in ["huddle", "standup", "stand-up", "internal meeting", "internal huddle"]):
-                entities["meeting_type"] = "internal huddle"
+            elif re.search(r"\b(internal(\s+meeting|\s+huddle|\s+review)?|huddle|standup|stand-up)\b", text):
+                entities["meeting_type"] = "internal meeting"
             elif "interview" in text:
                 entities["meeting_type"] = "interview"
             elif "training" in text:
@@ -317,6 +317,8 @@ class HeuristicProvider(LLMProvider):
             elif re.search(r"\bconfidential\b", text):
                 entities["meeting_type"] = "confidential"
                 entities["confidentiality"] = "business confidential"
+            elif re.search(r"\b(client|vendor|external)\s+(meeting|review|call)\b", text):
+                entities["meeting_type"] = "client/vendor"
 
             # Hybrid / AV
             if any(

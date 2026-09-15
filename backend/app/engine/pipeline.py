@@ -217,16 +217,32 @@ class ProcessingPipeline:
                 )
                 if q
             ]
-            # Prefer one consolidated clarification for meeting-room (avoid drip Q&A)
-            if outcome and (outcome.category or "").upper() == "MEETING_ROOM":
-                facts_for_q = {**(outcome.facts or {}), **(extraction.entities or {})}
+            facts_for_q = {**(outcome.facts or {}), **(extraction.entities or {})}
+            is_follow_up = bool(extraction.is_reply) or bool(
+                (outcome.facts or {}).get("registration_ack_sent")
+            )
+            # First ask: full consolidated checklist. Later replies: ONLY remaining gaps
+            # (re-sending the same full list was silently dropped by idempotency — user got no mail).
+            if not questions:
+                if is_follow_up:
+                    questions = [m.question for m in extraction.missing_information if m.question]
+                else:
+                    questions = default_meeting_room_questions(facts_for_q)
+            elif not is_follow_up and outcome and (outcome.category or "").upper() == "MEETING_ROOM":
                 questions = default_meeting_room_questions(facts_for_q)
-            elif not questions:
-                questions = default_meeting_room_questions()
+
+            understood: list[str] = []
+            if is_follow_up:
+                from app.services.meeting_room import summarize_meeting_requirements
+
+                understood = summarize_meeting_requirements(facts_for_q)[:10]
+
             self.comms.send_clarification(
                 conversation=conversation,
                 questions=questions,
                 case_reference=outcome.case_reference,
+                understood=understood or None,
+                force_send_key=event.event_id,
             )
             self.audit.record(
                 tenant_id=self.tenant_id,
@@ -234,7 +250,7 @@ class ProcessingPipeline:
                 action=AuditAction.CLARIFICATION_SENT,
                 entity_type="Conversation",
                 entity_id=conversation.conversation_id,
-                after={"questions": questions},
+                after={"questions": questions, "follow_up": is_follow_up},
                 correlation_id=event.processing_id,
             )
             event.processing_stage = ProcessingStage.COMMUNICATION.value
