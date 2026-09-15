@@ -45,6 +45,10 @@ class ExtractionResult(BaseModel):
     reason: str = ""
     is_reply: bool = False
     clarification_questions: list[str] = Field(default_factory=list)
+    fact_delta: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Interpreter delta: {set, unset, assumptions, speech_acts}",
+    )
 
 
 class ConfidenceRoutingResult(BaseModel):

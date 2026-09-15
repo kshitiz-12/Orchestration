@@ -36,6 +36,11 @@ def _looks_like_meeting_room(subject: str, body: str, prior_facts: Optional[dict
     )
 
 
+def _is_retryable_ai_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "503" in msg or "unavailable" in msg or "high demand" in msg or "429" in msg
+
+
 class LLMService:
     """AI gateway. Business logic consumes this — never GeminiProvider directly."""
 
@@ -54,31 +59,47 @@ class LLMService:
         body = kwargs.get("body") or ""
         prior_facts = kwargs.get("prior_facts") or {}
         used_fallback = False
-        try:
-            result = self.provider.extract(**kwargs)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("ai_extraction_failed", error=str(exc))
+        result: ExtractionResult | None = None
+        last_exc: Exception | None = None
+
+        for attempt in range(2):
+            try:
+                result = self.provider.extract(**kwargs)
+                last_exc = None
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                logger.error("ai_extraction_failed", attempt=attempt + 1, error=str(exc))
+                if isinstance(self.provider, GeminiProvider) and _is_retryable_ai_error(exc) and attempt == 0:
+                    continue
+                break
+
+        if result is None:
             used_fallback = True
             result = HeuristicProvider().extract(**kwargs)
-            result.reason = f"Primary AI unavailable ({exc}); heuristic fallback used"
+            result.reason = f"Primary AI unavailable ({last_exc}); heuristic fallback used"
 
         looks_meeting = result.event_type == "MEETING_ROOM" or _looks_like_meeting_room(
             subject, body, prior_facts
         )
         if looks_meeting:
-            heuristic = HeuristicProvider().extract(**kwargs)
-            # Gemini (or primary) leads; heuristic only fills blanks — refine enforces no invented counts
+            heuristic_entities = None
+            primary_is_heuristic = used_fallback or isinstance(self.provider, HeuristicProvider)
+            if not primary_is_heuristic:
+                # Candidates only fill fields the model left unknown — never overwrite Gemini
+                heuristic_entities = HeuristicProvider().extract(**kwargs).entities
             result = refine_meeting_room_extraction(
                 result,
                 subject=subject,
                 body=body,
                 prior_facts=prior_facts,
-                heuristic_entities=heuristic.entities if heuristic.event_type == "MEETING_ROOM" else {},
+                heuristic_entities=heuristic_entities,
+                primary_is_heuristic=primary_is_heuristic,
             )
             if used_fallback:
-                result.reason = (result.reason or "") + " | smart heuristic refine"
+                result.reason = (result.reason or "") + " | reducer + heuristic candidates"
             else:
-                result.reason = (result.reason or "") + " | gemini+heuristic refine"
+                result.reason = (result.reason or "") + " | gemini delta + reducer"
             return result
 
         if used_fallback:
@@ -96,7 +117,6 @@ class LLMService:
     def route(self, extraction: ExtractionResult) -> ConfidenceRoutingResult:
         reasons: list[str] = []
         is_meeting = (extraction.event_type or "").upper() == "MEETING_ROOM"
-        # Meeting-room visitors/catering/confidential are platform modules, not email human-gates
         if is_meeting:
             sensitive = bool(extraction.safety_concern or extraction.vendor_sanction)
         else:
@@ -121,7 +141,6 @@ class LLMService:
             if extraction.confidence < 0.65:
                 reasons.append("Confidence below 0.65")
         elif is_meeting and extraction.confidence >= 0.78:
-            # Meeting room: skip operator limbo — clarify or auto-orchestrate
             route = ConfidenceRoute.AUTO
             reasons.append("Meeting room facts ready for orchestration")
         elif extraction.confidence < 0.85:

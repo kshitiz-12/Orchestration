@@ -1,5 +1,6 @@
 from typing import Optional
 
+from sqlalchemy.orm.attributes import flag_modified
 from sqlmodel import Session, select
 
 from app.audit.service import AuditService
@@ -180,6 +181,7 @@ class CommunicationService:
         subject = f"[{label}] [{outcome.case_reference}] {outcome.title}"
         thread_id = None
         in_reply_to = None
+        event_id = None
         if outcome.conversation_id:
             conversation = self.session.get(Conversation, outcome.conversation_id)
             if conversation:
@@ -190,6 +192,7 @@ class CommunicationService:
                 .order_by(RawEmailEvent.created_at.desc())  # type: ignore[attr-defined]
             ).first()
             if event:
+                event_id = event.event_id
                 in_reply_to = event.provider_message_id or event.gmail_message_id
                 thread_id = thread_id or event.provider_conversation_id or event.gmail_thread_id
         return self.send(
@@ -201,5 +204,19 @@ class CommunicationService:
             outcome_id=outcome.outcome_id,
             thread_id=thread_id,
             in_reply_to_message_id=in_reply_to,
-            idempotency_key=f"update:{outcome.outcome_id}:{communication_type}:{hash(body)}",
+            idempotency_key=f"update:{outcome.outcome_id}:{communication_type}:{event_id or hash(body)}",
         )
+
+    def record_suppressed(self, *, outcome: Outcome, reason: str) -> None:
+        """Every inbound must produce an outbound or a logged SUPPRESSED disposition."""
+        logger.info(
+            "outbound_suppressed",
+            outcome_id=outcome.outcome_id,
+            case_reference=outcome.case_reference,
+            reason=reason,
+        )
+        facts = dict(outcome.facts or {})
+        facts["last_outbound"] = {"status": "SUPPRESSED", "reason": reason}
+        outcome.facts = facts
+        self.session.add(outcome)
+        flag_modified(outcome, "facts")

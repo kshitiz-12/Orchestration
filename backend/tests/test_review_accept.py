@@ -183,3 +183,153 @@ def test_bare_internal_maps_to_meeting_type():
     assert r.entities.get("meeting_type") == "internal meeting"
     assert r.entities.get("attendees") == 30
     assert "meeting_type" not in {m.field for m in r.missing_information}
+
+
+def test_heuristic_reply_with_prior_facts_completes():
+    svc = LLMService(provider=HeuristicProvider())
+    r = svc.extract(
+        subject="Re: [INFORMATION REQUIRED] [ROOM-2026-0001] Additional details needed",
+        body="15th October 2026",
+        prior_facts={
+            "attendees": 20,
+            "preferred_time": "3 pm",
+            "end_time": "6 pm",
+            "duration_hours": 3.0,
+            "meeting_type": "workshop",
+            "location_preference": "Corporate Office",
+        },
+    )
+    assert r.event_type == "MEETING_ROOM"
+    assert r.entities.get("date")
+    assert r.entities.get("attendees") == 20
+    gaps = meeting_room_gaps(r.entities)
+    assert gaps == []
+
+
+def test_llm_service_retries_gemini_503_then_succeeds():
+    from app.ai.gemini import GeminiProvider
+
+    class FlakyGemini(GeminiProvider):
+        def __init__(self):
+            self.calls = 0
+            self.api_key = "test"
+            self.model = "test"
+            self._client = None
+
+        def extract(self, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("503 UNAVAILABLE: model is on high demand")
+            return ExtractionResult(
+                event_type="MEETING_ROOM",
+                summary="delta",
+                entities={"attendees": 8, "meeting_type": "internal meeting"},
+                fact_delta={"set": {"attendees": 8, "meeting_type": "internal meeting"}, "speech_acts": ["provide_facts"]},
+                confidence=0.9,
+                reason="gemini",
+            )
+
+    flaky = FlakyGemini()
+    svc = LLMService(provider=flaky)
+    result = svc.extract(
+        subject="Re: ROOM-1",
+        body="8 people, internal",
+        prior_facts={"date": "tomorrow", "preferred_time": "10am", "duration_hours": 1},
+    )
+    assert flaky.calls == 2
+    assert result.entities.get("attendees") == 8
+    assert "gemini delta + reducer" in (result.reason or "")
+
+
+def test_llm_service_falls_back_after_gemini_503_exhausted():
+    from app.ai.gemini import GeminiProvider
+
+    class DeadGemini(GeminiProvider):
+        def __init__(self):
+            self.calls = 0
+            self.api_key = "test"
+            self.model = "test"
+            self._client = None
+
+        def extract(self, **kwargs):
+            self.calls += 1
+            raise RuntimeError("503 UNAVAILABLE")
+
+    dead = DeadGemini()
+    svc = LLMService(provider=dead)
+    result = svc.extract(
+        subject="Need a meeting room",
+        body="Book a room for 12 people tomorrow at 3pm for 2 hours, internal, Corporate Office",
+        prior_facts={},
+    )
+    assert dead.calls == 2
+    assert result.event_type == "MEETING_ROOM"
+    assert result.entities.get("attendees") == 12
+    assert "heuristic fallback" in (result.reason or "").lower() or "reducer + heuristic" in (result.reason or "")
+
+
+def test_fact_delta_applied_by_refine():
+    prior = {
+        "date": "25th october",
+        "attendees": 30,
+        "preferred_time": "10am",
+        "end_time": "2 pm",
+        "duration_hours": 4.0,
+        "location_preference": "Corporate Office, Gurugram",
+        "primary_office": "Corporate Office, Gurugram",
+        "registration_ack_sent": True,
+        "catering": "requested",
+    }
+    gemini_like = ExtractionResult(
+        event_type="MEETING_ROOM",
+        summary="informal reply",
+        entities={},
+        fact_delta={
+            "set": {
+                "meeting_type": "internal meeting",
+                "external_visitors": 2,
+                "visitor_details": "rahul and aman",
+                "dietary": "non-vegetarian",
+            },
+            "speech_acts": ["provide_facts"],
+        },
+        missing_information=[],
+        confidence=0.9,
+        reason="gemini",
+    )
+    refined = refine_meeting_room_extraction(
+        gemini_like,
+        subject="Re: ROOM-2026-0001",
+        body="Internal meeting , 2 external visitors rahul and aman , non veg",
+        prior_facts=prior,
+        heuristic_entities={"external_visitors": 1},
+    )
+    assert refined.entities.get("preferred_time") == "10am"
+    assert refined.entities.get("meeting_type") == "internal meeting"
+    assert refined.entities.get("visitor_details") == "rahul and aman"
+    assert refined.entities.get("external_visitors") == 2
+    assert refined.missing_information == []
+
+
+def test_informal_reply_via_llm_service_against_snapshot():
+    svc = LLMService(provider=HeuristicProvider())
+    result = svc.extract(
+        subject="Re: [INFORMATION REQUIRED] [ROOM-2026-0001]",
+        body="Internal meeting , 2 external visitors rahul and aman , non veg",
+        prior_facts={
+            "date": "25th october",
+            "attendees": 30,
+            "preferred_time": "10am",
+            "end_time": "2 pm",
+            "duration_hours": 4.0,
+            "location_preference": "Corporate Office, Gurugram",
+            "primary_office": "Corporate Office, Gurugram",
+            "registration_ack_sent": True,
+            "catering": "requested",
+        },
+    )
+    assert result.entities.get("meeting_type") == "internal meeting"
+    assert result.entities.get("dietary") == "non-vegetarian"
+    assert result.entities.get("visitor_details")
+    assert result.entities.get("preferred_time") == "10am"
+    assert meeting_room_gaps(result.entities) == []

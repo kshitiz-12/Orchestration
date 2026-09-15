@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from sqlalchemy.orm.attributes import flag_modified
 from sqlmodel import Session, select
 
 from app.core.logging import get_logger
+from app.domain.meeting import MeetingStage
 from app.engine.outcome_engine import OutcomeEngine
+from app.engine.outcome_reducer import reduce_meeting_facts
 from app.models.org import Contract, Resource, Vendor, utcnow
 from app.models.outcome import Outcome, Requirement, Task
 from app.schemas.ai import ExtractionResult
@@ -327,28 +330,43 @@ class ClientMeetingOrchestrator:
         self.engine = engine
         self.comms = comms
 
+    def _save_facts(self, outcome: Outcome, facts: dict) -> None:
+        """Persist a new facts dict so JSON mutations are not dropped on commit."""
+        outcome.facts = dict(facts)
+        self.session.add(outcome)
+        flag_modified(outcome, "facts")
+
     def run(self, outcome: Outcome, facts: dict, extraction: Optional[ExtractionResult] = None) -> None:
         ensure_meeting_room_resources(self.session, self.tenant_id)
-        merged = {**(outcome.facts or {}), **facts}
-        if extraction and extraction.entities:
-            for key, value in extraction.entities.items():
-                if value is not None and value != "":
-                    merged[key] = value
-
         text_blob = ""
         if extraction:
             text_blob = f"{extraction.summary or ''} {extraction.reason or ''}"
+            raw = (extraction.entities or {}).get("raw_reply")
+            if raw:
+                text_blob = f"{text_blob} {raw}"
 
-        # Registration ack once — never invent schedule facts
+        incoming = dict(facts or {})
+        if extraction and extraction.entities:
+            incoming.update(
+                {k: v for k, v in extraction.entities.items() if v is not None and v != ""}
+            )
+        merged = reduce_meeting_facts(
+            outcome.facts,
+            primary_entities=incoming,
+            source_text=text_blob,
+        )
+
         if not merged.get("registration_ack_sent"):
             self._send_registration_ack(outcome, merged)
             merged["registration_ack_sent"] = True
 
         if not merged.get("primary_office"):
             merged["primary_office"] = "Corporate Office, Gurugram"
+            merged = reduce_meeting_facts(merged, primary_entities={}, source_text=text_blob)
+
         attendees = merged.get("attendees")
         when = merged.get("date")
-        start = merged.get("preferred_time") or merged.get("time_window")
+        start = merged.get("preferred_time")
         duration = merged.get("duration_hours")
         end = merged.get("end_time")
         if attendees and when and (start or end or duration):
@@ -359,85 +377,44 @@ class ClientMeetingOrchestrator:
                 + (f" ({duration}h)" if duration else "")
             )
 
-        # Employee satisfaction after booking → operational close
         if merged.get("booked_room") and (
             merged.get("employee_satisfied")
             or is_employee_satisfied(text_blob)
-            or (extraction and is_employee_satisfied(str((extraction.entities or {}).get("raw_reply") or "")))
         ):
             merged["employee_satisfied"] = True
-            outcome.facts = merged
-            self.session.add(outcome)
+            merged["orchestration_stage"] = MeetingStage.CLOSED.value
+            merged["last_action"] = "closed"
+            self._save_facts(outcome, merged)
             if (merged.get("operational_status") or "") != "CLOSED":
                 self.engine.close_operational(outcome, actor="requester")
                 self._maybe_start_invoice(outcome)
             return
 
-        # Post-booking facility deltas
         if merged.get("booked_room") and (merged.get("operational_status") or "") != "CLOSED":
-            incoming = (extraction.entities if extraction else {}) or {}
-            deltas = {
-                k: incoming[k]
-                for k in (
-                    "catering",
-                    "hybrid_av",
-                    "special_access",
-                    "location_preference",
-                    "meeting_type",
-                    "dietary",
-                    "guest_vehicles",
-                    "external_visitors",
-                )
-                if k in incoming
-                and incoming.get(k) not in (None, "")
-                and incoming.get(k) != (merged.get("booked_room") or {}).get(k)
-            }
-            if deltas:
-                history = list(merged.get("post_booking_requests") or [])
-                history.append(deltas)
-                merged.update(deltas)
-                merged["post_booking_requests"] = history
-                merged["needs_ops"] = True
-                outcome.facts = merged
-                self.session.add(outcome)
-                if outcome.requester_email:
-                    self.comms.send_case_update(
-                        outcome=outcome,
-                        communication_type="INFORMATION_ONLY",
-                        body=(
-                            "Thanks — we’ve noted your additional request against the confirmed booking.\n\n"
-                            + "\n".join(f"- {k.replace('_', ' ')}: {v}" for k, v in deltas.items())
-                            + f"\n\nCase: {outcome.case_reference}"
-                        ),
-                        recipients=[outcome.requester_email],
-                        action_label="UPDATE NOTED",
-                    )
-            else:
-                outcome.facts = merged
-                self.session.add(outcome)
+            self._handle_post_booking(outcome, merged, extraction)
             return
 
         confirmed = bool(
             merged.get("booking_confirmed")
-            or (extraction and (extraction.entities or {}).get("booking_confirmed"))
             or (extraction and is_booking_confirmation(text_blob))
         )
-
         if merged.get("pending_confirmation") and confirmed:
             merged = apply_meeting_room_defaults(merged)
             merged = apply_internal_vc_policy(merged)
             hold = compute_hold_window(merged)
             merged.update(hold)
-            outcome.facts = merged
-            self.session.add(outcome)
+            merged["orchestration_stage"] = MeetingStage.AUTO_BOOKED.value
+            self._save_facts(outcome, merged)
             self._finalize_booking(outcome, actor="requester")
             return
 
-        if not meeting_room_details_complete(merged):
-            gaps = meeting_room_gaps(merged)
-            merged["checklist_missing"] = [g["field"] for g in gaps]
-            outcome.facts = merged
-            self.session.add(outcome)
+        gaps = meeting_room_gaps(merged)
+        merged["checklist_missing"] = [g["field"] for g in gaps]
+        if gaps:
+            merged["orchestration_stage"] = MeetingStage.AWAITING_REQUIREMENTS.value
+            merged["outbound_required"] = "clarify"
+            merged["last_action"] = "await_requirements"
+            self._save_facts(outcome, merged)
             return
 
         merged["checklist_missing"] = []
@@ -445,19 +422,18 @@ class ClientMeetingOrchestrator:
         merged = apply_internal_vc_policy(merged)
         hold = compute_hold_window(merged)
         merged.update(hold)
-        outcome.facts = merged
-        self.session.add(outcome)
+        merged["orchestration_stage"] = MeetingStage.SEARCHING.value
+        self._save_facts(outcome, merged)
 
         if extraction and (
-            extraction.human_review_required
-            or extraction.safety_concern
-            or extraction.financial_action
-            or extraction.access_control_action
+            extraction.safety_concern
+            or extraction.vendor_sanction
         ):
             merged["needs_ops"] = True
             merged["auto_book_skipped"] = "sensitive_flags"
-            outcome.facts = merged
-            self.session.add(outcome)
+            merged["last_action"] = "ops_ack"
+            merged["outbound_required"] = "ops_ack"
+            self._save_facts(outcome, merged)
             self._ops_ack(outcome, merged, reason="special_request")
             return
 
@@ -469,14 +445,36 @@ class ClientMeetingOrchestrator:
                 if room:
                     self._propose(outcome, room, merged, updated=True)
                     self._maybe_auto_book_low_risk(outcome)
+                    return
+            merged["orchestration_stage"] = MeetingStage.PROPOSED.value
+            merged["last_action"] = "await_confirm"
+            merged["outbound_required"] = "confirm_booking"
+            self._save_facts(outcome, merged)
+            if outcome.requester_email:
+                room_name = (merged.get("proposed_room") or {}).get("name") or "the proposed room"
+                self.comms.send_case_update(
+                    outcome=outcome,
+                    communication_type="ACTION_REQUIRED",
+                    body=(
+                        f"We still have {room_name} proposed for this request.\n\n"
+                        "Reply \"confirm\" to lock it in, or tell us what to change "
+                        "(time, headcount, equipment).\n\n"
+                        f"Case: {outcome.case_reference}"
+                    ),
+                    recipients=[outcome.requester_email],
+                    action_label="AWAITING CONFIRMATION",
+                )
             return
 
         room = self._pick_room(merged)
         if not room:
             merged["needs_ops"] = True
             merged["auto_book_skipped"] = "no_room_available"
-            outcome.facts = merged
-            self.session.add(outcome)
+            merged["orchestration_stage"] = MeetingStage.NO_RESOURCE.value
+            merged["outbound_required"] = "no_resource"
+            merged["last_action"] = "no_resource"
+            merged["inventory_max_capacity"] = self._max_room_capacity()
+            self._save_facts(outcome, merged)
             self.engine.create_exception(
                 outcome=outcome,
                 exception_type="NO_MEETING_ROOM",
@@ -495,7 +493,8 @@ class ClientMeetingOrchestrator:
                     body=(
                         "We could not find a room that fits this request "
                         f"({merged.get('attendees')} people"
-                        f"{', display/VC as needed' if merged.get('hybrid_av') or merged.get('presentation_display') else ''}).\n\n"
+                        f"{', display/VC as needed' if merged.get('hybrid_av') or merged.get('presentation_display') else ''}"
+                        f"; largest room holds {merged.get('inventory_max_capacity') or 'fewer'}).\n\n"
                         "Please reply with a smaller headcount, a different time, or confirm if a larger venue / split rooms is acceptable.\n\n"
                         f"Case: {outcome.case_reference}"
                     ),
@@ -504,8 +503,55 @@ class ClientMeetingOrchestrator:
                 )
             return
 
+        merged["orchestration_stage"] = MeetingStage.PROPOSED.value
         self._propose(outcome, room, merged, updated=False)
         self._maybe_auto_book_low_risk(outcome)
+
+    def _handle_post_booking(self, outcome: Outcome, merged: dict, extraction: Optional[ExtractionResult]) -> None:
+        incoming = (extraction.entities if extraction else {}) or {}
+        deltas = {
+            k: incoming[k]
+            for k in (
+                "catering",
+                "hybrid_av",
+                "special_access",
+                "location_preference",
+                "meeting_type",
+                "dietary",
+                "guest_vehicles",
+                "external_visitors",
+            )
+            if k in incoming
+            and incoming.get(k) not in (None, "")
+            and incoming.get(k) != (merged.get("booked_room") or {}).get(k)
+        }
+        merged["orchestration_stage"] = MeetingStage.MONITORING.value
+        if deltas:
+            history = list(merged.get("post_booking_requests") or [])
+            history.append(deltas)
+            merged.update(deltas)
+            merged["post_booking_requests"] = history
+            merged["needs_ops"] = True
+            merged["last_action"] = "post_booking_update"
+            merged["outbound_required"] = "update_noted"
+            self._save_facts(outcome, merged)
+            if outcome.requester_email:
+                self.comms.send_case_update(
+                    outcome=outcome,
+                    communication_type="INFORMATION_ONLY",
+                    body=(
+                        "Thanks — we’ve noted your additional request against the confirmed booking.\n\n"
+                        + "\n".join(f"- {k.replace('_', ' ')}: {v}" for k, v in deltas.items())
+                        + f"\n\nCase: {outcome.case_reference}"
+                    ),
+                    recipients=[outcome.requester_email],
+                    action_label="UPDATE NOTED",
+                )
+        else:
+            merged["last_action"] = "monitoring"
+            merged["outbound_required"] = "suppressed"
+            self._save_facts(outcome, merged)
+            self.comms.record_suppressed(outcome=outcome, reason="no_new_facts_post_booking")
 
     def _maybe_auto_book_low_risk(self, outcome: Outcome) -> None:
         facts = dict(outcome.facts or {})
@@ -516,8 +562,9 @@ class ClientMeetingOrchestrator:
             return
         facts["auto_booked_low_risk"] = True
         facts["booking_confirmed"] = True
-        outcome.facts = facts
-        self.session.add(outcome)
+        facts["orchestration_stage"] = MeetingStage.AUTO_BOOKED.value
+        facts["last_action"] = "auto_booked"
+        self._save_facts(outcome, facts)
         self._finalize_booking(outcome, actor="system_low_risk")
 
     def _pick_room(self, facts: dict) -> Optional[Resource]:
@@ -548,6 +595,21 @@ class ClientMeetingOrchestrator:
         ]
         facts["recommended_room"] = {"name": best[1].name, "score": best[0], "reasons": best[2]}
         return best[1]
+
+    def _max_room_capacity(self) -> int:
+        rooms = self.session.exec(
+            select(Resource).where(
+                Resource.tenant_id == self.tenant_id,
+                Resource.type == "MEETING_ROOM",
+            )
+        ).all()
+        caps: list[int] = []
+        for room in rooms:
+            try:
+                caps.append(int((room.attributes or {}).get("capacity") or 0))
+            except (TypeError, ValueError):
+                continue
+        return max(caps) if caps else 0
 
     def _send_registration_ack(self, outcome: Outcome, facts: dict) -> None:
         if not outcome.requester_email:
@@ -603,8 +665,7 @@ class ClientMeetingOrchestrator:
             action_label="REQUEST RECEIVED",
         )
         facts["ops_ack_sent"] = True
-        outcome.facts = facts
-        self.session.add(outcome)
+        self._save_facts(outcome, facts)
 
     def _propose(self, outcome: Outcome, room: Resource, facts: dict, *, updated: bool) -> None:
         try:
@@ -646,9 +707,11 @@ class ClientMeetingOrchestrator:
             "needs_ops": False,
             "checklist_missing": [],
             "execution_plan": self._execution_plan(facts, room.name),
+            "orchestration_stage": MeetingStage.PROPOSED.value,
+            "last_action": "proposed",
+            "outbound_required": "confirm_booking",
         }
-        outcome.facts = facts
-        self.session.add(outcome)
+        self._save_facts(outcome, facts)
 
         intro = (
             "Thanks — we’ve updated what we have on file for your request.\n\n"
@@ -713,8 +776,12 @@ class ClientMeetingOrchestrator:
         facts["pending_confirmation"] = False
         facts["needs_ops"] = False
         facts["booking_confirmed"] = True
-        outcome.facts = facts
-        self.session.add(outcome)
+        facts["orchestration_stage"] = (
+            MeetingStage.AUTO_BOOKED.value if actor == "system_low_risk" else MeetingStage.MONITORING.value
+        )
+        facts["last_action"] = "booked"
+        facts["outbound_required"] = "booking_confirmed"
+        self._save_facts(outcome, facts)
 
         self._complete_task(outcome, "RESERVE_ROOM", actor, f"Confirmed {booking.get('name')}")
         self._apply_applicability(outcome, facts)
@@ -985,8 +1052,7 @@ class ClientMeetingOrchestrator:
             "accepted_late_minutes": 18,
         }
         facts["catering_assigned"] = True
-        outcome.facts = facts
-        self.session.add(outcome)
+        self._save_facts(outcome, facts)
         self._complete_task(outcome, "CATERING_APPROVAL", "system", "Catering spend approved")
         self._complete_task(
             outcome,
@@ -1023,8 +1089,7 @@ class ClientMeetingOrchestrator:
             "amount_ex_tax": (facts.get("catering_quote") or {}).get("amount_ex_tax"),
             "status": "RECEIVED",
         }
-        outcome.facts = facts
-        self.session.add(outcome)
+        self._save_facts(outcome, facts)
 
     def _mark_readiness_progress(self, outcome: Outcome) -> None:
         self._complete_task(outcome, "HOUSEKEEPING", "system", "Setup checklist queued/complete (prototype)")

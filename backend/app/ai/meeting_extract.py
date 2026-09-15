@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from typing import Any, Optional
 
 from app.schemas.ai import ExtractionResult, MissingInformation
@@ -27,33 +26,37 @@ _PRESERVE_KEYS = {
     "defaults_applied",
     "execution_plan",
     "auto_booked_low_risk",
+    "orchestration_stage",
+    "last_action",
+    "outbound_required",
+    "last_outbound",
+    "inventory_max_capacity",
 }
 
 
 MEETING_ROOM_AI_INSTRUCTIONS = """
-MEETING ROOM / BOOKING EXTRACTION RULES (strict):
+MEETING ROOM INTERPRETER (delta extraction):
 
-You are a careful interpreter. Prefer understanding natural language over keywords.
+Return entities AND fact_delta as a DELTA for THIS email only. Do not copy the entire
+prior_facts snapshot into entities. The platform reducer merges your delta onto prior state.
 
-1. NEVER invent numeric facts. If the user says visitors will attend but does not give a count,
-   set entities.external_visitors_indicated=true and leave external_visitors unset.
-   Add missing_information asking how many visitors and for names/orgs/emails.
+fact_delta schema:
+  { "set": {field: value}, "unset": [], "assumptions": [],
+    "speech_acts": ["provide_facts"|"confirm"|"cancel"|"satisfied"] }
+
+1. NEVER invent numeric facts. If visitors will attend but no count is given, set
+   external_visitors_indicated=true and omit external_visitors.
 2. Map synonyms: participants/people/attendees/members/pax → attendees (integer).
-3. "confidential" as meeting type → meeting_type=confidential and confidentiality=business confidential.
-4. "yes" alone in a long requirements list is NOT booking confirmation.
-   Only set booking_confirmed=true for clear confirm/yes-to-book replies to a proposal.
-5. Merge with prior_facts: keep known date/time/attendees; fill only new or corrected fields from this email.
-6. If office/building is omitted but prior_facts.primary_office exists, you MAY set
-   location_preference to that primary office and note it in reason — do not invent a different site.
-7. For catering without dietary split → missing dietary (blocking).
-8. missing_information must list ONLY still-unknown blocking fields after merging prior_facts + this email.
-9. Do NOT set human_review_required for ordinary meeting-room clarification replies
-   (visitors, catering, VC, confidential rooms are handled by platform modules).
-10. Set event_type=MEETING_ROOM for room booking threads (including replies to INFORMATION REQUIRED).
-11. Extract when present: attendees, date, preferred_time, end_time, duration_hours, meeting_type,
-    hybrid_av, presentation_display, location_preference, catering, dietary, special_access,
-    external_visitors (only if a number is stated), external_visitors_indicated, visitor_details,
-    guest_vehicles, vehicle_numbers, confidentiality, booking_confirmed, employee_satisfied, new_request.
+3. Informal answers count: "internal" → meeting_type=internal meeting;
+   "non veg" → dietary=non-vegetarian; names after "visitors" → visitor_details.
+4. "yes" in a requirements list is NOT booking_confirmed / speech_acts confirm.
+5. If office is omitted and prior_facts.primary_office exists, you MAY set location_preference
+   to that office (do not invent a different site).
+6. Catering without dietary → leave dietary unset (platform will ask).
+7. missing_information = blocking fields still unknown AFTER merge with prior_facts.
+8. Do NOT set human_review_required for ordinary meeting-room replies.
+9. event_type=MEETING_ROOM for room booking threads (including INFORMATION REQUIRED replies).
+10. Speech: confirm a proposal → speech_acts=["confirm"]; satisfied after meeting → ["satisfied"].
 """.strip()
 
 
@@ -130,42 +133,49 @@ def refine_meeting_room_extraction(
     body: str,
     prior_facts: Optional[dict] = None,
     heuristic_entities: Optional[dict] = None,
+    primary_is_heuristic: bool = False,
 ) -> ExtractionResult:
-    """Normalize Gemini (or heuristic) meeting-room output into consistent entities + gaps."""
-    prior = dict(prior_facts or {})
-    primary = dict(extraction.entities or {})
-    secondary = dict(heuristic_entities or {})
+    """Reducer-backed merge: Gemini (or primary) delta + optional heuristic candidates."""
+    from app.domain.meeting import Provenance
+    from app.engine.outcome_reducer import reduce_meeting_facts
 
-    # If model omitted event type but thread is meeting-room, force it
     extraction.event_type = "MEETING_ROOM"
     extraction.category = "MEETING_ROOM"
+    source = f"{subject}\n{body}"
+    primary = dict(extraction.entities or {})
+    # If primary already copied the whole prior snapshot, strip platform-only keys from delta
+    for k in _PRESERVE_KEYS:
+        primary.pop(k, None)
+    fd = extraction.fact_delta if isinstance(extraction.fact_delta, dict) else {}
+    if fd.get("set"):
+        primary.update({k: v for k, v in fd["set"].items() if v is not None and v != ""})
+    unset = list(fd.get("unset") or [])
+    speech = list(fd.get("speech_acts") or [])
 
-    merged = merge_meeting_entities(prior=prior, primary=primary, secondary=secondary)
-    merged = sanitize_meeting_confirmation_flags(merged, subject=subject, body=body)
+    merged = reduce_meeting_facts(
+        prior_facts,
+        primary_entities=primary,
+        candidate_entities=heuristic_entities if not primary_is_heuristic else None,
+        source_text=source,
+        primary_provenance=Provenance.CANDIDATE_HEURISTIC
+        if primary_is_heuristic
+        else Provenance.EXTRACTED,
+        unset=unset,
+        speech_acts=speech or None,
+    )
 
-    # Strip invented visitor count when only indication exists
-    if merged.get("external_visitors_indicated") and not _answered(primary.get("external_visitors")):
-        # Keep count only if prior already had a real count or heuristic/primary stated a number in this mail
-        body_l = (body or "").lower()
-        if not re.search(r"\d+\s*(?:client|external|visitor|guests?)", body_l):
-            if not _answered(prior.get("external_visitors")):
-                merged.pop("external_visitors", None)
-
-    gaps = recompute_meeting_gaps(merged)
     extraction.entities = merged
+    gaps = meeting_room_gaps(merged)
     extraction.missing_information = [MissingInformation(**g) for g in gaps]
     extraction.clarification_questions = [g["question"] for g in gaps]
-
-    # Meeting-room operational path — modules handle visitors/catering/confidential
     extraction.human_review_required = False
     extraction.access_control_action = False
     if gaps:
         extraction.recommended_next_action = "clarification"
         extraction.confidence = max(float(extraction.confidence or 0), 0.78)
-        extraction.reason = (extraction.reason or "") + " | meeting refine: awaiting blocking fields"
+        extraction.reason = (extraction.reason or "") + " | reducer: awaiting blocking fields"
     else:
         extraction.recommended_next_action = "route_to_outcome_engine"
         extraction.confidence = max(float(extraction.confidence or 0), 0.9)
-        extraction.reason = (extraction.reason or "") + " | meeting refine: facts complete"
-
+        extraction.reason = (extraction.reason or "") + " | reducer: facts complete"
     return extraction

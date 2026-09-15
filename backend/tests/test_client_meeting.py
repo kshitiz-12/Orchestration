@@ -111,6 +111,7 @@ def test_minimal_request_date_only_does_not_book(session: Session):
     assert incomplete.facts.get("registration_ack_sent")
     assert not incomplete.facts.get("booked_room")
     assert not incomplete.facts.get("proposed_room")
+    assert incomplete.facts.get("orchestration_stage") == "AWAITING_REQUIREMENTS"
     assert "attendees" in (incomplete.facts.get("checklist_missing") or [])
     qs = default_meeting_room_questions(incomplete.facts or {})
     assert any("Start time" in q for q in qs)
@@ -363,3 +364,49 @@ def test_employee_satisfied_closes_operational(session: Session):
         context={},
     )
     assert (o.facts or {}).get("operational_status") == "CLOSED"
+
+
+def test_oversize_headcount_is_no_resource_and_emails(session: Session):
+    tid = _tenant(session)
+    orch = ScenarioOrchestrator(session, tid)
+    conv = Conversation(
+        tenant_id=tid,
+        thread_id="t-no-fit",
+        requester_email="big.team@company.com",
+        subject="All-hands room",
+    )
+    session.add(conv)
+    session.commit()
+    outcome = orch.orchestrate(
+        extraction=ExtractionResult(
+            event_type="MEETING_ROOM",
+            summary="80 people all hands",
+            entities={
+                "attendees": 80,
+                "date": "22 September 2026",
+                "preferred_time": "2:00 PM",
+                "end_time": "5:00 PM",
+                "duration_hours": 3.0,
+                "meeting_type": "internal meeting",
+                "location_preference": "Corporate Office",
+                "presentation_display": "yes",
+                "catering": "none",
+                "external_visitors": 0,
+            },
+            missing_information=[],
+            confidence=0.95,
+            reason="complete",
+        ),
+        requester_email="big.team@company.com",
+        conversation_id=conv.conversation_id,
+        business_event_id="evt_nofit",
+        context={},
+    )
+    assert outcome.facts.get("orchestration_stage") == "NO_RESOURCE"
+    assert not outcome.facts.get("booked_room")
+    assert not outcome.facts.get("proposed_room")
+    assert (outcome.facts.get("inventory_max_capacity") or 0) < 80
+    mails = session.exec(
+        select(Communication).where(Communication.outcome_id == outcome.outcome_id)
+    ).all()
+    assert any("NO ROOM AVAILABLE" in (m.subject or "") for m in mails)

@@ -7,6 +7,8 @@ from typing import Any
 from sqlmodel import Session, select
 
 from app.ai.gemini import HeuristicProvider
+from app.domain.meeting import Provenance
+from app.engine.outcome_reducer import reduce_meeting_facts
 from app.models.intake import Conversation, RawEmailEvent
 from app.services.meeting_room import (  # noqa: F401 — re-export for existing imports
     MEETING_ROOM_REQUIRED,
@@ -46,9 +48,18 @@ def merge_thread_prior_facts(
             body=body,
             prior_facts=facts,
         )
-        for key, value in (extracted.entities or {}).items():
-            if value is not None and value != "":
-                facts[key] = value
+        source = f"{row.subject or ''}\n{body}"
+        if extracted.event_type == "MEETING_ROOM" or facts.get("registration_ack_sent"):
+            facts = reduce_meeting_facts(
+                facts,
+                primary_entities=extracted.entities,
+                source_text=source,
+                primary_provenance=Provenance.CANDIDATE_HEURISTIC,
+            )
+        else:
+            for key, value in (extracted.entities or {}).items():
+                if value is not None and value != "":
+                    facts[key] = value
     # Drop non-fact noise
     facts.pop("issues", None)
     return facts

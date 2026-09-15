@@ -2,7 +2,6 @@ from typing import Optional
 
 from sqlmodel import Session, select
 
-from app.ai.gemini import HeuristicProvider
 from app.ai.service import LLMService
 from app.audit.service import AuditService
 from app.core.config import get_settings
@@ -18,11 +17,11 @@ from app.engine.scenarios import ScenarioOrchestrator
 from app.models.intake import AIDecision, Conversation, HumanReviewItem, ProcessingJob, RawEmailEvent
 from app.models.org import utcnow
 from app.connectors.factory import get_email_provider
-from app.schemas.ai import ExtractionResult
+from app.schemas.ai import ExtractionResult, MissingInformation
 from app.services.communication import CommunicationService
 from app.services.context import ContextRetrievalService
 from app.services.intake import JobQueueService
-from app.services.meeting_room import default_meeting_room_questions
+from app.services.meeting_room import default_meeting_room_questions, meeting_room_gaps
 from app.services.thread_facts import merge_thread_prior_facts
 
 logger = get_logger(__name__)
@@ -270,6 +269,46 @@ class ProcessingPipeline:
             business_event_id=event.event_id,
             context=relevant_ctx,
         )
+        facts = dict(outcome.facts or {})
+        stage = (facts.get("orchestration_stage") or "").upper()
+        blocking = meeting_room_gaps(facts) if (outcome.category or "").upper() == "MEETING_ROOM" else []
+        # Never mark COMPLETE while requirements are blocking or inventory failed
+        if stage == "AWAITING_REQUIREMENTS" or blocking:
+            questions = [g["question"] for g in blocking] or [
+                m.question for m in extraction.missing_information if m.question
+            ]
+            understood = None
+            if facts.get("registration_ack_sent"):
+                from app.services.meeting_room import summarize_meeting_requirements
+
+                understood = summarize_meeting_requirements(facts)[:10]
+            if not questions:
+                questions = default_meeting_room_questions(facts)
+            self.comms.send_clarification(
+                conversation=conversation,
+                questions=questions,
+                case_reference=outcome.case_reference,
+                understood=understood,
+                force_send_key=event.event_id,
+            )
+            event.processing_stage = ProcessingStage.COMMUNICATION.value
+            self.session.add(event)
+            self.session.commit()
+            return {
+                "status": "clarification_sent",
+                "outcome_id": outcome.outcome_id,
+                "decision_id": decision.decision_id,
+            }
+        if stage == "NO_RESOURCE":
+            event.processing_stage = ProcessingStage.COMMUNICATION.value
+            self.session.add(event)
+            self.session.commit()
+            return {
+                "status": "no_resource",
+                "outcome_id": outcome.outcome_id,
+                "decision_id": decision.decision_id,
+            }
+
         if conversation.facts and (event.provider_conversation_id or event.gmail_thread_id):
             self.audit.record(
                 tenant_id=self.tenant_id,
@@ -395,28 +434,28 @@ class ProcessingPipeline:
             or any(k in merged for k in ("attendees", "preferred_time", "duration_hours"))
         )
         if looks_meeting:
-            heuristic = HeuristicProvider().extract(
-                subject=subject,
-                body=body,
-                prior_facts=merged,
-            )
-            from app.ai.meeting_extract import refine_meeting_room_extraction
-
-            extraction = refine_meeting_room_extraction(
-                extraction,
-                subject=subject,
-                body=body,
-                prior_facts=prior_facts,
-                heuristic_entities=heuristic.entities if heuristic.event_type == "MEETING_ROOM" else {},
-            )
-            if extraction.entities.get("employee_satisfied") and extraction.entities.get("booked_room"):
+            # LLMService already reduced; re-derive gaps from snapshot without heuristic overwrite
+            snapshot = dict(extraction.entities or merged)
+            gaps = meeting_room_gaps(snapshot)
+            if snapshot.get("booked_room") or (
+                snapshot.get("pending_confirmation") and snapshot.get("proposed_room")
+            ):
+                gaps = []
+            extraction.event_type = "MEETING_ROOM"
+            extraction.category = "MEETING_ROOM"
+            extraction.entities = snapshot
+            extraction.missing_information = [MissingInformation(**g) for g in gaps]
+            extraction.clarification_questions = [g["question"] for g in gaps]
+            if snapshot.get("employee_satisfied") and snapshot.get("booked_room"):
                 extraction.recommended_next_action = "route_to_outcome_engine"
                 extraction.reason = (extraction.reason or "") + " | employee satisfied"
-            elif extraction.entities.get("booking_confirmed") and extraction.entities.get(
-                "pending_confirmation"
-            ):
+            elif snapshot.get("booking_confirmed") and snapshot.get("pending_confirmation"):
                 extraction.recommended_next_action = "route_to_outcome_engine"
                 extraction.reason = (extraction.reason or "") + " | requester confirmed meeting room booking"
+            elif gaps:
+                extraction.recommended_next_action = "clarification"
+            else:
+                extraction.recommended_next_action = "route_to_outcome_engine"
         else:
             extraction.entities = merged
         return extraction
