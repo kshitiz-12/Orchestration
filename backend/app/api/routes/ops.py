@@ -2,10 +2,14 @@ from fastapi import APIRouter, HTTPException
 from sqlmodel import select
 
 from app.api.deps import SessionDep, TenantDep, UserDep
+from app.ai.gemini import GeminiProvider
+from app.ai.service import LLMService
 from app.connectors.mocks import MockERPConnector
+from app.core.config import get_settings
 from app.models.intake import ProcessingJob
 from app.models.org import Invoice, PurchaseOrder, Receipt, Resource, Vendor
 from app.models.org import BusinessRule, NotificationTemplate, OutcomeTemplate
+from app.services.demo_reset import reset_demo_operational_data
 from app.services.intake import JobQueueService
 from app.audit.service import AuditService
 from app.core.enums import AuditAction
@@ -130,3 +134,64 @@ def list_notification_templates(session: SessionDep, tenant_id: TenantDep, _user
 @router.get("/vendors")
 def list_vendors(session: SessionDep, tenant_id: TenantDep, _user: UserDep):
     return session.exec(select(Vendor).where(Vendor.tenant_id == tenant_id)).all()
+
+
+@router.post("/demo/reset")
+def reset_demo_data(session: SessionDep, tenant_id: TenantDep, user: UserDep):
+    """Clear emails, outcomes, reviews and free rooms — keep org seed masters."""
+    result = reset_demo_operational_data(session, tenant_id)
+    AuditService(session).record(
+        tenant_id=tenant_id,
+        actor=user.email,
+        action="DEMO_RESET",
+        entity_type="Tenant",
+        entity_id=tenant_id,
+        after=result,
+    )
+    session.commit()
+    return {"status": "ok", "message": "Demo operational data cleared", **result}
+
+
+@router.get("/ai/health")
+def ai_health(_user: UserDep):
+    """Check whether Gemini is configured and can run a tiny extraction."""
+    settings = get_settings()
+    info: dict = {
+        "configured": bool(settings.gemini_api_key),
+        "model": settings.gemini_model,
+        "provider": "gemini" if settings.gemini_api_key else "heuristic",
+    }
+    if not settings.gemini_api_key:
+        info["ok"] = False
+        info["detail"] = "GEMINI_API_KEY is not set on this environment"
+        return info
+
+    provider = GeminiProvider()
+    client_ok = provider.healthcheck()
+    info["client_init"] = client_ok
+    if not client_ok:
+        info["ok"] = False
+        info["detail"] = "Gemini client failed to initialize"
+        return info
+
+    try:
+        result = LLMService(provider=provider).extract(
+            subject="Meeting room required",
+            body="Please book a meeting room for 18 September for 7 people at 11am to 12pm internal.",
+            prior_facts={},
+        )
+        info["ok"] = True
+        info["event_type"] = result.event_type
+        info["confidence"] = result.confidence
+        info["attendees"] = (result.entities or {}).get("attendees")
+        info["reason"] = (result.reason or "")[:240]
+        info["human_review_required"] = result.human_review_required
+        # Heuristic-only reason means Gemini path failed inside service
+        if "Primary AI unavailable" in (result.reason or ""):
+            info["ok"] = False
+            info["detail"] = result.reason
+        return info
+    except Exception as exc:  # noqa: BLE001
+        info["ok"] = False
+        info["detail"] = str(exc)
+        return info
