@@ -44,6 +44,19 @@ class ConfirmBookingRequest(BaseModel):
     note: Optional[str] = None
 
 
+class OverrideFactsRequest(BaseModel):
+    """Operator playbook: set/clear facts with user_confirmed provenance."""
+
+    set: dict[str, Any] = Field(default_factory=dict)
+    unset: list[str] = Field(default_factory=list)
+    note: Optional[str] = None
+    re_orchestrate: bool = True
+
+
+class ReopenOutcomeRequest(BaseModel):
+    reason: Optional[str] = None
+
+
 class EvidenceCreate(BaseModel):
     evidence_type: str
     description: Optional[str] = None

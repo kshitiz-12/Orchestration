@@ -18,17 +18,23 @@ SIGNATURE_PATTERNS = [
     re.compile(r"^Best regards,?$", re.M | re.I),
     re.compile(r"^Thanks,?$", re.M | re.I),
     re.compile(r"^Regards,?$", re.M | re.I),
+    re.compile(r"^Disclaimer\s*:", re.M | re.I),
+    re.compile(r"^This e-?mail.*confidential", re.M | re.I),
 ]
 
 
 def strip_for_ai(body: str) -> str:
-    """Strip quoted history and signatures for AI input only — originals remain stored."""
+    """Strip quoted history, signatures and legal disclaimers for AI input only."""
     text = body or ""
     cut_points = []
     for pattern in QUOTE_PATTERNS + SIGNATURE_PATTERNS:
         match = pattern.search(text)
         if match:
             cut_points.append(match.start())
+    # Also cut common corporate disclaimer blocks mid-body
+    disc = re.search(r"\n\s*Disclaimer\s*:", text, re.I)
+    if disc:
+        cut_points.append(disc.start())
     if cut_points:
         text = text[: min(cut_points)].strip()
     return text.strip()

@@ -200,3 +200,28 @@ def ai_health(_user: UserDep):
         info["ok"] = False
         info["detail"] = str(exc)
         return info
+
+
+@router.get("/policy/meeting-room")
+def get_meeting_policy(session: SessionDep, tenant_id: TenantDep, _user: UserDep):
+    from app.policy.meeting_policy import ensure_meeting_policy_rule, load_meeting_policy
+
+    ensure_meeting_policy_rule(session, tenant_id)
+    session.commit()
+    pol = load_meeting_policy(session, tenant_id)
+    return pol.to_dict()
+
+
+@router.post("/sla/tick")
+def sla_tick(session: SessionDep, tenant_id: TenantDep, _user: UserDep):
+    from app.services.sla import tick_sla
+
+    return tick_sla(session, tenant_id)
+
+
+@router.post("/evals/meeting-room")
+def run_meeting_evals(_user: UserDep, heuristic: bool = True):
+    """Score golden meeting-room emails (heuristic by default for CI stability)."""
+    from app.evals.harness import run_eval
+
+    return run_eval(use_heuristic=heuristic)

@@ -129,12 +129,22 @@ class ProcessingPipeline:
             extraction = self._enrich_with_thread_facts(extraction, prior_facts, event)
 
         routing = self.llm.route(extraction)
+        interp_path = (extraction.entities or {}).get("interpretation_path")
+        endpoint = (extraction.entities or {}).get("interpretation_endpoint") or {}
+        model_label = (
+            interp_path
+            or (endpoint.get("label") if isinstance(endpoint, dict) else None)
+            or getattr(self.llm.provider, "model", type(self.llm.provider).__name__)
+        )
         decision = AIDecision(
             tenant_id=self.tenant_id,
             event_id=event.event_id,
             conversation_id=conversation.conversation_id,
-            model=getattr(self.llm.provider, "model", type(self.llm.provider).__name__),
-            model_version=str(getattr(self.llm.provider, "model", "heuristic")),
+            model=str(model_label),
+            model_version=str(
+                (endpoint.get("model") if isinstance(endpoint, dict) else None)
+                or getattr(self.llm.provider, "model", "heuristic")
+            ),
             prompt_version=self.settings.ai_prompt_version,
             confidence=extraction.confidence,
             output=extraction.model_dump(),
@@ -219,18 +229,20 @@ class ProcessingPipeline:
             facts_for_q = {**(outcome.facts or {}), **(extraction.entities or {})}
             prior_clarify = bool((outcome.facts or {}).get("clarification_sent"))
             is_first_contact = not prior_clarify
-            # First ask: full consolidated checklist (one reply should be enough).
-            # Later replies: only remaining gaps.
-            if is_first_contact and (outcome.category or "").upper() == "MEETING_ROOM":
-                questions = default_meeting_room_questions(facts_for_q)
+            # Always ask ONLY what is still blocking — never re-ask answered facts.
+            gap_questions = [g["question"] for g in meeting_room_gaps(facts_for_q) if g.get("question")]
+            if gap_questions:
+                questions = gap_questions
             elif not questions:
-                questions = [m.question for m in extraction.missing_information if m.question]
-                if not questions:
-                    questions = default_meeting_room_questions(facts_for_q)
+                questions = default_meeting_room_questions(facts_for_q)
 
-            understood = summarize_meeting_requirements(facts_for_q)[:10]
+            understood = summarize_meeting_requirements(facts_for_q)[:12]
             name = resolve_requester_name(
-                self.session, outcome=outcome, conversation=conversation, email=event.sender
+                self.session,
+                outcome=outcome,
+                conversation=conversation,
+                email=event.sender,
+                event=event,
             )
             self.comms.send_clarification(
                 conversation=conversation,
@@ -243,6 +255,11 @@ class ProcessingPipeline:
             )
             facts = dict(outcome.facts or {})
             facts["clarification_sent"] = True
+            if name and name.lower() != "there":
+                facts["requester_display_name"] = name
+            path = (extraction.entities or {}).get("interpretation_path")
+            if path:
+                facts["interpretation_path"] = path
             outcome.facts = facts
             self.session.add(outcome)
             from sqlalchemy.orm.attributes import flag_modified
@@ -281,17 +298,16 @@ class ProcessingPipeline:
         if stage == "AWAITING_REQUIREMENTS" or blocking:
             prior_clarify = bool(facts.get("clarification_sent"))
             is_first_contact = not prior_clarify
-            if is_first_contact:
+            questions = [g["question"] for g in blocking if g.get("question")]
+            if not questions:
                 questions = default_meeting_room_questions(facts)
-            else:
-                questions = [g["question"] for g in blocking] or [
-                    m.question for m in extraction.missing_information if m.question
-                ]
-                if not questions:
-                    questions = default_meeting_room_questions(facts)
-            understood = summarize_meeting_requirements(facts)[:10]
+            understood = summarize_meeting_requirements(facts)[:12]
             name = resolve_requester_name(
-                self.session, outcome=outcome, conversation=conversation, email=event.sender
+                self.session,
+                outcome=outcome,
+                conversation=conversation,
+                email=event.sender,
+                event=event,
             )
             self.comms.send_clarification(
                 conversation=conversation,
@@ -303,6 +319,11 @@ class ProcessingPipeline:
                 greeting_name=name,
             )
             facts["clarification_sent"] = True
+            if name and name.lower() != "there":
+                facts["requester_display_name"] = name
+            path = (extraction.entities or {}).get("interpretation_path")
+            if path:
+                facts["interpretation_path"] = path
             outcome.facts = facts
             self.session.add(outcome)
             from sqlalchemy.orm.attributes import flag_modified
@@ -336,6 +357,27 @@ class ProcessingPipeline:
                 after={"facts": conversation.facts},
                 correlation_id=event.processing_id,
             )
+
+        # Persist AI path + greeting name on successful orchestration
+        facts = dict(outcome.facts or {})
+        path = (extraction.entities or {}).get("interpretation_path")
+        if path:
+            facts["interpretation_path"] = path
+        name = resolve_requester_name(
+            self.session,
+            outcome=outcome,
+            conversation=conversation,
+            email=event.sender,
+            event=event,
+        )
+        if name and name.lower() != "there":
+            facts["requester_display_name"] = name
+        if facts != (outcome.facts or {}):
+            outcome.facts = facts
+            self.session.add(outcome)
+            from sqlalchemy.orm.attributes import flag_modified
+
+            flag_modified(outcome, "facts")
 
         event.processing_stage = ProcessingStage.COMPLETED.value
         self.session.add(event)

@@ -112,12 +112,16 @@ def _is_failover_error(exc: Exception) -> bool:
         for token in (
             "503",
             "429",
+            "403",
             "unavailable",
             "high demand",
             "resource_exhausted",
             "quota",
             "rate limit",
             "overloaded",
+            "permission_denied",
+            "denied access",
+            "permission denied",
         )
     )
 
@@ -234,6 +238,7 @@ class GeminiProvider(LLMProvider):
         if not endpoints:
             raise RuntimeError("GEMINI_API_KEY is not configured")
         last_exc: Exception | None = None
+        failures: list[str] = []
         for label, api_key, model in endpoints:
             try:
                 response = self._generate_once(api_key=api_key, model=model, user_payload=user_payload)
@@ -241,6 +246,7 @@ class GeminiProvider(LLMProvider):
                 return response, (label, model)
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
+                failures.append(f"{label}: {str(exc)[:120]}")
                 logger.warning(
                     "gemini_endpoint_failed",
                     endpoint=label,
@@ -248,10 +254,11 @@ class GeminiProvider(LLMProvider):
                     failover=_is_failover_error(exc),
                     error=str(exc)[:300],
                 )
-                if not _is_failover_error(exc):
-                    # Schema/parse/auth bugs: still try next account/model once, then raise
-                    continue
-        raise last_exc or RuntimeError("gemini extract failed on all endpoints")
+                continue
+        detail = " | ".join(failures)
+        raise RuntimeError(
+            f"gemini extract failed on all endpoints [{detail}]"
+        ) from last_exc
 
     def _generate_once(self, *, api_key: str, model: str, user_payload: dict):
         from google.genai import types
@@ -353,13 +360,22 @@ class HeuristicProvider(LLMProvider):
             import re
 
             m_people = re.search(
-                r"(\d+)\s*(?:people|attendees|persons|person|pax|members|participants|heads|guests)",
+                r"(\d+)\s*(?:people|attendees|persons|person|pax|members|participants|heads|guests|"
+                r"emp+l?oy+e*e*'?s?|employees?|staff)",
                 text,
                 re.I,
             )
             if not m_people:
                 m_people = re.search(
-                    r"(?:people|attendees|persons|pax|members|participants)\s*[:=]?\s*(\d+)",
+                    r"(?:people|attendees|persons|pax|members|participants|employees?|emp\w*loy\w*)"
+                    r"\s*[:=]?\s*(\d+)",
+                    text,
+                    re.I,
+                )
+            if not m_people:
+                # "for 12 empployee's" / typo-tolerant employee headcount
+                m_people = re.search(
+                    r"(?:for|of)\s+(\d+)\s+[a-z']{0,4}emp[a-z']{0,8}",
                     text,
                     re.I,
                 )
@@ -556,12 +572,19 @@ class HeuristicProvider(LLMProvider):
                 entities["special_access"] = "required"
                 entities["external_visitors_indicated"] = True
 
-            # Names after visitor mention: "2 external visitors rahul and aman"
+            # Names after visitor mention: "2 external visitors will attend - Rahul and Aman"
             m_names = re.search(
-                r"(?:external\s+)?visitors?\s+(?:\d+\s+)?(.+?)(?:,\s*(?:non|veg|dietary|catering)|$)",
+                r"(?:external\s+)?visitors?\s+(?:will\s+)?(?:attend(?:ing)?|join(?:ing)?)\s*[-–:]?\s*"
+                r"([A-Za-z][A-Za-z\s,.&'-]{1,200})",
                 body,
-                re.I | re.S,
+                re.I,
             )
+            if not m_names:
+                m_names = re.search(
+                    r"(?:external\s+)?visitors?\s+(?:\d+\s+)?(.+?)(?:,\s*(?:non|veg|dietary|catering)|$)",
+                    body,
+                    re.I | re.S,
+                )
             if not m_names:
                 m_names = re.search(
                     r"(\d+)\s+(?:external\s+)?visitors?\s+([A-Za-z][A-Za-z\s,.&]+?)(?:,\s*(?:non|veg)|$)",
@@ -570,13 +593,25 @@ class HeuristicProvider(LLMProvider):
                 )
             if m_names:
                 raw_names = (m_names.group(m_names.lastindex) or "").strip(" ,.")
-                # Drop leading count words already captured
                 raw_names = re.sub(
                     r"^(?:\d+\s+)?(?:external\s+)?visitors?\s+",
                     "",
                     raw_names,
                     flags=re.I,
                 ).strip(" ,.")
+                raw_names = re.sub(
+                    r"^(?:will\s+)?(?:attend(?:ing)?|join(?:ing)?)\s*[-–:]?\s*",
+                    "",
+                    raw_names,
+                    flags=re.I,
+                ).strip(" ,.")
+                # Stop at next requirement sentence
+                raw_names = re.split(
+                    r"\n|Pls\b|Please\b|No guest\b|tea\b|coffee\b|catering\b|display\b",
+                    raw_names,
+                    maxsplit=1,
+                    flags=re.I,
+                )[0].strip(" ,.")
                 if raw_names and not re.match(r"^(will|yes|attend|required)\b", raw_names, re.I):
                     entities["visitor_details"] = raw_names[:500]
             if "visitor names" in text or "abc industries" in text:

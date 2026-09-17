@@ -10,6 +10,7 @@ from app.domain.meeting import (
     REQUIREMENT_FIELDS,
     FactDelta,
     Provenance,
+    attach_field_contract,
     facts_from_state,
     state_from_facts,
 )
@@ -119,7 +120,7 @@ def apply_delta(
     out["field_provenance"] = provenance
     out["checklist_missing"] = [g["field"] for g in state.blocking_gaps()]
     out["orchestration_stage"] = state.derive_stage(out).value
-    return out
+    return attach_field_contract(out)
 
 
 def delta_from_entities(
@@ -203,7 +204,26 @@ def reduce_meeting_facts(
             out[key] = merged[key]
     out["checklist_missing"] = [g["field"] for g in state.blocking_gaps()]
     out["orchestration_stage"] = state.derive_stage(out).value
-    return out
+    return attach_field_contract(out)
+
+
+def apply_operator_override(
+    prior_facts: dict[str, Any] | None,
+    overrides: dict[str, Any],
+    *,
+    unset: Optional[list[str]] = None,
+    actor: str = "operator",
+) -> dict[str, Any]:
+    """Operator/playbook write with USER_CONFIRMED provenance (highest rank)."""
+    cleaned = {k: v for k, v in (overrides or {}).items() if k not in PLATFORM_KEYS}
+    return reduce_meeting_facts(
+        prior_facts,
+        primary_entities=cleaned,
+        unset=unset,
+        primary_provenance=Provenance.USER_CONFIRMED,
+        speech_acts=["operator_override"],
+        source_text=f"operator:{actor}",
+    )
 
 
 def snapshot_gaps(facts: dict[str, Any] | None) -> list[dict[str, Any]]:

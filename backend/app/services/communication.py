@@ -26,7 +26,37 @@ def humanize_email_local(email: str) -> str:
     parts = [p for p in re.split(r"[._+\-]+", local) if p]
     if not parts:
         return "there"
+    # Avoid ugly single-token handles like "anonymousxo"
+    if len(parts) == 1 and len(parts[0]) >= 11:
+        return "there"
     return " ".join(p[:1].upper() + p[1:].lower() for p in parts)
+
+
+def display_name_from_headers(headers: Optional[dict]) -> Optional[str]:
+    """Parse RFC From / sender display name from stored email headers."""
+    if not headers:
+        return None
+    raw = (
+        headers.get("from")
+        or headers.get("From")
+        or headers.get("sender")
+        or headers.get("Sender")
+        or ""
+    )
+    if isinstance(raw, list):
+        raw = raw[0] if raw else ""
+    text = str(raw).strip()
+    if not text:
+        return None
+    # "Kapil Mantri" <kapil@…> or Kapil Mantri <kapil@…>
+    m = re.match(r'^"?([^"<@]+?)"?\s*<[^>]+>$', text)
+    if m:
+        name = m.group(1).strip().strip('"').strip()
+        if name and "@" not in name:
+            return name
+    if "<" not in text and "@" not in text and len(text.split()) <= 5:
+        return text
+    return None
 
 
 def resolve_requester_name(
@@ -36,16 +66,25 @@ def resolve_requester_name(
     person_id: Optional[str] = None,
     outcome: Optional[Outcome] = None,
     conversation: Optional[Conversation] = None,
+    headers: Optional[dict] = None,
+    event: Optional[RawEmailEvent] = None,
 ) -> str:
-    """Prefer HR/master person name, then conversation person, then email local-part."""
+    """Prefer HR/master person name, then From display name, then email local-part."""
     pid = person_id
     addr = (email or "").strip().lower()
+    hdrs = headers
     if outcome is not None:
         pid = pid or outcome.requester_person_id
         addr = addr or (outcome.requester_email or "").strip().lower()
+        cached = (outcome.facts or {}).get("requester_display_name")
+        if cached and str(cached).strip() and str(cached).strip().lower() != "there":
+            return str(cached).strip()
     if conversation is not None:
         pid = pid or conversation.requester_person_id
         addr = addr or (conversation.requester_email or "").strip().lower()
+    if event is not None:
+        addr = addr or (event.sender or "").strip().lower()
+        hdrs = hdrs or (event.headers or {})
     if pid:
         person = session.get(Person, pid)
         if person and (person.name or "").strip():
@@ -54,6 +93,10 @@ def resolve_requester_name(
         person = session.exec(select(Person).where(Person.email == addr)).first()
         if person and (person.name or "").strip():
             return person.name.strip()
+    from_name = display_name_from_headers(hdrs)
+    if from_name:
+        return from_name
+    if addr:
         return humanize_email_local(addr)
     return "there"
 
@@ -155,9 +198,40 @@ class CommunicationService:
             entity_type="Communication",
             execute_fn=_execute,
         )
-        return self.session.exec(
+        msg = self.session.exec(
             select(Communication).where(Communication.idempotency_key == key)
         ).first()
+        if result.get("status") == "already_done":
+            outcome = self.session.get(Outcome, outcome_id) if outcome_id else None
+            if outcome:
+                self.record_suppressed(
+                    outcome=outcome,
+                    reason="duplicate_idempotency_key",
+                    detail={
+                        "idempotency_key": key,
+                        "communication_type": communication_type,
+                        "subject": subject,
+                        "existing_message_id": msg.message_id if msg else None,
+                    },
+                )
+            if msg is not None:
+                setattr(msg, "_suppressed", True)
+                setattr(msg, "_suppress_reason", "duplicate_idempotency_key")
+        elif outcome_id and msg is not None:
+            outcome = self.session.get(Outcome, outcome_id)
+            if outcome:
+                facts = dict(outcome.facts or {})
+                facts["last_outbound"] = {
+                    "status": "SENT",
+                    "communication_type": communication_type,
+                    "message_id": msg.message_id,
+                    "subject": subject,
+                    "delivered": bool((result.get("result") or {}).get("delivered")),
+                }
+                outcome.facts = facts
+                self.session.add(outcome)
+                flag_modified(outcome, "facts")
+        return msg
 
     def send_clarification(
         self,
@@ -184,22 +258,23 @@ class CommunicationService:
         parts: list[str] = [f"Dear {name},\n"]
         if first_contact:
             parts.append(
-                f"Your meeting-room request has been registered as {ref}. "
-                "To book a suitable room in one step, please reply with the details below "
-                "(one reply is enough).\n"
+                f"Your meeting-room request has been registered as {ref}.\n"
             )
         if understood:
-            parts.append("Here’s what we already have on file:\n")
+            parts.append("Here’s what we already have on file (no need to repeat these):\n")
             parts.extend(f"- {line}" for line in understood if line)
-            parts.append("\nPlease confirm or complete the following:\n")
+            parts.append("\nWe only still need:\n" if questions else "\n")
         elif first_contact:
-            parts.append("Please share:\n")
+            parts.append("To proceed, please share:\n")
         else:
-            parts.append("We still need a few details to continue:\n")
-        parts.extend(f"- {q}" for q in questions)
-        parts.append(
-            "\nPlease reply to this email (use Reply — it routes back to our intake)."
-        )
+            parts.append("We still need:\n")
+        if questions:
+            parts.extend(f"- {q}" for q in questions)
+            parts.append(
+                "\nPlease reply with just the missing items above (Reply keeps this thread)."
+            )
+        else:
+            parts.append("\nPlease reply to confirm we can proceed.")
         body = "\n".join(parts)
         # Prefer latest inbound provider message for Graph reply
         in_reply_to = None
@@ -265,16 +340,43 @@ class CommunicationService:
             idempotency_key=f"update:{outcome.outcome_id}:{communication_type}:{event_id or hash(body)}",
         )
 
-    def record_suppressed(self, *, outcome: Outcome, reason: str) -> None:
+    def record_suppressed(
+        self,
+        *,
+        outcome: Outcome,
+        reason: str,
+        detail: Optional[dict] = None,
+    ) -> None:
         """Every inbound must produce an outbound or a logged SUPPRESSED disposition."""
+        from app.models.org import utcnow
+
+        payload = {
+            "status": "SUPPRESSED",
+            "reason": reason,
+            "at": utcnow().isoformat(),
+            **(detail or {}),
+        }
         logger.info(
             "outbound_suppressed",
             outcome_id=outcome.outcome_id,
             case_reference=outcome.case_reference,
             reason=reason,
+            detail=detail or {},
         )
         facts = dict(outcome.facts or {})
-        facts["last_outbound"] = {"status": "SUPPRESSED", "reason": reason}
+        history = list(facts.get("outbound_suppressions") or [])
+        history.append(payload)
+        facts["outbound_suppressions"] = history[-20:]
+        facts["last_outbound"] = payload
         outcome.facts = facts
         self.session.add(outcome)
         flag_modified(outcome, "facts")
+        self.audit.record(
+            tenant_id=self.tenant_id,
+            actor="system",
+            action=AuditAction.COMMUNICATION_SUPPRESSED,
+            entity_type="Outcome",
+            entity_id=outcome.outcome_id,
+            after=payload,
+            correlation_id=outcome.outcome_id,
+        )

@@ -48,6 +48,10 @@ export function friendlyAudit(action?: string) {
     INFORMATION_MERGED: "Details updated from reply",
     EMAIL_RECEIVED: "Email received",
     EMAIL_DEDUPLICATED: "Duplicate email ignored",
+    COMMUNICATION_SUPPRESSED: "Outbound email suppressed",
+    OUTCOME_REOPENED: "Request reopened",
+    OUTCOME_CLOSED: "Request closed",
+    OUTCOME_VERIFIED: "Request verified",
   };
   return map[action || ""] || (action || "—").replaceAll("_", " ");
 }

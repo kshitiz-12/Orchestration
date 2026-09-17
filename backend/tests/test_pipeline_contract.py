@@ -40,7 +40,10 @@ def test_incomplete_meeting_event_stays_communication_not_completed(session):
     assert "INFORMATION REQUIRED" in (mails[0].subject or "")
     assert "Dear" in (mails[0].body or "")
     assert "registered" in (mails[0].body or "").lower()
-    assert "Start time" in (mails[0].body or "") or "participants" in (mails[0].body or "").lower()
+    body_l = (mails[0].body or "").lower()
+    assert "start time" in body_l or "people" in body_l or "attend" in body_l or "participants" in body_l
+    # Should not dump the old 9-item form when we already have the date
+    assert "preferred room, if any" not in body_l
 
 
 def meeting_comms(session, outcome_id: str) -> list[Communication]:

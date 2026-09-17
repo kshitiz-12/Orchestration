@@ -45,6 +45,16 @@ def run_forever() -> None:
             if claimed:
                 logger.info("worker_tick", claimed=claimed)
 
+            # SLA escalation pass (cheap; once per loop)
+            try:
+                from app.services.sla import tick_sla
+
+                sla = tick_sla(session, tenant.tenant_id)
+                if sla.get("overdue_tasks") or sla.get("escalated_tasks"):
+                    logger.info("sla_tick", **sla)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("sla_tick_failed", error=str(exc))
+
             # Outlook/Gmail poll only — CloudMailin pushes via webhook
             if poll_enabled:
                 now = time.time()

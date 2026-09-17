@@ -476,6 +476,9 @@ def seed(session: Session) -> str:
             config={"quantity_tol": 0.0, "rate_tol": 0.01, "amount_tol": 1.0},
         )
     )
+    from app.policy.meeting_policy import ensure_meeting_policy_rule
+
+    ensure_meeting_policy_rule(session, tid)
     session.add(
         NotificationTemplate(
             tenant_id=tid,

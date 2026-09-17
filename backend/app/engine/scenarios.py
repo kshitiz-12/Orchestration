@@ -11,6 +11,7 @@ from app.engine.meeting_scenario import (
     ensure_meeting_room_template,
 )
 from app.engine.outcome_engine import OutcomeEngine
+from app.engine.outcome_pattern import GenericStage, apply_generic_snapshot, derive_generic_stage
 from app.models.org import Invoice, PurchaseOrder, Receipt, Resource, Vendor
 from app.models.outcome import Outcome, Task
 from app.schemas.ai import ExtractionResult
@@ -150,7 +151,40 @@ class ScenarioOrchestrator:
 
     def _scenario_a(self, outcome: Outcome, facts: dict, context: dict) -> None:
         available = context.get("available_seats_count", 0)
-        if facts.get("permanent_seat_available") is False or available == 0:
+        no_seat = facts.get("permanent_seat_available") is False or available == 0
+        stage = derive_generic_stage(
+            has_blocking_gaps=no_seat,
+            awaiting_approval=no_seat,
+            blocked=no_seat,
+            complete=not no_seat,
+            closed=False,
+        )
+        snap = apply_generic_snapshot(
+            outcome.facts,
+            entities={**facts, "available_seats_count": available},
+            stage=stage.value,
+            modules={"seating": True, "laptop": True, "access": True, "induction": True},
+            missing=(
+                [
+                    {
+                        "field": "permanent_seat",
+                        "question": "Workplace must choose a seating alternative",
+                        "blocking": True,
+                    }
+                ]
+                if no_seat
+                else []
+            ),
+            decision={
+                "kind": "onboarding",
+                "stage": stage.value,
+                "no_permanent_seat": no_seat,
+                "alternatives": ["TEMP_HOTDESK", "TEMP_VISITOR", "DEFER_ONSITE"] if no_seat else [],
+            },
+        )
+        outcome.facts = snap
+        self.session.add(outcome)
+        if no_seat:
             self.engine.create_exception(
                 outcome=outcome,
                 exception_type="NO_PERMANENT_SEAT",
@@ -188,7 +222,6 @@ class ScenarioOrchestrator:
         parking = next((r for r in allocated if r["type"] == "PARKING_SLOT"), None)
         if parking:
             facts["verified_allocation"] = parking
-            outcome.facts = {**(outcome.facts or {}), **facts}
             res = self.session.get(Resource, parking["resource_id"])
             if res:
                 res.status = "CONFLICT"
@@ -201,25 +234,44 @@ class ScenarioOrchestrator:
                 Resource.status == "AVAILABLE",
             )
         ).first()
+        temp = None
         if alt:
-            outcome.facts = {
-                **(outcome.facts or {}),
-                "temporary_alternative": {
-                    "resource_id": alt.resource_id,
-                    "name": alt.name,
-                },
-            }
+            temp = {"resource_id": alt.resource_id, "name": alt.name}
             alt.status = "RESERVED"
             self.session.add(alt)
+        snap = apply_generic_snapshot(
+            {**(outcome.facts or {}), **facts},
+            entities={"temporary_alternative": temp} if temp else facts,
+            stage=GenericStage.AWAITING_APPROVAL.value,
+            modules={"parking": True},
+            missing=[],
+            decision={
+                "kind": "parking_conflict",
+                "stage": GenericStage.AWAITING_APPROVAL.value,
+                "temporary": temp,
+            },
+        )
+        if temp:
+            snap["temporary_alternative"] = temp
+        outcome.facts = snap
+        self.session.add(outcome)
         self.engine.request_approval(
             outcome=outcome,
             approval_type="TEMP_PARKING",
             approver_role="SECURITY",
-            payload={"temporary": outcome.facts.get("temporary_alternative")},
+            payload={"temporary": temp},
         )
 
     def _scenario_b_chair(self, outcome: Outcome, facts: dict, context: dict) -> None:
-        # Immediate restoration + separate root cause already in template tasks
+        snap = apply_generic_snapshot(
+            {**(outcome.facts or {}), **facts},
+            entities=facts,
+            stage=GenericStage.IN_PROGRESS.value,
+            modules={"furniture_restore": True, "root_cause": True},
+            decision={"kind": "furniture", "stage": GenericStage.IN_PROGRESS.value},
+        )
+        outcome.facts = snap
+        self.session.add(outcome)
         self.engine.create_exception(
             outcome=outcome,
             exception_type="MISSING_CHAIR",
@@ -233,9 +285,28 @@ class ScenarioOrchestrator:
         issues = [i.model_dump() for i in extraction.issues] or [
             {"issue_type": "QUALITY", "summary": extraction.summary, "severity": "MEDIUM"}
         ]
+        needs_approval = bool(extraction.vendor_sanction)
+        stage = (
+            GenericStage.AWAITING_APPROVAL.value
+            if needs_approval
+            else GenericStage.IN_PROGRESS.value
+        )
+        outcome.facts = apply_generic_snapshot(
+            outcome.facts,
+            entities={"vendor_issues": issues},
+            stage=stage,
+            modules={"vendor_review": True, "sanction": needs_approval},
+            decision={
+                "kind": "vendor_escalation",
+                "stage": stage,
+                "issue_count": len(issues),
+                "sanction_requested": needs_approval,
+            },
+        )
+        self.session.add(outcome)
         self.engine.add_vendor_issues(outcome, issues)
         # Never auto-sanction
-        if extraction.vendor_sanction:
+        if needs_approval:
             self.engine.request_approval(
                 outcome=outcome,
                 approval_type="VENDOR_SANCTION",
@@ -280,6 +351,18 @@ class ScenarioOrchestrator:
                 # Use unique constraint carefully — append suffix for record
                 inv.invoice_number = f"{invoice_number}#DUP#{outcome.case_reference}"
                 self.session.add(inv)
+                outcome.facts = apply_generic_snapshot(
+                    {**(outcome.facts or {}), **facts},
+                    entities={"invoice_number": invoice_number, "match_status": "DUPLICATE"},
+                    stage=GenericStage.BLOCKED.value,
+                    modules={"invoice_match": True, "payment": False},
+                    decision={
+                        "kind": "invoice",
+                        "stage": GenericStage.BLOCKED.value,
+                        "match_status": "DUPLICATE",
+                    },
+                )
+                self.session.add(outcome)
                 self.engine.create_exception(
                     outcome=outcome,
                     exception_type="DUPLICATE_INVOICE",

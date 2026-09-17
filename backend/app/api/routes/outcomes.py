@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException
-from sqlmodel import func, select
+from sqlmodel import Session, func, select
 
 from app.api.deps import SessionDep, TenantDep, UserDep
 from app.engine.outcome_engine import OutcomeEngine
@@ -20,6 +20,8 @@ from app.schemas.api import (
     ConfirmBookingRequest,
     EvidenceCreate,
     ExceptionResolveRequest,
+    OverrideFactsRequest,
+    ReopenOutcomeRequest,
     TaskStatusUpdate,
 )
 from app.models.org import utcnow
@@ -50,6 +52,7 @@ def dashboard_kpis(session: SessionDep, tenant_id: TenantDep, _user: UserDep):
         ).one(),
         "pending_approvals": count(Approval, Approval.decision == "PENDING"),
         "human_reviews": count(HumanReviewItem, HumanReviewItem.status == "PENDING"),
+        **_meeting_wait_kpis(session, tenant_id),
         "failures": session.exec(
             select(func.count())
             .select_from(__import__("app.models.intake", fromlist=["ProcessingJob"]).ProcessingJob)
@@ -62,6 +65,38 @@ def dashboard_kpis(session: SessionDep, tenant_id: TenantDep, _user: UserDep):
             )
         ).one(),
         "new_emails_24h": count(RawEmailEvent),
+    }
+
+
+def _meeting_wait_kpis(session: Session, tenant_id: str) -> dict:
+    """Count meeting stages that need action (JSON facts — counted in app for SQLite/PG)."""
+    rows = session.exec(
+        select(Outcome).where(
+            Outcome.tenant_id == tenant_id,
+            Outcome.template_code == "MEETING_ROOM",
+            Outcome.status.in_(  # type: ignore
+                ["ACTIVE", "AT_RISK", "BLOCKED", "PARTIALLY_READY", "VALIDATING"]
+            ),
+        )
+    ).all()
+    pending_confirm = 0
+    awaiting_requirements = 0
+    no_resource = 0
+    for outcome in rows:
+        facts = outcome.facts or {}
+        stage = str(facts.get("orchestration_stage") or "").upper()
+        if facts.get("pending_confirmation") and facts.get("proposed_room") and not facts.get("booked_room"):
+            pending_confirm += 1
+        elif stage == "AWAITING_REQUIREMENTS" or (
+            facts.get("checklist_missing") and not facts.get("booked_room") and not facts.get("proposed_room")
+        ):
+            awaiting_requirements += 1
+        elif stage == "NO_RESOURCE":
+            no_resource += 1
+    return {
+        "pending_confirmations": pending_confirm,
+        "awaiting_requirements": awaiting_requirements,
+        "no_resource": no_resource,
     }
 
 
@@ -125,6 +160,10 @@ def get_outcome(outcome_id: str, session: SessionDep, tenant_id: TenantDep, _use
             select(AIDecision).where(AIDecision.event_id == email.event_id).order_by(AIDecision.created_at.desc())  # type: ignore
         ).first()
     conversation = session.get(Conversation, outcome.conversation_id) if outcome.conversation_id else None
+    from app.domain.meeting import build_field_contract
+
+    facts = dict(outcome.facts or {})
+    field_contract = facts.get("field_contract") or build_field_contract(facts)
     return {
         "outcome": outcome,
         "requirements": requirements,
@@ -139,6 +178,7 @@ def get_outcome(outcome_id: str, session: SessionDep, tenant_id: TenantDep, _use
         "thread_emails": thread_emails,
         "ai_decision": ai,
         "conversation": conversation,
+        "field_contract": field_contract,
     }
 
 
@@ -198,9 +238,14 @@ def confirm_booking(
 
 @router.post("/outcomes/{outcome_id}/resend-clarification")
 def resend_clarification(outcome_id: str, session: SessionDep, tenant_id: TenantDep, _user: UserDep):
-    """Force a live clarification email via CloudMailin (prototype helper)."""
+    """Force a live clarification email — asks only remaining gaps."""
     from app.connectors.factory import get_email_provider
-    from app.services.communication import CommunicationService
+    from app.services.communication import CommunicationService, resolve_requester_name
+    from app.services.meeting_room import (
+        default_meeting_room_questions,
+        meeting_room_gaps,
+        summarize_meeting_requirements,
+    )
 
     outcome = session.get(Outcome, outcome_id)
     if not outcome or outcome.tenant_id != tenant_id:
@@ -209,16 +254,15 @@ def resend_clarification(outcome_id: str, session: SessionDep, tenant_id: Tenant
     if not conversation:
         raise HTTPException(400, "Outcome has no conversation")
 
-    questions = []
-    for item in conversation.missing_information or []:
-        if isinstance(item, dict) and item.get("question"):
-            questions.append(item["question"])
+    facts = dict(outcome.facts or {})
+    questions = [g["question"] for g in meeting_room_gaps(facts) if g.get("question")]
     if not questions:
-        questions = [
-            "How many people will attend?",
-            "What date and preferred start time?",
-            "How long do you need the room (duration)?",
-        ]
+        for item in conversation.missing_information or []:
+            if isinstance(item, dict) and item.get("question"):
+                questions.append(item["question"])
+    if not questions:
+        questions = default_meeting_room_questions(facts)
+    understood = summarize_meeting_requirements(facts)[:12]
 
     email = get_email_provider(session, tenant_id)
     sender = email if email.is_connected() else None
@@ -228,37 +272,178 @@ def resend_clarification(outcome_id: str, session: SessionDep, tenant_id: Tenant
             "Outbound email is not configured. Set CLOUDMAILIN_SMTP_URL and CLOUDMAILIN_FROM_EMAIL on the server.",
         )
 
-    latest = session.exec(
-        select(RawEmailEvent)
-        .where(RawEmailEvent.conversation_id == conversation.conversation_id)
-        .order_by(RawEmailEvent.created_at.desc())  # type: ignore[attr-defined]
-    ).first()
-    in_reply_to = (latest.provider_message_id or latest.gmail_message_id) if latest else None
-
-    # Unique key so resend is allowed
     import time
 
-    msg = CommunicationService(session, tenant_id, email_sender=sender).send(
-        communication_type="INFORMATION_REQUIRED",
-        recipients=[conversation.requester_email],
-        subject=f"[INFORMATION REQUIRED] [{outcome.case_reference}] Additional details needed",
-        body=(
-            "We need a few details to continue processing your request:\n\n"
-            + "\n".join(f"- {q}" for q in questions)
-            + "\n\nPlease reply to this email (use Reply so it stays on the same request)."
-        ),
-        conversation_id=conversation.conversation_id,
-        outcome_id=outcome.outcome_id,
-        thread_id=conversation.thread_id,
-        in_reply_to_message_id=in_reply_to,
-        idempotency_key=f"clarify-resend:{outcome.outcome_id}:{int(time.time())}",
+    name = resolve_requester_name(session, outcome=outcome, conversation=conversation)
+    msg = CommunicationService(session, tenant_id, email_sender=sender).send_clarification(
+        conversation=conversation,
+        questions=questions,
+        case_reference=outcome.case_reference,
+        understood=understood or None,
+        force_send_key=f"resend:{int(time.time())}",
+        first_contact=False,
+        greeting_name=name,
     )
     session.commit()
+    suppressed = bool(getattr(msg, "_suppressed", False)) if msg else False
     return {
         "ok": True,
         "message_id": msg.message_id if msg else None,
         "provider_message_id": msg.provider_message_id if msg else None,
-        "delivered": bool(msg and msg.provider_message_id),
+        "delivered": bool(msg and msg.provider_message_id) and not suppressed,
+        "suppressed": suppressed,
+        "suppress_reason": getattr(msg, "_suppress_reason", None) if msg else None,
+        "questions": questions,
+    }
+
+
+@router.post("/outcomes/{outcome_id}/override-facts")
+def override_facts(
+    outcome_id: str,
+    payload: OverrideFactsRequest,
+    session: SessionDep,
+    tenant_id: TenantDep,
+    user: UserDep,
+):
+    """Operator playbook: set/clear facts with user_confirmed provenance."""
+    from app.audit.service import AuditService
+    from app.connectors.factory import get_email_provider
+    from app.core.enums import AuditAction
+    from app.engine.outcome_reducer import apply_operator_override
+    from app.engine.scenarios import ScenarioOrchestrator
+    from app.services.communication import CommunicationService
+    from sqlalchemy.orm.attributes import flag_modified
+
+    outcome = session.get(Outcome, outcome_id)
+    if not outcome or outcome.tenant_id != tenant_id:
+        raise HTTPException(404, "Outcome not found")
+    if not payload.set and not payload.unset:
+        raise HTTPException(400, "Provide set and/or unset fields")
+
+    before = dict(outcome.facts or {})
+    merged = apply_operator_override(
+        before,
+        payload.set or {},
+        unset=payload.unset or None,
+        actor=user.email,
+    )
+    if payload.note:
+        notes = list(merged.get("operator_notes") or [])
+        notes.append({"at": utcnow().isoformat(), "actor": user.email, "note": payload.note})
+        merged["operator_notes"] = notes[-20:]
+    outcome.facts = merged
+    session.add(outcome)
+    flag_modified(outcome, "facts")
+
+    conversation = session.get(Conversation, outcome.conversation_id) if outcome.conversation_id else None
+    if conversation:
+        conversation.facts = {**(conversation.facts or {}), **merged}
+        contract_missing = (merged.get("field_contract") or {}).get("missing") or []
+        conversation.missing_information = [
+            {"field": m.get("field"), "question": m.get("question"), "blocking": True}
+            for m in contract_missing
+        ]
+        session.add(conversation)
+
+    AuditService(session).record(
+        tenant_id=tenant_id,
+        actor=user.email,
+        action=AuditAction.HUMAN_OVERRIDE,
+        entity_type="Outcome",
+        entity_id=outcome.outcome_id,
+        before={"facts_keys": list(before.keys())},
+        after={
+            "set": payload.set,
+            "unset": payload.unset,
+            "note": payload.note,
+            "checklist_missing": merged.get("checklist_missing"),
+            "stage": merged.get("orchestration_stage"),
+        },
+        correlation_id=outcome.outcome_id,
+    )
+
+    if payload.re_orchestrate and outcome.template_code == "MEETING_ROOM":
+        email = get_email_provider(session, tenant_id)
+        sender = email if email.is_connected() else None
+        ScenarioOrchestrator(
+            session, tenant_id, CommunicationService(session, tenant_id, email_sender=sender)
+        )._scenario_meeting_room(outcome, merged, None)
+        session.refresh(outcome)
+
+    session.commit()
+    return {
+        "ok": True,
+        "outcome_id": outcome.outcome_id,
+        "facts": outcome.facts,
+        "field_contract": (outcome.facts or {}).get("field_contract"),
+        "stage": (outcome.facts or {}).get("orchestration_stage"),
+    }
+
+
+@router.post("/outcomes/{outcome_id}/reopen")
+def reopen_outcome(
+    outcome_id: str,
+    payload: ReopenOutcomeRequest,
+    session: SessionDep,
+    tenant_id: TenantDep,
+    user: UserDep,
+):
+    """Operator playbook: reopen a closed / verified meeting outcome for correction."""
+    from app.audit.service import AuditService
+    from app.core.enums import AuditAction, OutcomeStatus
+    from app.domain.meeting import MeetingStage, attach_field_contract
+    from sqlalchemy.orm.attributes import flag_modified
+
+    outcome = session.get(Outcome, outcome_id)
+    if not outcome or outcome.tenant_id != tenant_id:
+        raise HTTPException(404, "Outcome not found")
+
+    before_status = outcome.status
+    facts = dict(outcome.facts or {})
+    facts["employee_satisfied"] = False
+    if (facts.get("operational_status") or "").upper() == "CLOSED":
+        facts["operational_status"] = "ACTIVE"
+    # Drop closed stage so search/await can resume
+    if facts.get("orchestration_stage") in {
+        MeetingStage.CLOSED.value,
+        MeetingStage.MONITORING.value,
+    }:
+        if facts.get("booked_room"):
+            facts["orchestration_stage"] = MeetingStage.MONITORING.value
+        elif facts.get("pending_confirmation") and facts.get("proposed_room"):
+            facts["orchestration_stage"] = MeetingStage.PROPOSED.value
+        else:
+            facts["orchestration_stage"] = MeetingStage.AWAITING_REQUIREMENTS.value
+    facts["reopened"] = {
+        "at": utcnow().isoformat(),
+        "actor": user.email,
+        "reason": payload.reason,
+        "previous_status": before_status,
+    }
+    facts = attach_field_contract(facts)
+    outcome.facts = facts
+    outcome.status = OutcomeStatus.ACTIVE.value
+    outcome.closed_at = None
+    outcome.verified_at = None
+    session.add(outcome)
+    flag_modified(outcome, "facts")
+
+    AuditService(session).record(
+        tenant_id=tenant_id,
+        actor=user.email,
+        action=AuditAction.OUTCOME_REOPENED,
+        entity_type="Outcome",
+        entity_id=outcome.outcome_id,
+        before={"status": before_status},
+        after={"status": outcome.status, "reason": payload.reason, "stage": facts.get("orchestration_stage")},
+        correlation_id=outcome.outcome_id,
+    )
+    session.commit()
+    return {
+        "ok": True,
+        "outcome_id": outcome.outcome_id,
+        "status": outcome.status,
+        "stage": facts.get("orchestration_stage"),
     }
 
 

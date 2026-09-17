@@ -16,6 +16,9 @@ export default function OutcomeDetailPage() {
   const [busy, setBusy] = useState("");
   const [roomName, setRoomName] = useState("");
   const [confirmNote, setConfirmNote] = useState("");
+  const [overrideJson, setOverrideJson] = useState('{\n  "attendees": 12\n}');
+  const [overrideNote, setOverrideNote] = useState("");
+  const [reopenReason, setReopenReason] = useState("");
 
   function load() {
     api(`/outcomes/${id}`)
@@ -55,21 +58,36 @@ export default function OutcomeDetailPage() {
     vendor_issues,
     approvals,
     conversation,
+    field_contract,
   } = data;
 
   const facts = { ...(conversation?.facts || {}), ...(outcome.facts || {}) };
   delete facts.issues;
   const factEntries = Object.entries(facts).filter(([, v]) => v !== null && v !== "" && typeof v !== "object");
-  const missing = Array.isArray(conversation?.missing_information)
-    ? conversation.missing_information
-    : conversation?.missing_information
-      ? [conversation.missing_information]
-      : [];
+  const contract = field_contract || facts.field_contract || {};
+  const understoodRows = Array.isArray(contract.understood) ? contract.understood : [];
+  const assumedRows = Array.isArray(contract.assumed) ? contract.assumed : [];
+  const missingRows = Array.isArray(contract.missing) ? contract.missing : [];
+  const stillNeeded =
+    missingRows.length > 0
+      ? missingRows
+      : Array.isArray(conversation?.missing_information)
+        ? conversation.missing_information
+        : [];
 
   const understood =
-    ai_decision?.output?.summary ||
-    outcome.summary ||
-    "The system is still gathering details.";
+    understoodRows.length > 0
+      ? understoodRows.map((r: any) => `${String(r.field).replaceAll("_", " ")}: ${r.value}`).join(" · ")
+      : ai_decision?.output?.summary ||
+        outcome.summary ||
+        "The system is still gathering details.";
+
+  const interpretationPath =
+    facts.interpretation_path ||
+    ai_decision?.model ||
+    (String(ai_decision?.rationale || "").includes("heuristic") ? "heuristic fallback" : null);
+
+  const lastOutbound = facts.last_outbound && typeof facts.last_outbound === "object" ? facts.last_outbound : null;
 
   const needsOpsConfirm =
     outcome.template_code === "MEETING_ROOM" &&
@@ -77,6 +95,10 @@ export default function OutcomeDetailPage() {
     (facts.needs_ops === true ||
       facts.pending_confirmation === true ||
       (tasks || []).some((t: any) => t.code === "RESERVE_ROOM" && !["VERIFIED", "CLOSED"].includes(t.status)));
+
+  const stageLabel = String(facts.orchestration_stage || contract.stage || "").replaceAll("_", " ") || "—";
+  const requesterName = facts.requester_display_name || outcome.requester_email;
+  const canReopen = ["CLOSED", "VERIFIED", "ADMINISTRATIVELY_CLOSED"].includes(outcome.status);
 
   return (
     <AppShell
@@ -140,11 +162,13 @@ export default function OutcomeDetailPage() {
               setBusy("resend");
               try {
                 const res = await api(`/outcomes/${id}/resend-clarification`, { method: "POST" });
-                setMsgTone(res.delivered ? "ok" : "danger");
+                setMsgTone(res.delivered ? "ok" : res.suppressed ? "ok" : "danger");
                 setMsg(
-                  res.delivered
-                    ? "Follow-up email sent to the requester."
-                    : "Saved, but the email could not be delivered."
+                  res.suppressed
+                    ? `Clarification suppressed (${res.suppress_reason || "duplicate"}).`
+                    : res.delivered
+                      ? "Follow-up email sent — only remaining gaps asked."
+                      : "Saved, but the email could not be delivered."
                 );
                 load();
               } catch (e: any) {
@@ -157,6 +181,31 @@ export default function OutcomeDetailPage() {
           >
             Ask for more info again
           </button>
+          {canReopen && (
+            <button
+              className="btn secondary"
+              disabled={busy === "reopen"}
+              onClick={async () => {
+                setBusy("reopen");
+                try {
+                  await api(`/outcomes/${id}/reopen`, {
+                    method: "POST",
+                    body: JSON.stringify({ reason: reopenReason || "Operator reopen" }),
+                  });
+                  setMsgTone("ok");
+                  setMsg("Request reopened.");
+                  load();
+                } catch (e: any) {
+                  setMsgTone("danger");
+                  setMsg(e.message);
+                } finally {
+                  setBusy("");
+                }
+              }}
+            >
+              Reopen
+            </button>
+          )}
         </>
       }
     >
@@ -176,14 +225,72 @@ export default function OutcomeDetailPage() {
         <div className="panel" style={{ marginBottom: "1.25rem" }}>
           <h2 style={{ marginBottom: "0.5rem" }}>Meeting outcome stages</h2>
           <p className="muted" style={{ marginTop: 0 }}>
-            Ops: {String(facts.operational_status || "ACTIVE")} · Finance:{" "}
+            Stage: {stageLabel} · Ops: {String(facts.operational_status || "ACTIVE")} · Finance:{" "}
             {String(facts.financial_status || "NOT_STARTED")} · Readiness: {outcome.readiness_pct ?? 0}%
             {facts.auto_booked_low_risk ? " · Low-risk auto-book" : ""}
           </p>
-          {Array.isArray(facts.checklist_missing) && facts.checklist_missing.length > 0 && (
+          {interpretationPath && (
             <p style={{ marginTop: 0 }}>
-              Incomplete — waiting on: {(facts.checklist_missing as string[]).join(", ")}. No room booked
-              until mandatory facts are provided.
+              AI path: <strong>{String(interpretationPath)}</strong>
+              {String(interpretationPath).includes("heuristic")
+                ? " — Gemini unavailable; heuristic filled blanks where possible."
+                : " — Gemini led; heuristic only filled empty fields."}
+            </p>
+          )}
+          {lastOutbound && (
+            <p className="muted" style={{ marginTop: 0 }}>
+              Last outbound: {String((lastOutbound as any).status)}
+              {(lastOutbound as any).reason ? ` — ${(lastOutbound as any).reason}` : ""}
+              {(lastOutbound as any).subject ? ` · ${(lastOutbound as any).subject}` : ""}
+            </p>
+          )}
+          {stillNeeded.length > 0 && (
+            <p style={{ marginTop: 0 }}>
+              Incomplete — waiting on:{" "}
+              {stillNeeded.map((m: any) => m.field || m.question).filter(Boolean).join(", ")}. No room
+              booked until mandatory facts are provided.
+            </p>
+          )}
+          {Array.isArray(facts.no_resource_alternatives) && facts.no_resource_alternatives.length > 0 && (
+            <div style={{ marginTop: "0.75rem" }}>
+              <div className="muted" style={{ fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.35rem" }}>
+                NO_RESOURCE alternatives
+              </div>
+              <ul style={{ margin: 0, paddingLeft: "1.1rem" }}>
+                {(facts.no_resource_alternatives as { code?: string; label?: string }[]).map((a, i) => (
+                  <li key={i}>
+                    <strong>{a.code}</strong> — {a.label}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {Array.isArray(facts.decision_trace) && facts.decision_trace.length > 0 && (
+            <div style={{ marginTop: "0.75rem" }}>
+              <div className="muted" style={{ fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.35rem" }}>
+                Decision trace (latest {Math.min(8, (facts.decision_trace as any[]).length)})
+              </div>
+              <ul className="muted" style={{ margin: 0, paddingLeft: "1.1rem", fontSize: "0.85rem" }}>
+                {[...(facts.decision_trace as any[])].slice(-8).reverse().map((d, i) => (
+                  <li key={i}>
+                    {d.kind}
+                    {d.policy_version ? ` · policy ${d.policy_version}` : ""}
+                    {d.room ? ` · ${d.room}` : ""}
+                    {d.stage ? ` · ${d.stage}` : ""}
+                    {Array.isArray(d.gaps) && d.gaps.length ? ` · gaps: ${d.gaps.join(", ")}` : ""}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {facts.modules_active && typeof facts.modules_active === "object" && (
+            <p className="muted">
+              Modules:{" "}
+              {Object.entries(facts.modules_active as Record<string, boolean>)
+                .filter(([, on]) => on)
+                .map(([k]) => k)
+                .join(", ") || "none"}
+              {facts.policy_version ? ` · policy ${facts.policy_version}` : ""}
             </p>
           )}
           {Array.isArray(facts.policy_assumptions) && facts.policy_assumptions.length > 0 && (
@@ -303,7 +410,7 @@ export default function OutcomeDetailPage() {
         <div className="kpi">
           <div className="label">From</div>
           <div className="value" style={{ fontSize: "0.95rem", marginTop: "0.5rem" }}>
-            {outcome.requester_email}
+            {requesterName}
           </div>
         </div>
         <div className="kpi">
@@ -317,10 +424,64 @@ export default function OutcomeDetailPage() {
       <div className="cols-2">
         <div className="stack">
           <div className="panel">
-            <h2 style={{ marginBottom: "0.75rem" }}>What we know</h2>
+            <h2 style={{ marginBottom: "0.75rem" }}>Understood vs assumed vs missing</h2>
             <p style={{ marginTop: 0 }}>{understood}</p>
-            {factEntries.length > 0 ? (
-              <table>
+            {understoodRows.length > 0 && (
+              <div style={{ marginBottom: "0.75rem" }}>
+                <div className="muted" style={{ fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.35rem" }}>
+                  Understood (stated)
+                </div>
+                <table>
+                  <tbody>
+                    {understoodRows.map((r: any) => (
+                      <tr key={`u-${r.field}`}>
+                        <td className="muted" style={{ textTransform: "capitalize" }}>
+                          {String(r.field).replaceAll("_", " ")}
+                        </td>
+                        <td>{String(r.value)}</td>
+                        <td className="muted">{r.provenance}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {assumedRows.length > 0 && (
+              <div style={{ marginBottom: "0.75rem" }}>
+                <div className="muted" style={{ fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.35rem" }}>
+                  Assumed (policy / default)
+                </div>
+                <table>
+                  <tbody>
+                    {assumedRows.map((r: any) => (
+                      <tr key={`a-${r.field}`}>
+                        <td className="muted" style={{ textTransform: "capitalize" }}>
+                          {String(r.field).replaceAll("_", " ")}
+                        </td>
+                        <td>{String(r.value)}</td>
+                        <td className="muted">{r.provenance}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {stillNeeded.length > 0 ? (
+              <div style={{ marginTop: "0.75rem" }}>
+                <div className="muted" style={{ fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.35rem" }}>
+                  Still needed (blocking only)
+                </div>
+                <ul className="muted" style={{ margin: 0, paddingLeft: "1.1rem" }}>
+                  {stillNeeded.map((m: any, i: number) => (
+                    <li key={i}>{m.question || m.field}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : (
+              <p className="muted">No blocking gaps.</p>
+            )}
+            {factEntries.length > 0 && understoodRows.length === 0 && (
+              <table style={{ marginTop: "0.75rem" }}>
                 <tbody>
                   {factEntries.map(([k, v]) => (
                     <tr key={k}>
@@ -332,22 +493,69 @@ export default function OutcomeDetailPage() {
                   ))}
                 </tbody>
               </table>
-            ) : (
-              <p className="muted">No details captured yet.</p>
-            )}
-            {missing.length > 0 && (
-              <div style={{ marginTop: "0.75rem" }}>
-                <div className="muted" style={{ fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.35rem" }}>
-                  Still needed
-                </div>
-                <ul className="muted" style={{ margin: 0, paddingLeft: "1.1rem" }}>
-                  {missing.map((m: any, i: number) => (
-                    <li key={i}>{m.question || m.field}</li>
-                  ))}
-                </ul>
-              </div>
             )}
           </div>
+
+          {outcome.template_code === "MEETING_ROOM" && (
+            <div className="panel">
+              <h2 style={{ marginBottom: "0.75rem" }}>Operator override</h2>
+              <p className="muted" style={{ marginTop: 0 }}>
+                Set facts with <strong>user_confirmed</strong> provenance. JSON object of fields to set.
+              </p>
+              <textarea
+                className="input"
+                rows={5}
+                value={overrideJson}
+                onChange={(e) => setOverrideJson(e.target.value)}
+                style={{ width: "100%", fontFamily: "ui-monospace, monospace", fontSize: "0.85rem" }}
+              />
+              <input
+                className="input"
+                style={{ marginTop: "0.5rem", width: "100%" }}
+                placeholder="Note (optional)"
+                value={overrideNote}
+                onChange={(e) => setOverrideNote(e.target.value)}
+              />
+              {canReopen && (
+                <input
+                  className="input"
+                  style={{ marginTop: "0.5rem", width: "100%" }}
+                  placeholder="Reopen reason (optional)"
+                  value={reopenReason}
+                  onChange={(e) => setReopenReason(e.target.value)}
+                />
+              )}
+              <button
+                className="btn secondary"
+                style={{ marginTop: "0.75rem" }}
+                disabled={busy === "override"}
+                onClick={async () => {
+                  setBusy("override");
+                  try {
+                    const parsed = JSON.parse(overrideJson);
+                    await api(`/outcomes/${id}/override-facts`, {
+                      method: "POST",
+                      body: JSON.stringify({
+                        set: parsed,
+                        note: overrideNote || undefined,
+                        re_orchestrate: true,
+                      }),
+                    });
+                    setMsgTone("ok");
+                    setMsg("Facts overridden and case re-checked.");
+                    load();
+                  } catch (e: any) {
+                    setMsgTone("danger");
+                    setMsg(e.message || "Invalid override JSON");
+                  } finally {
+                    setBusy("");
+                  }
+                }}
+              >
+                Apply override
+              </button>
+            </div>
+          )}
 
           <div className="panel">
             <h2 style={{ marginBottom: "0.75rem" }}>Email thread</h2>

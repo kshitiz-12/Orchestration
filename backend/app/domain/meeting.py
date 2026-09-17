@@ -108,6 +108,19 @@ PLATFORM_KEYS = (
     "checklist_missing",
     "last_outbound",
     "inventory_max_capacity",
+    "interpretation_path",
+    "interpretation_endpoint",
+    "requester_display_name",
+    "field_status",
+    "field_contract",
+    "outbound_suppressions",
+    "decision_trace",
+    "last_decision",
+    "policy_version",
+    "policy_code",
+    "modules_active",
+    "no_resource_alternatives",
+    "sla_at_risk",
 )
 
 
@@ -354,3 +367,139 @@ def facts_from_state(state: MeetingRequirementState) -> dict[str, Any]:
     out["checklist_missing"] = [g["field"] for g in gaps]
     out["orchestration_stage"] = state.derive_stage(out).value
     return out
+
+
+ASSUMED_PROVENANCE = {
+    Provenance.INFERRED_POLICY.value,
+    Provenance.SYSTEM.value,
+    Provenance.MASTER.value,
+}
+
+
+def _assumed_fields_from_facts(facts: dict[str, Any]) -> set[str]:
+    assumed: set[str] = set()
+    for item in facts.get("defaults_applied") or []:
+        if isinstance(item, str) and item:
+            assumed.add(item)
+        elif isinstance(item, dict) and item.get("field"):
+            assumed.add(str(item["field"]))
+    for item in facts.get("policy_assumptions") or []:
+        if isinstance(item, dict):
+            field = item.get("field") or item.get("code")
+            if field:
+                assumed.add(str(field))
+    return assumed
+
+
+def build_field_contract(facts: dict[str, Any] | None) -> dict[str, Any]:
+    """
+    Operator-facing contract: understood vs assumed vs missing, with per-field status.
+    Derived from typed state — never trust a stale checklist alone.
+    """
+    facts = dict(facts or {})
+    state = state_from_facts(facts)
+    provenance = dict(state.field_provenance or {})
+    assumed_keys = _assumed_fields_from_facts(facts)
+    blocking = {g["field"]: g for g in state.blocking_gaps()}
+    # duration gap uses field name "duration" while facts use duration_hours/end_time
+    if "duration" in blocking:
+        if state.duration_hours is not None or _answered(state.end_time):
+            blocking.pop("duration", None)
+
+    fields: dict[str, dict[str, Any]] = {}
+    understood: list[dict[str, Any]] = []
+    assumed: list[dict[str, Any]] = []
+    missing: list[dict[str, Any]] = []
+
+    display_keys = list(REQUIREMENT_FIELDS) + ["primary_office"]
+    for key in display_keys:
+        if key == "external_visitors_indicated":
+            continue
+        value = facts.get(key)
+        if key == "duration_hours" and value is None and _answered(facts.get("end_time")):
+            # End time satisfies duration — skip empty duration_hours row
+            continue
+        prov = provenance.get(key) or Provenance.UNKNOWN.value
+        is_blocking = key in blocking or (key in {"duration_hours", "end_time"} and "duration" in blocking)
+        answered = _answered(value) or value is True or value is False
+
+        if is_blocking and not answered:
+            status = "blocking"
+        elif key in assumed_keys or prov in ASSUMED_PROVENANCE:
+            status = "assumed" if answered else "unknown"
+        elif answered:
+            status = "stated"
+        else:
+            status = "unknown"
+
+        meta = {
+            "field": key,
+            "value": value if answered else None,
+            "provenance": prov,
+            "status": status,
+        }
+        # Only surface interesting rows
+        if status == "unknown" and not answered and key not in blocking and key != "duration_hours":
+            # Optional unknowns stay out of the main lists unless operator needs them
+            if key in {
+                "hybrid_av",
+                "presentation_display",
+                "catering",
+                "dietary",
+                "special_access",
+                "guest_vehicles",
+                "vehicle_numbers",
+                "confidentiality",
+                "visitor_details",
+                "external_visitors",
+            }:
+                fields[key] = meta
+                continue
+        fields[key] = meta
+        if status == "blocking":
+            gap = blocking.get(key) or blocking.get("duration") or {}
+            missing.append({**meta, "question": gap.get("question")})
+        elif status == "assumed":
+            assumed.append(meta)
+        elif status == "stated":
+            understood.append(meta)
+
+    for field, gap in blocking.items():
+        if field == "duration" and any(m["field"] in {"duration_hours", "end_time"} for m in missing):
+            continue
+        if not any(m["field"] == field for m in missing):
+            missing.append(
+                {
+                    "field": field,
+                    "value": None,
+                    "provenance": Provenance.UNKNOWN.value,
+                    "status": "blocking",
+                    "question": gap.get("question"),
+                }
+            )
+            fields[field] = {
+                "field": field,
+                "value": None,
+                "provenance": Provenance.UNKNOWN.value,
+                "status": "blocking",
+            }
+
+    return {
+        "understood": understood,
+        "assumed": assumed,
+        "missing": missing,
+        "fields": fields,
+        "complete": len(missing) == 0,
+        "stage": state.derive_stage(facts).value,
+    }
+
+
+def attach_field_contract(facts: dict[str, Any]) -> dict[str, Any]:
+    """Persist compact per-field status + full contract for API/UI."""
+    contract = build_field_contract(facts)
+    facts["field_contract"] = contract
+    facts["field_status"] = {
+        k: {"status": v["status"], "provenance": v["provenance"]}
+        for k, v in (contract.get("fields") or {}).items()
+    }
+    return facts

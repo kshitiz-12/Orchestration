@@ -10,9 +10,16 @@ from sqlmodel import Session, select
 from app.core.logging import get_logger
 from app.domain.meeting import MeetingStage
 from app.engine.outcome_engine import OutcomeEngine
+from app.engine.outcome_pattern import append_decision_trace
 from app.engine.outcome_reducer import reduce_meeting_facts
 from app.models.org import Contract, Resource, Vendor, utcnow
 from app.models.outcome import Outcome, Requirement, Task
+from app.policy.meeting_policy import (
+    active_modules,
+    build_no_resource_alternatives,
+    ensure_meeting_policy_rule,
+    load_meeting_policy,
+)
 from app.schemas.ai import ExtractionResult
 from app.services.communication import CommunicationService, resolve_requester_name
 from app.services.meeting_room import (
@@ -338,6 +345,8 @@ class ClientMeetingOrchestrator:
 
     def run(self, outcome: Outcome, facts: dict, extraction: Optional[ExtractionResult] = None) -> None:
         ensure_meeting_room_resources(self.session, self.tenant_id)
+        policy = load_meeting_policy(self.session, self.tenant_id)
+        ensure_meeting_policy_rule(self.session, self.tenant_id)
         text_blob = ""
         if extraction:
             text_blob = f"{extraction.summary or ''} {extraction.reason or ''}"
@@ -354,6 +363,20 @@ class ClientMeetingOrchestrator:
             outcome.facts,
             primary_entities=incoming,
             source_text=text_blob,
+        )
+        merged["policy_version"] = policy.version
+        merged["policy_code"] = policy.code
+        merged = append_decision_trace(
+            merged,
+            {
+                "at": utcnow().isoformat(),
+                "kind": "reduce",
+                "policy_version": policy.version,
+                "interpretation_path": incoming.get("interpretation_path")
+                or (outcome.facts or {}).get("interpretation_path"),
+                "stage": merged.get("orchestration_stage"),
+                "gaps": list(merged.get("checklist_missing") or []),
+            },
         )
 
         if not merged.get("registration_ack_sent"):
@@ -422,8 +445,9 @@ class ClientMeetingOrchestrator:
         merged["checklist_missing"] = []
         merged = apply_meeting_room_defaults(merged)
         merged = apply_internal_vc_policy(merged)
-        hold = compute_hold_window(merged)
+        hold = compute_hold_window(merged, policy=policy)
         merged.update(hold)
+        merged["modules_active"] = active_modules(merged, policy)
         merged["orchestration_stage"] = MeetingStage.SEARCHING.value
         self._save_facts(outcome, merged)
 
@@ -472,12 +496,43 @@ class ClientMeetingOrchestrator:
 
         room = self._pick_room(merged)
         if not room:
+            max_cap = self._max_room_capacity()
+            # Collect zero-score rooms for near-miss alternatives
+            all_rooms = self.session.exec(
+                select(Resource).where(
+                    Resource.tenant_id == self.tenant_id,
+                    Resource.type == "MEETING_ROOM",
+                )
+            ).all()
+            zero_scores = []
+            for r in all_rooms:
+                s, reasons = score_meeting_room(r, merged)
+                if s <= 0:
+                    zero_scores.append({"name": r.name, "score": s, "reasons": reasons})
+            alternatives = build_no_resource_alternatives(
+                merged,
+                max_capacity=max_cap,
+                room_scores=zero_scores,
+                policy=policy,
+            )
             merged["needs_ops"] = True
             merged["auto_book_skipped"] = "no_room_available"
             merged["orchestration_stage"] = MeetingStage.NO_RESOURCE.value
             merged["outbound_required"] = "no_resource"
             merged["last_action"] = "no_resource"
-            merged["inventory_max_capacity"] = self._max_room_capacity()
+            merged["inventory_max_capacity"] = max_cap
+            merged["no_resource_alternatives"] = alternatives
+            merged = append_decision_trace(
+                merged,
+                {
+                    "at": utcnow().isoformat(),
+                    "kind": "no_resource",
+                    "policy_version": policy.version,
+                    "alternatives": [a["code"] for a in alternatives],
+                    "max_capacity": max_cap,
+                    "requested_attendees": merged.get("attendees"),
+                },
+            )
             self._save_facts(outcome, merged)
             self.engine.create_exception(
                 outcome=outcome,
@@ -486,12 +541,15 @@ class ClientMeetingOrchestrator:
                 description=(
                     f"No available room met capacity/equipment for {merged.get('attendees')} attendees."
                 ),
+                options=[
+                    {"code": a["code"], "label": a["label"]} for a in alternatives if a.get("code") != "REVIEW_NEAR_MISS"
+                ],
                 severity="MEDIUM",
                 owner_role="OPERATOR",
             )
-            # One outbound only — do not also send a generic ops ack
             if outcome.requester_email:
                 name = resolve_requester_name(self.session, outcome=outcome)
+                alt_lines = "\n".join(f"- {a['label']}" for a in alternatives if a.get("code") != "REVIEW_NEAR_MISS")
                 self.comms.send_case_update(
                     outcome=outcome,
                     communication_type="INFORMATION_ONLY",
@@ -501,7 +559,8 @@ class ClientMeetingOrchestrator:
                         f"({merged.get('attendees')} people"
                         f"{', display/VC as needed' if merged.get('hybrid_av') or merged.get('presentation_display') else ''}"
                         f"; largest room holds {merged.get('inventory_max_capacity') or 'fewer'}).\n\n"
-                        "Please reply with a smaller headcount, a different time, or confirm if a larger venue / split rooms is acceptable.\n\n"
+                        "Please reply with one of these options:\n"
+                        f"{alt_lines}\n\n"
                         f"Case: {outcome.case_reference}"
                     ),
                     recipients=[outcome.requester_email],
@@ -510,6 +569,17 @@ class ClientMeetingOrchestrator:
             return
 
         merged["orchestration_stage"] = MeetingStage.PROPOSED.value
+        merged = append_decision_trace(
+            merged,
+            {
+                "at": utcnow().isoformat(),
+                "kind": "propose",
+                "policy_version": policy.version,
+                "room": room.name,
+                "score": (merged.get("recommended_room") or {}).get("score"),
+                "modules_active": merged.get("modules_active"),
+            },
+        )
         self._propose(outcome, room, merged, updated=False)
         self._maybe_auto_book_low_risk(outcome)
 

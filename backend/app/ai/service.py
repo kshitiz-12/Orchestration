@@ -7,6 +7,7 @@ from app.core.config import get_settings
 from app.core.enums import ConfidenceRoute
 from app.core.logging import get_logger
 from app.schemas.ai import ConfidenceRoutingResult, ExtractionResult
+from app.services.email_utils import strip_for_ai
 
 logger = get_logger(__name__)
 
@@ -51,15 +52,21 @@ class LLMService:
 
     def extract(self, **kwargs) -> ExtractionResult:
         subject = kwargs.get("subject") or ""
-        body = kwargs.get("body") or ""
+        raw_body = kwargs.get("body") or ""
+        # Always strip disclaimer / signature noise before interpretation
+        body = strip_for_ai(raw_body)
+        kwargs = {**kwargs, "body": body}
         prior_facts = kwargs.get("prior_facts") or {}
         used_fallback = False
         result: ExtractionResult | None = None
         last_exc: Exception | None = None
+        endpoint_meta: dict = {}
 
         try:
             # GeminiProvider already fails over across model + secondary API key
             result = self.provider.extract(**kwargs)
+            if isinstance(self.provider, GeminiProvider):
+                endpoint_meta = dict(getattr(self.provider, "last_endpoint", {}) or {})
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
             logger.error("ai_extraction_failed", error=str(exc)[:400])
@@ -67,17 +74,18 @@ class LLMService:
         if result is None:
             used_fallback = True
             result = HeuristicProvider().extract(**kwargs)
-            result.reason = f"Primary AI unavailable ({last_exc}); heuristic fallback used"
+            result.reason = (
+                f"Primary AI unavailable ({last_exc}); heuristic fallback used"
+            )
 
         looks_meeting = result.event_type == "MEETING_ROOM" or _looks_like_meeting_room(
             subject, body, prior_facts
         )
         if looks_meeting:
-            heuristic_entities = None
+            # Always gather heuristic candidates to fill blanks Gemini left empty
+            # (e.g. typo headcounts) — never overwrite answered Gemini fields.
+            heuristic_entities = HeuristicProvider().extract(**kwargs).entities
             primary_is_heuristic = used_fallback or isinstance(self.provider, HeuristicProvider)
-            if not primary_is_heuristic:
-                # Candidates only fill fields the model left unknown — never overwrite Gemini
-                heuristic_entities = HeuristicProvider().extract(**kwargs).entities
             result = refine_meeting_room_extraction(
                 result,
                 subject=subject,
@@ -86,10 +94,18 @@ class LLMService:
                 heuristic_entities=heuristic_entities,
                 primary_is_heuristic=primary_is_heuristic,
             )
-            if used_fallback:
+            path = "heuristic" if primary_is_heuristic else "gemini"
+            if not primary_is_heuristic and endpoint_meta.get("label"):
+                path = f"gemini:{endpoint_meta['label']}"
+            result.entities = {
+                **(result.entities or {}),
+                "interpretation_path": path,
+                "interpretation_endpoint": endpoint_meta or None,
+            }
+            if primary_is_heuristic:
                 result.reason = (result.reason or "") + " | reducer + heuristic candidates"
             else:
-                result.reason = (result.reason or "") + " | gemini delta + reducer"
+                result.reason = (result.reason or "") + " | gemini delta + reducer + heuristic fill"
             return result
 
         if used_fallback:

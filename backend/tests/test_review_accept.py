@@ -72,6 +72,33 @@ def test_route_sensitive_not_overwritten_by_low_confidence():
     assert routed.route == ConfidenceRoute.HUMAN_REQUIRED.value
 
 
+def test_questions_only_ask_missing_when_facts_known():
+    from app.services.meeting_room import default_meeting_room_questions
+
+    facts = {
+        "date": "25th oct",
+        "preferred_time": "10am",
+        "end_time": "1pm",
+        "duration_hours": 3.0,
+        "meeting_type": "internal meeting",
+        "location_preference": "Corporate Office",
+        "hybrid_av": "yes",
+        "presentation_display": "yes",
+        "catering": "requested",
+        "dietary": "non-vegetarian",
+        "external_visitors": 2,
+        "external_visitors_indicated": True,
+        "primary_office": "Corporate Office, Gurugram",
+    }
+    qs = default_meeting_room_questions(facts)
+    blob = " ".join(qs).lower()
+    assert "how many people" in blob
+    assert "visitor" in blob
+    assert "meeting type" not in blob
+    assert "tea, coffee" not in blob
+    assert "start time and end time" not in blob
+
+
 def test_heuristic_parses_participants_and_not_false_confirm():
     from app.services.meeting_room import is_booking_confirmation
 
@@ -206,6 +233,29 @@ def test_heuristic_reply_with_prior_facts_completes():
     assert gaps == []
 
 
+def test_heuristic_parses_typo_employees_and_visitor_names():
+    from app.services.email_utils import strip_for_ai
+
+    body = (
+        "We are having internal review meet on 25th Oct and need meeting room for 12 "
+        "empployee's from 10am to 1pm at Gurugram office.\n\n"
+        "2 external visitors will attend - Rahul Sharma and Aman Verma.\n"
+        "Pls also arrange tea coffee , non veg is fine , and display + VC.\n"
+        "No guest vehicle required.\n\n"
+        "Disclaimer: privileged and confidential."
+    )
+    clean = strip_for_ai(body)
+    assert "Disclaimer" not in clean
+    r = HeuristicProvider().extract(subject="req meeting room", body=clean)
+    assert r.entities.get("attendees") == 12
+    assert r.entities.get("external_visitors") == 2
+    assert "Rahul" in (r.entities.get("visitor_details") or "")
+    assert r.entities.get("dietary") == "non-vegetarian"
+    assert r.entities.get("meeting_type") == "internal meeting"
+    assert "attendees" not in {m.field for m in r.missing_information}
+    assert "visitor_details" not in {m.field for m in r.missing_information}
+
+
 def test_extraction_result_coerces_lowercase_priority():
     result = ExtractionResult.model_validate(
         {
@@ -274,7 +324,104 @@ def test_gemini_failover_uses_secondary_after_model_failures():
     ]
     assert result.entities.get("attendees") == 8
     assert "gemini:secondary:gemini-3.6-flash" in (result.reason or "")
-    assert "gemini delta + reducer" in (result.reason or "")
+    assert "gemini delta + reducer + heuristic fill" in (result.reason or "")
+    assert str(result.entities.get("interpretation_path") or "").startswith("gemini:")
+
+
+def test_gemini_fills_blanks_with_heuristic_candidates():
+    """Gemini succeeds but leaves typo headcount blank — heuristic candidates fill only unknowns."""
+    from app.ai.gemini import GeminiProvider
+
+    class SparseGemini(GeminiProvider):
+        def __init__(self):
+            self.api_key = "k1"
+            self.api_key_secondary = ""
+            self.model = "gemini-3.6-flash"
+            self.fallback_model = "gemini-3.7-flash"
+            self._clients = {}
+            self.last_endpoint = {"label": "primary:gemini-3.6-flash", "model": "gemini-3.6-flash"}
+
+        def extract(self, **kwargs):
+            return ExtractionResult(
+                event_type="MEETING_ROOM",
+                summary="partial",
+                entities={
+                    "date": "25th Oct",
+                    "preferred_time": "10am",
+                    "end_time": "1pm",
+                    "meeting_type": "internal meeting",
+                    "location_preference": "Gurugram",
+                    "external_visitors": 2,
+                },
+                missing_information=[],
+                confidence=0.9,
+                reason="gemini:primary:gemini-3.6-flash",
+            )
+
+    body = (
+        "We are having internal review meet on 25th Oct and need meeting room for 12 "
+        "empployee's from 10am to 1pm at Gurugram office.\n\n"
+        "2 external visitors will attend - Rahul Sharma and Aman Verma.\n"
+        "Pls also arrange tea coffee , non veg is fine , and display + VC.\n"
+        "No guest vehicle required.\n\n"
+        "Disclaimer: privileged and confidential."
+    )
+    svc = LLMService(provider=SparseGemini())
+    result = svc.extract(subject="req meeting room", body=body)
+    assert result.entities.get("attendees") == 12
+    assert "Rahul" in (result.entities.get("visitor_details") or "")
+    assert result.entities.get("dietary") == "non-vegetarian"
+    assert "attendees" not in {m.field for m in result.missing_information}
+    assert "heuristic fill" in (result.reason or "")
+
+
+def test_display_name_from_from_header():
+    from app.services.communication import display_name_from_headers, humanize_email_local
+
+    assert display_name_from_headers({"From": '"Kapil Mantri" <kapil@example.com>'}) == "Kapil Mantri"
+    assert display_name_from_headers({"from": "Aditya Test <a@example.com>"}) == "Aditya Test"
+    assert humanize_email_local("anonymousxo@gmail.com") == "there"
+
+
+def test_kapil_style_golden_email_remaining_only_ask():
+    """Golden regression: rich informal mail → understand most facts, ask only gaps."""
+    from app.services.email_utils import strip_for_ai
+    from app.services.meeting_room import default_meeting_room_questions, meeting_room_gaps
+
+    body = (
+        "Hi Team,\n\n"
+        "We are having internal review meet on 25th Oct and need meeting room for 12 "
+        "empployee's from 10am to 1pm at Gurugram office.\n\n"
+        "2 external visitors will attend - Rahul Sharma and Aman Verma.\n"
+        "Pls also arrange tea coffee , non veg is fine , and display + VC for 2 "
+        "remote participants.\n"
+        "No guest vehicle required.\n\n"
+        "Pls help in booking suitable meeting room .\n\n"
+        "Aditya Test\n"
+        "Sr. Associate - Administration & Infrastructure\n\n"
+        "Disclaimer: The information in this e-mail is privileged and confidential."
+    )
+    clean = strip_for_ai(body)
+    assert "Disclaimer" not in clean
+    svc = LLMService(provider=HeuristicProvider())
+    result = svc.extract(subject="Request for meeting room", body=body)
+    ents = result.entities or {}
+    assert ents.get("attendees") == 12
+    assert ents.get("external_visitors") == 2
+    assert "Rahul" in (ents.get("visitor_details") or "")
+    assert ents.get("dietary") == "non-vegetarian"
+    assert ents.get("meeting_type") == "internal meeting"
+    assert ents.get("interpretation_path") == "heuristic"
+    gaps = meeting_room_gaps(ents)
+    qs = default_meeting_room_questions(ents)
+    blob = " ".join(qs).lower()
+    # Must not re-ask known fields
+    assert "meeting type" not in blob
+    assert "start time and end time" not in blob
+    assert "tea, coffee" not in blob
+    # If anything is asked, it is only remaining gaps
+    for g in gaps:
+        assert g["field"] not in {"attendees", "visitor_details", "dietary", "meeting_type"}
 
 
 def test_gemini_endpoint_order_includes_secondary_key():

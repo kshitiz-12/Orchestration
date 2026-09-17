@@ -1,0 +1,67 @@
+{
+  "version": "2026.09.1",
+  "cases": [
+    {
+      "id": "kapil_typo_disclaimer",
+      "subject": "Request for meeting room",
+      "body": "Hi Team,\n\nWe are having internal review meet on 25th Oct and need meeting room for 12 empployee's from 10am to 1pm at Gurugram office.\n\n2 external visitors will attend - Rahul Sharma and Aman Verma.\nPls also arrange tea coffee , non veg is fine , and display + VC for 2 remote participants.\nNo guest vehicle required.\n\nPls help in booking suitable meeting room .\n\nAditya Test\n\nDisclaimer: The information in this e-mail is privileged and confidential.",
+      "expect": {
+        "entities": {
+          "attendees": 12,
+          "external_visitors": 2,
+          "visitor_details": "*Rahul",
+          "dietary": "non-vegetarian",
+          "meeting_type": "internal meeting"
+        },
+        "ask_only_fields": []
+      }
+    },
+    {
+      "id": "date_only_sparse",
+      "subject": "Need a room",
+      "body": "Please book a meeting room for 25th October.",
+      "expect": {
+        "entities": {
+          "date": "*oct"
+        },
+        "ask_only_fields": ["attendees", "preferred_time", "duration", "location_preference", "meeting_type"]
+      }
+    },
+    {
+      "id": "informal_reply_completes",
+      "subject": "Re: [INFORMATION REQUIRED] [ROOM-1]",
+      "body": "Internal meeting , 2 external visitors rahul and aman , non veg",
+      "prior_facts": {
+        "date": "25th october",
+        "attendees": 30,
+        "preferred_time": "10am",
+        "end_time": "2 pm",
+        "duration_hours": 4.0,
+        "location_preference": "Corporate Office, Gurugram",
+        "primary_office": "Corporate Office, Gurugram",
+        "registration_ack_sent": true,
+        "catering": "requested"
+      },
+      "expect": {
+        "entities": {
+          "meeting_type": "internal meeting",
+          "dietary": "non-vegetarian",
+          "visitor_details": "*rahul",
+          "preferred_time": "10am"
+        },
+        "no_missing": true
+      }
+    },
+    {
+      "id": "no_resource_headcount_signal",
+      "subject": "Townhall",
+      "body": "Need meeting room for 200 people tomorrow 3pm for 2 hours, internal, Gurugram, no catering, no visitors.",
+      "expect": {
+        "entities": {
+          "attendees": 200,
+          "meeting_type": "internal meeting"
+        }
+      }
+    }
+  ]
+}

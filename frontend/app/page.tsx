@@ -45,19 +45,38 @@ export default function HomePage() {
       .some((v) => String(v).toLowerCase().includes(q));
   });
 
-  const waitingYou = Number(kpis?.human_reviews || 0) + Number(kpis?.pending_approvals || 0);
+  const waitingReviews = Number(kpis?.human_reviews || 0) + Number(kpis?.pending_approvals || 0);
+  const pendingConfirm = Number(kpis?.pending_confirmations || 0);
+  const awaitingReqs = Number(kpis?.awaiting_requirements || 0);
+  const waitingYou = waitingReviews + pendingConfirm;
   const late = Number(kpis?.overdue_tasks || 0);
   const problems = Number(kpis?.failures || 0);
   const openCases = Number(kpis?.outcomes_active || 0);
-  const needsAttention = Number(kpis?.at_risk || 0);
+  const needsAttention = Number(kpis?.at_risk || 0) + awaitingReqs + Number(kpis?.no_resource || 0);
 
   const nextSteps: { title: string; detail: string; href: string; tone: "warn" | "danger" | "ok" | "neutral" }[] = [];
-  if (waitingYou > 0) {
+  if (pendingConfirm > 0) {
     nextSteps.push({
-      title: `${waitingYou} item${waitingYou === 1 ? "" : "s"} waiting for your decision`,
+      title: `${pendingConfirm} room proposal${pendingConfirm === 1 ? "" : "s"} awaiting confirm`,
+      detail: "Requester (or you) needs to confirm the proposed room.",
+      href: "/outcomes",
+      tone: "warn",
+    });
+  }
+  if (waitingReviews > 0) {
+    nextSteps.push({
+      title: `${waitingReviews} item${waitingReviews === 1 ? "" : "s"} waiting for your decision`,
       detail: "Open these first — the system paused until someone confirms.",
       href: "/reviews",
       tone: "warn",
+    });
+  }
+  if (awaitingReqs > 0) {
+    nextSteps.push({
+      title: `${awaitingReqs} request${awaitingReqs === 1 ? "" : "s"} still missing details`,
+      detail: "We already emailed the requester for only the remaining gaps.",
+      href: "/outcomes",
+      tone: "neutral",
     });
   }
   if (late > 0) {
@@ -155,7 +174,11 @@ export default function HomePage() {
         <Link href="/reviews" className="kpi clickable">
           <div className="label">Waiting on you</div>
           <div className="value">{waitingYou || "—"}</div>
-          <div className="hint">Approve or ask for more info</div>
+          <div className="hint">
+            {pendingConfirm > 0
+              ? `${pendingConfirm} room confirm · ${waitingReviews} review/approval`
+              : "Approve, confirm rooms, or ask for more info"}
+          </div>
         </Link>
         <Link href="/tasks" className="kpi clickable">
           <div className="label">Late work</div>

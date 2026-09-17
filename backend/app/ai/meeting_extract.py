@@ -33,6 +33,12 @@ _PRESERVE_KEYS = {
     "outbound_required",
     "last_outbound",
     "inventory_max_capacity",
+    "interpretation_path",
+    "interpretation_endpoint",
+    "requester_display_name",
+    "field_status",
+    "field_contract",
+    "outbound_suppressions",
 }
 
 

@@ -239,17 +239,25 @@ def apply_internal_vc_policy(facts: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def is_low_risk_auto_bookable(facts: dict[str, Any], score: float | None = None) -> bool:
-    """Client rule: internal, no visitors/cost/exception, authorised, score >= 90."""
+def is_low_risk_auto_bookable(
+    facts: dict[str, Any],
+    score: float | None = None,
+    *,
+    policy: Any = None,
+) -> bool:
+    """Client rule: internal, no visitors/cost/exception, authorised, score threshold from policy."""
+    from app.policy.meeting_policy import default_meeting_policy
+
+    pol = policy or default_meeting_policy()
     if score is None:
         score = float((facts.get("recommended_room") or {}).get("score") or 0)
-    if score < LOW_RISK_SCORE_THRESHOLD:
+    if score < float(pol.auto_book_min_score):
         return False
-    if not is_internal_meeting(facts):
+    if pol.auto_book_require_internal and not is_internal_meeting(facts):
         return False
-    if external_visitor_count(facts) > 0:
+    if pol.auto_book_forbid_visitors and external_visitor_count(facts) > 0:
         return False
-    if catering_needed(facts):
+    if pol.auto_book_forbid_catering and catering_needed(facts):
         return False
     if str(facts.get("special_access") or "").strip().lower() not in {"", "none", "no", "n/a", "na"}:
         return False
@@ -419,28 +427,76 @@ def summarize_meeting_requirements(facts: dict[str, Any]) -> list[str]:
     return lines
 
 
-def default_meeting_room_questions(facts: dict[str, Any] | None = None) -> list[str]:
-    """One consolidated clarification — mandatory + likely conditionals (avoid drip Q&A)."""
+def remaining_meeting_room_questions(facts: dict[str, Any] | None = None) -> list[str]:
+    """Ask only for blocking gaps still missing — never re-ask answered facts."""
     facts = facts or {}
+    gaps = meeting_room_gaps(facts)
+    if gaps:
+        return [g["question"] for g in gaps if g.get("question")]
+    return []
+
+
+def default_meeting_room_questions(facts: dict[str, Any] | None = None) -> list[str]:
+    """
+    Clarification questions for the requester.
+    If we already know most of the request, ask ONLY remaining gaps.
+    Use the full checklist only when almost nothing is known (e.g. date-only).
+    """
+    facts = facts or {}
+    known_core = sum(
+        1
+        for key in ("date", "attendees", "preferred_time", "meeting_type", "location_preference")
+        if _answered(facts.get(key))
+    )
+    # Also count duration completeness
+    if facts.get("duration_hours") is not None or _answered(facts.get("end_time")):
+        known_core += 1
+
+    remaining = remaining_meeting_room_questions(facts)
+    if known_core >= 2:
+        # Smart path: confirm what we have, ask only what's blocking
+        return remaining
+
+    # Sparse first mail — one consolidated ask so the requester can finish in a single reply
     office = facts.get("primary_office") or PRIMARY_OFFICE_HINT
     date_line = (
-        f"We can arrange a room for {facts['date']}."
+        f"We already have the date as {facts['date']} — reply to change it if needed."
         if _answered(facts.get("date"))
         else "Which date do you need the room?"
     )
-    return [
-        date_line,
-        "1. Start time and end time, or expected duration.",
-        "2. Number of participants.",
-        f"3. Required office or building. Your primary office is {office}.",
-        "4. Meeting type: internal, client/vendor, interview, training, confidential, or other.",
-        "5. Whether external visitors will attend.",
-        "6. Required facilities: video conference, display, whiteboard, microphone, or special seating.",
-        "7. Whether tea, coffee or catering is required.",
-        "8. Any accessibility requirement.",
-        "9. Preferred room, if any.",
-        'If no special service is needed, you may reply: "Internal meeting, no additional arrangements."',
-    ]
+    questions = [date_line]
+    # Skip checklist items we already know
+    if not (_answered(facts.get("preferred_time")) or _answered(facts.get("end_time")) or facts.get("duration_hours") is not None):
+        questions.append("Start time and end time, or expected duration.")
+    if not _answered(facts.get("attendees")):
+        questions.append("Number of participants (in person).")
+    if not _answered(facts.get("location_preference")):
+        questions.append(f"Required office or building. Your primary office is {office}.")
+    if not _answered(facts.get("meeting_type")):
+        questions.append(
+            "Meeting type: internal, client/vendor, interview, training, confidential, or other."
+        )
+    if facts.get("external_visitors") is None and not facts.get("external_visitors_indicated"):
+        questions.append("Whether external visitors will attend (and names if yes).")
+    elif facts.get("external_visitors_indicated") and not _answered(facts.get("external_visitors")):
+        questions.append("How many external visitors, and their names / organisations?")
+    elif (facts.get("external_visitors") or 0) > 0 and not _answered(facts.get("visitor_details")):
+        questions.append("Please share visitor names, organisations and emails.")
+    if not _answered(facts.get("hybrid_av")) and not _answered(facts.get("presentation_display")):
+        questions.append(
+            "Required facilities: video conference, display, whiteboard, microphone, or special seating."
+        )
+    if not _answered(facts.get("catering")):
+        questions.append("Whether tea, coffee or catering is required.")
+    elif catering_needed(facts) and not _answered(facts.get("dietary")):
+        questions.append("Dietary split (veg / non-veg) and any allergies.")
+    questions.append(
+        'If no special service is needed, you may reply: "Internal meeting, no additional arrangements."'
+    )
+    # Prefer remaining gap questions if somehow richer
+    if remaining and len(remaining) < len(questions):
+        return remaining
+    return questions
 
 
 def requirement_fingerprint(facts: dict[str, Any]) -> str:
@@ -464,21 +520,24 @@ def requirement_fingerprint(facts: dict[str, Any]) -> str:
     return "|".join(str(facts.get(k) or "") for k in keys)
 
 
-def buffer_minutes(facts: dict[str, Any]) -> tuple[int, int]:
-    """Simple internal → 10+10; visitors/catering/VC → longer buffers."""
+def buffer_minutes(facts: dict[str, Any], *, policy: Any = None) -> tuple[int, int]:
+    """Buffers from versioned policy: complex vs internal vs default."""
+    from app.policy.meeting_policy import default_meeting_policy
+
+    pol = policy or default_meeting_policy()
     if catering_needed(facts) or external_visitor_count(facts) > 0 or hybrid_needed(facts):
-        return 30, 15
+        return int(pol.setup_buffer_complex_minutes), int(pol.release_buffer_complex_minutes)
     if is_internal_meeting(facts):
-        return 10, 10
+        return int(pol.setup_buffer_internal_minutes), int(pol.release_buffer_internal_minutes)
     return 15, 10
 
 
-def compute_hold_window(facts: dict[str, Any]) -> dict[str, str]:
+def compute_hold_window(facts: dict[str, Any], *, policy: Any = None) -> dict[str, str]:
     """Setup/cleanup buffers around the meeting block."""
     start = str(facts.get("preferred_time") or facts.get("time_window") or "").strip()
     end = str(facts.get("end_time") or "").strip()
     duration = facts.get("duration_hours")
-    setup_m, release_m = buffer_minutes(facts)
+    setup_m, release_m = buffer_minutes(facts, policy=policy)
     hold_start = f"{start} (setup {setup_m}m earlier)" if start else "TBD"
     if end:
         hold_end = f"{end} (+{release_m}m release)"
@@ -489,8 +548,9 @@ def compute_hold_window(facts: dict[str, Any]) -> dict[str, str]:
     return {
         "hold_start": hold_start,
         "hold_end": hold_end,
-        "setup_buffer_minutes": str(setup_m),
-        "release_buffer_minutes": str(release_m),
+        "setup_buffer_minutes": setup_m,
+        "release_buffer_minutes": release_m,
+        "policy_version": getattr(policy, "version", None) or facts.get("policy_version"),
     }
 
 

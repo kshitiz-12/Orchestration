@@ -114,8 +114,8 @@ def test_minimal_request_date_only_does_not_book(session: Session):
     assert incomplete.facts.get("orchestration_stage") == "AWAITING_REQUIREMENTS"
     assert "attendees" in (incomplete.facts.get("checklist_missing") or [])
     qs = default_meeting_room_questions(incomplete.facts or {})
-    assert any("Start time" in q for q in qs)
-    assert any("participants" in q.lower() for q in qs)
+    assert any("start time" in q.lower() for q in qs)
+    assert any("people" in q.lower() or "participants" in q.lower() or "attend" in q.lower() for q in qs)
 
     complete = orch.orchestrate(
         extraction=ExtractionResult(
@@ -149,7 +149,7 @@ def test_minimal_request_date_only_does_not_book(session: Session):
     assert complete.facts.get("hybrid_av") == "no"
     assumptions = complete.facts.get("policy_assumptions") or []
     assert any(a.get("code") == "MP-INT-006" for a in assumptions)
-    assert (complete.facts.get("setup_buffer_minutes") or "") == "10"
+    assert str(complete.facts.get("setup_buffer_minutes") or "") == "10"
     assert is_low_risk_auto_bookable(complete.facts)
     mails = session.exec(
         select(Communication).where(Communication.outcome_id == complete.outcome_id)
