@@ -67,7 +67,10 @@ EXTRACTION_SCHEMA_HINT = {
         "financial_action": {"type": "boolean"},
         "access_control_action": {"type": "boolean"},
         "vendor_sanction": {"type": "boolean"},
-        "recommended_priority": {"type": "string"},
+        "recommended_priority": {
+            "type": "string",
+            "enum": ["LOW", "MEDIUM", "HIGH", "CRITICAL"],
+        },
         "recommended_next_action": {"type": "string"},
         "confidence": {"type": "number"},
         "human_review_required": {"type": "boolean"},
@@ -102,27 +105,82 @@ EXTRACTION_SCHEMA_HINT = {
 }
 
 
-class GeminiProvider(LLMProvider):
-    def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None):
-        settings = get_settings()
-        self.api_key = api_key or settings.gemini_api_key
-        self.model = model or settings.gemini_model
-        self._client = None
+def _is_failover_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(
+        token in msg
+        for token in (
+            "503",
+            "429",
+            "unavailable",
+            "high demand",
+            "resource_exhausted",
+            "quota",
+            "rate limit",
+            "overloaded",
+        )
+    )
 
-    def _get_client(self):
-        if self._client is None:
-            if not self.api_key:
+
+class GeminiProvider(LLMProvider):
+    """
+    Gemini with enterprise failover:
+      1) primary key + primary model
+      2) primary key + fallback model (e.g. 3.7-flash)
+      3) secondary key + primary model
+      4) secondary key + fallback model
+    """
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: Optional[str] = None,
+        *,
+        api_key_secondary: Optional[str] = None,
+        fallback_model: Optional[str] = None,
+    ):
+        settings = get_settings()
+        self.api_key = (api_key if api_key is not None else settings.gemini_api_key) or ""
+        self.api_key_secondary = (
+            api_key_secondary if api_key_secondary is not None else settings.gemini_api_key_secondary
+        ) or ""
+        self.model = model or settings.gemini_model
+        self.fallback_model = fallback_model or settings.gemini_fallback_model
+        self._clients: dict[str, object] = {}
+        self.last_endpoint: dict[str, str] = {}
+
+    def _endpoints(self) -> list[tuple[str, str, str]]:
+        """Return (label, api_key, model) candidates in failover order."""
+        models: list[str] = []
+        for m in (self.model, self.fallback_model):
+            if m and m not in models:
+                models.append(m)
+        keys: list[tuple[str, str]] = []
+        if self.api_key:
+            keys.append(("primary", self.api_key))
+        if self.api_key_secondary and self.api_key_secondary != self.api_key:
+            keys.append(("secondary", self.api_key_secondary))
+        out: list[tuple[str, str, str]] = []
+        for key_label, key in keys:
+            for model in models:
+                out.append((f"{key_label}:{model}", key, model))
+        return out
+
+    def _get_client(self, api_key: str):
+        if api_key not in self._clients:
+            if not api_key:
                 raise RuntimeError("GEMINI_API_KEY is not configured")
             from google import genai
 
-            self._client = genai.Client(api_key=self.api_key)
-        return self._client
+            self._clients[api_key] = genai.Client(api_key=api_key)
+        return self._clients[api_key]
 
     def healthcheck(self) -> bool:
         try:
-            if not self.api_key:
+            if not self.api_key and not self.api_key_secondary:
                 return False
-            self._get_client()
+            key = self.api_key or self.api_key_secondary
+            self._get_client(key)
             return True
         except Exception as exc:  # noqa: BLE001
             logger.warning("gemini_healthcheck_failed", error=str(exc))
@@ -157,7 +215,7 @@ class GeminiProvider(LLMProvider):
                 + MEETING_ROOM_AI_INSTRUCTIONS
             ),
         }
-        response = self._generate(user_payload)
+        response, endpoint = self._generate_with_failover(user_payload)
         raw = response.text or "{}"
         data = json.loads(raw)
         fd = data.get("fact_delta") if isinstance(data.get("fact_delta"), dict) else {}
@@ -165,33 +223,50 @@ class GeminiProvider(LLMProvider):
             ents = dict(data.get("entities") or {})
             ents.update({k: v for k, v in fd["set"].items() if v is not None and v != ""})
             data["entities"] = ents
-        return ExtractionResult.model_validate(data)
+        result = ExtractionResult.model_validate(data)
+        label, model = endpoint
+        self.last_endpoint = {"label": label, "model": model}
+        result.reason = (result.reason or "") + f" | gemini:{label}"
+        return result
 
-    def _generate(self, user_payload: dict):
-        from google.genai import types
-
-        client = self._get_client()
+    def _generate_with_failover(self, user_payload: dict):
+        endpoints = self._endpoints()
+        if not endpoints:
+            raise RuntimeError("GEMINI_API_KEY is not configured")
         last_exc: Exception | None = None
-        for attempt in range(2):
+        for label, api_key, model in endpoints:
             try:
-                return client.models.generate_content(
-                    model=self.model,
-                    contents=json.dumps(user_payload),
-                    config=types.GenerateContentConfig(
-                        system_instruction=SYSTEM_INSTRUCTION,
-                        response_mime_type="application/json",
-                        response_schema=EXTRACTION_SCHEMA_HINT,
-                        temperature=0.1,
-                    ),
-                )
+                response = self._generate_once(api_key=api_key, model=model, user_payload=user_payload)
+                logger.info("gemini_extract_ok", endpoint=label, model=model)
+                return response, (label, model)
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
-                msg = str(exc).lower()
-                retryable = "503" in msg or "unavailable" in msg or "high demand" in msg or "429" in msg
-                logger.warning("gemini_extract_attempt_failed", attempt=attempt + 1, error=str(exc))
-                if not retryable or attempt == 1:
-                    raise
-        raise last_exc or RuntimeError("gemini extract failed")
+                logger.warning(
+                    "gemini_endpoint_failed",
+                    endpoint=label,
+                    model=model,
+                    failover=_is_failover_error(exc),
+                    error=str(exc)[:300],
+                )
+                if not _is_failover_error(exc):
+                    # Schema/parse/auth bugs: still try next account/model once, then raise
+                    continue
+        raise last_exc or RuntimeError("gemini extract failed on all endpoints")
+
+    def _generate_once(self, *, api_key: str, model: str, user_payload: dict):
+        from google.genai import types
+
+        client = self._get_client(api_key)
+        return client.models.generate_content(
+            model=model,
+            contents=json.dumps(user_payload),
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_INSTRUCTION,
+                response_mime_type="application/json",
+                response_schema=EXTRACTION_SCHEMA_HINT,
+                temperature=0.1,
+            ),
+        )
 
 
 class HeuristicProvider(LLMProvider):

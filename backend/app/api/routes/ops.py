@@ -157,11 +157,15 @@ def ai_health(_user: UserDep):
     """Check whether Gemini is configured and can run a tiny extraction."""
     settings = get_settings()
     info: dict = {
-        "configured": bool(settings.gemini_api_key),
+        "configured": bool(settings.gemini_api_key or settings.gemini_api_key_secondary),
         "model": settings.gemini_model,
-        "provider": "gemini" if settings.gemini_api_key else "heuristic",
+        "fallback_model": settings.gemini_fallback_model,
+        "secondary_key_configured": bool(settings.gemini_api_key_secondary),
+        "provider": "gemini"
+        if (settings.gemini_api_key or settings.gemini_api_key_secondary)
+        else "heuristic",
     }
-    if not settings.gemini_api_key:
+    if not settings.gemini_api_key and not settings.gemini_api_key_secondary:
         info["ok"] = False
         info["detail"] = "GEMINI_API_KEY is not set on this environment"
         return info
@@ -186,6 +190,7 @@ def ai_health(_user: UserDep):
         info["attendees"] = (result.entities or {}).get("attendees")
         info["reason"] = (result.reason or "")[:240]
         info["human_review_required"] = result.human_review_required
+        info["endpoint"] = getattr(provider, "last_endpoint", {}) or {}
         # Heuristic-only reason means Gemini path failed inside service
         if "Primary AI unavailable" in (result.reason or ""):
             info["ok"] = False

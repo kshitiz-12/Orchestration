@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import re
 from typing import Optional
 
 from sqlalchemy.orm.attributes import flag_modified
@@ -8,10 +11,51 @@ from app.connectors.base import EmailProvider
 from app.core.enums import AuditAction, CommunicationType
 from app.core.logging import get_logger
 from app.models.intake import Conversation, RawEmailEvent
+from app.models.org import Person
 from app.models.outcome import Communication, Outcome
 from app.services.intake import IdempotentActionService
 
 logger = get_logger(__name__)
+
+
+def humanize_email_local(email: str) -> str:
+    local = (email or "").split("@")[0].strip()
+    if not local:
+        return "there"
+    local = re.sub(r"\d+$", "", local)
+    parts = [p for p in re.split(r"[._+\-]+", local) if p]
+    if not parts:
+        return "there"
+    return " ".join(p[:1].upper() + p[1:].lower() for p in parts)
+
+
+def resolve_requester_name(
+    session: Session,
+    *,
+    email: Optional[str] = None,
+    person_id: Optional[str] = None,
+    outcome: Optional[Outcome] = None,
+    conversation: Optional[Conversation] = None,
+) -> str:
+    """Prefer HR/master person name, then conversation person, then email local-part."""
+    pid = person_id
+    addr = (email or "").strip().lower()
+    if outcome is not None:
+        pid = pid or outcome.requester_person_id
+        addr = addr or (outcome.requester_email or "").strip().lower()
+    if conversation is not None:
+        pid = pid or conversation.requester_person_id
+        addr = addr or (conversation.requester_email or "").strip().lower()
+    if pid:
+        person = session.get(Person, pid)
+        if person and (person.name or "").strip():
+            return person.name.strip()
+    if addr:
+        person = session.exec(select(Person).where(Person.email == addr)).first()
+        if person and (person.name or "").strip():
+            return person.name.strip()
+        return humanize_email_local(addr)
+    return "there"
 
 
 class CommunicationService:
@@ -123,6 +167,8 @@ class CommunicationService:
         case_reference: Optional[str] = None,
         understood: Optional[list[str]] = None,
         force_send_key: Optional[str] = None,
+        first_contact: bool = False,
+        greeting_name: Optional[str] = None,
     ) -> Communication:
         questions = [q for q in questions if q]
         if not questions:
@@ -130,14 +176,26 @@ class CommunicationService:
 
             questions = default_meeting_room_questions()
         ref = case_reference or "PENDING"
-        subject = f"[INFORMATION REQUIRED] [{ref}] Additional details needed"
-        parts: list[str] = []
-        if understood:
-            parts.append("Thanks — here’s what we have so far:\n")
-            parts.extend(f"- {line}" for line in understood if line)
-            parts.append("\nWe still need the following to proceed:\n")
+        name = greeting_name or resolve_requester_name(self.session, conversation=conversation)
+        if first_contact:
+            subject = f"[INFORMATION REQUIRED] [{ref}] Request registered — details needed"
         else:
-            parts.append("We need a few details to continue processing your request:\n")
+            subject = f"[INFORMATION REQUIRED] [{ref}] Additional details needed"
+        parts: list[str] = [f"Dear {name},\n"]
+        if first_contact:
+            parts.append(
+                f"Your meeting-room request has been registered as {ref}. "
+                "To book a suitable room in one step, please reply with the details below "
+                "(one reply is enough).\n"
+            )
+        if understood:
+            parts.append("Here’s what we already have on file:\n")
+            parts.extend(f"- {line}" for line in understood if line)
+            parts.append("\nPlease confirm or complete the following:\n")
+        elif first_contact:
+            parts.append("Please share:\n")
+        else:
+            parts.append("We still need a few details to continue:\n")
         parts.extend(f"- {q}" for q in questions)
         parts.append(
             "\nPlease reply to this email (use Reply — it routes back to our intake)."

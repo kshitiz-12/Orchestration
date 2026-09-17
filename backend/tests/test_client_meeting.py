@@ -197,9 +197,14 @@ def test_client_meeting_propose_confirm_and_parallel_tracks(session: Session):
     assert outcome.facts.get("pending_confirmation")
     assert outcome.facts.get("proposed_room")
     assert outcome.facts.get("hold_start")
-    assert any("REQUEST REGISTERED" in (c.subject or "") for c in session.exec(
+    mails = session.exec(
         select(Communication).where(Communication.outcome_id == outcome.outcome_id)
-    ).all())
+    ).all()
+    assert any("CONFIRM BOOKING" in (c.subject or "") for c in mails)
+    assert not any("REQUEST REGISTERED" in (c.subject or "") for c in mails)
+    confirm = next(c for c in mails if "CONFIRM BOOKING" in (c.subject or ""))
+    assert "Dear" in (confirm.body or "")
+    assert "requester" not in (confirm.body or "").lower().split("dear", 1)[-1][:40]
 
     confirmed = orch.orchestrate(
         extraction=ExtractionResult(

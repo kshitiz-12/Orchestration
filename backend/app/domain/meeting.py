@@ -76,6 +76,8 @@ REQUIREMENT_FIELDS = (
 # Keys the reducer must never drop from persistence
 PLATFORM_KEYS = (
     "registration_ack_sent",
+    "registration_ack_deferred",
+    "clarification_sent",
     "primary_office",
     "operational_status",
     "financial_status",

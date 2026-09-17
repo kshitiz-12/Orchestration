@@ -18,10 +18,10 @@ from app.models.intake import AIDecision, Conversation, HumanReviewItem, Process
 from app.models.org import utcnow
 from app.connectors.factory import get_email_provider
 from app.schemas.ai import ExtractionResult, MissingInformation
-from app.services.communication import CommunicationService
+from app.services.communication import CommunicationService, resolve_requester_name
 from app.services.context import ContextRetrievalService
 from app.services.intake import JobQueueService
-from app.services.meeting_room import default_meeting_room_questions, meeting_room_gaps
+from app.services.meeting_room import default_meeting_room_questions, meeting_room_gaps, summarize_meeting_requirements
 from app.services.thread_facts import merge_thread_prior_facts
 
 logger = get_logger(__name__)
@@ -217,39 +217,44 @@ class ProcessingPipeline:
                 if q
             ]
             facts_for_q = {**(outcome.facts or {}), **(extraction.entities or {})}
-            is_follow_up = bool(extraction.is_reply) or bool(
-                (outcome.facts or {}).get("registration_ack_sent")
-            )
-            # First ask: full consolidated checklist. Later replies: ONLY remaining gaps
-            # (re-sending the same full list was silently dropped by idempotency — user got no mail).
-            if not questions:
-                if is_follow_up:
-                    questions = [m.question for m in extraction.missing_information if m.question]
-                else:
-                    questions = default_meeting_room_questions(facts_for_q)
-            elif not is_follow_up and outcome and (outcome.category or "").upper() == "MEETING_ROOM":
+            prior_clarify = bool((outcome.facts or {}).get("clarification_sent"))
+            is_first_contact = not prior_clarify
+            # First ask: full consolidated checklist (one reply should be enough).
+            # Later replies: only remaining gaps.
+            if is_first_contact and (outcome.category or "").upper() == "MEETING_ROOM":
                 questions = default_meeting_room_questions(facts_for_q)
+            elif not questions:
+                questions = [m.question for m in extraction.missing_information if m.question]
+                if not questions:
+                    questions = default_meeting_room_questions(facts_for_q)
 
-            understood: list[str] = []
-            if is_follow_up:
-                from app.services.meeting_room import summarize_meeting_requirements
-
-                understood = summarize_meeting_requirements(facts_for_q)[:10]
-
+            understood = summarize_meeting_requirements(facts_for_q)[:10]
+            name = resolve_requester_name(
+                self.session, outcome=outcome, conversation=conversation, email=event.sender
+            )
             self.comms.send_clarification(
                 conversation=conversation,
                 questions=questions,
                 case_reference=outcome.case_reference,
                 understood=understood or None,
                 force_send_key=event.event_id,
+                first_contact=is_first_contact,
+                greeting_name=name,
             )
+            facts = dict(outcome.facts or {})
+            facts["clarification_sent"] = True
+            outcome.facts = facts
+            self.session.add(outcome)
+            from sqlalchemy.orm.attributes import flag_modified
+
+            flag_modified(outcome, "facts")
             self.audit.record(
                 tenant_id=self.tenant_id,
                 actor="system",
                 action=AuditAction.CLARIFICATION_SENT,
                 entity_type="Conversation",
                 entity_id=conversation.conversation_id,
-                after={"questions": questions, "follow_up": is_follow_up},
+                after={"questions": questions, "first_contact": is_first_contact},
                 correlation_id=event.processing_id,
             )
             event.processing_stage = ProcessingStage.COMMUNICATION.value
@@ -274,23 +279,35 @@ class ProcessingPipeline:
         blocking = meeting_room_gaps(facts) if (outcome.category or "").upper() == "MEETING_ROOM" else []
         # Never mark COMPLETE while requirements are blocking or inventory failed
         if stage == "AWAITING_REQUIREMENTS" or blocking:
-            questions = [g["question"] for g in blocking] or [
-                m.question for m in extraction.missing_information if m.question
-            ]
-            understood = None
-            if facts.get("registration_ack_sent"):
-                from app.services.meeting_room import summarize_meeting_requirements
-
-                understood = summarize_meeting_requirements(facts)[:10]
-            if not questions:
+            prior_clarify = bool(facts.get("clarification_sent"))
+            is_first_contact = not prior_clarify
+            if is_first_contact:
                 questions = default_meeting_room_questions(facts)
+            else:
+                questions = [g["question"] for g in blocking] or [
+                    m.question for m in extraction.missing_information if m.question
+                ]
+                if not questions:
+                    questions = default_meeting_room_questions(facts)
+            understood = summarize_meeting_requirements(facts)[:10]
+            name = resolve_requester_name(
+                self.session, outcome=outcome, conversation=conversation, email=event.sender
+            )
             self.comms.send_clarification(
                 conversation=conversation,
                 questions=questions,
                 case_reference=outcome.case_reference,
-                understood=understood,
+                understood=understood or None,
                 force_send_key=event.event_id,
+                first_contact=is_first_contact,
+                greeting_name=name,
             )
+            facts["clarification_sent"] = True
+            outcome.facts = facts
+            self.session.add(outcome)
+            from sqlalchemy.orm.attributes import flag_modified
+
+            flag_modified(outcome, "facts")
             event.processing_stage = ProcessingStage.COMMUNICATION.value
             self.session.add(event)
             self.session.commit()

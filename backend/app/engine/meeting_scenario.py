@@ -14,7 +14,7 @@ from app.engine.outcome_reducer import reduce_meeting_facts
 from app.models.org import Contract, Resource, Vendor, utcnow
 from app.models.outcome import Outcome, Requirement, Task
 from app.schemas.ai import ExtractionResult
-from app.services.communication import CommunicationService
+from app.services.communication import CommunicationService, resolve_requester_name
 from app.services.meeting_room import (
     apply_internal_vc_policy,
     apply_meeting_room_defaults,
@@ -357,8 +357,10 @@ class ClientMeetingOrchestrator:
         )
 
         if not merged.get("registration_ack_sent"):
-            self._send_registration_ack(outcome, merged)
+            # Do not send a separate "registered" mail — incomplete cases get one
+            # consolidated ask from the pipeline; complete cases get propose/book/no-fit.
             merged["registration_ack_sent"] = True
+            merged["registration_ack_deferred"] = True
 
         if not merged.get("primary_office"):
             merged["primary_office"] = "Corporate Office, Gurugram"
@@ -452,10 +454,12 @@ class ClientMeetingOrchestrator:
             self._save_facts(outcome, merged)
             if outcome.requester_email:
                 room_name = (merged.get("proposed_room") or {}).get("name") or "the proposed room"
+                name = resolve_requester_name(self.session, outcome=outcome)
                 self.comms.send_case_update(
                     outcome=outcome,
                     communication_type="ACTION_REQUIRED",
                     body=(
+                        f"Dear {name},\n\n"
                         f"We still have {room_name} proposed for this request.\n\n"
                         "Reply \"confirm\" to lock it in, or tell us what to change "
                         "(time, headcount, equipment).\n\n"
@@ -485,12 +489,14 @@ class ClientMeetingOrchestrator:
                 severity="MEDIUM",
                 owner_role="OPERATOR",
             )
-            self._ops_ack(outcome, merged, reason="no_room_available")
+            # One outbound only — do not also send a generic ops ack
             if outcome.requester_email:
+                name = resolve_requester_name(self.session, outcome=outcome)
                 self.comms.send_case_update(
                     outcome=outcome,
                     communication_type="INFORMATION_ONLY",
                     body=(
+                        f"Dear {name},\n\n"
                         "We could not find a room that fits this request "
                         f"({merged.get('attendees')} people"
                         f"{', display/VC as needed' if merged.get('hybrid_av') or merged.get('presentation_display') else ''}"
@@ -536,10 +542,12 @@ class ClientMeetingOrchestrator:
             merged["outbound_required"] = "update_noted"
             self._save_facts(outcome, merged)
             if outcome.requester_email:
+                name = resolve_requester_name(self.session, outcome=outcome)
                 self.comms.send_case_update(
                     outcome=outcome,
                     communication_type="INFORMATION_ONLY",
                     body=(
+                        f"Dear {name},\n\n"
                         "Thanks — we’ve noted your additional request against the confirmed booking.\n\n"
                         + "\n".join(f"- {k.replace('_', ' ')}: {v}" for k, v in deltas.items())
                         + f"\n\nCase: {outcome.case_reference}"
@@ -612,44 +620,15 @@ class ClientMeetingOrchestrator:
         return max(caps) if caps else 0
 
     def _send_registration_ack(self, outcome: Outcome, facts: dict) -> None:
-        if not outcome.requester_email:
-            return
-        date = facts.get("date") or "the requested date"
-        known = []
-        if facts.get("date"):
-            known.append(f"Date: {facts['date']}")
-        if facts.get("attendees"):
-            known.append(f"Attendees: {facts['attendees']}")
-        if facts.get("preferred_time") or facts.get("time_window"):
-            known.append(f"Start: {facts.get('preferred_time') or facts.get('time_window')}")
-        known_block = ("\n".join(f"- {line}" for line in known) + "\n\n") if known else ""
-        incomplete = not meeting_room_details_complete(facts)
-        body = (
-            f"Dear requester,\n\n"
-            f"Your meeting-room request for {date} has been registered.\n\n"
-            f"Case: {outcome.case_reference}\n"
-            f"{known_block}"
-            + (
-                "We need a few additional details before a suitable room can be reserved.\n"
-                "A consolidated clarification is being sent separately.\n\n"
-                if incomplete
-                else "We are validating the information and available resources.\n\n"
-            )
-            + f"Please retain {outcome.case_reference} in the subject line while replying.\n\n"
-            "Regards,\nMeeting Support Platform"
-        )
-        self.comms.send_case_update(
-            outcome=outcome,
-            communication_type="INFORMATION_ONLY",
-            body=body,
-            recipients=[outcome.requester_email],
-            action_label="REQUEST REGISTERED",
-        )
+        """Legacy helper — meeting flow no longer sends a standalone register mail."""
+        return
 
     def _ops_ack(self, outcome: Outcome, facts: dict, *, reason: str) -> None:
         if not outcome.requester_email or facts.get("ops_ack_sent"):
             return
+        name = resolve_requester_name(self.session, outcome=outcome)
         body = (
+            f"Dear {name},\n\n"
             "Thank you for your meeting room request.\n\n"
             "Your request needs a short review by our workplace team "
             f"({reason.replace('_', ' ')}).\n\n"
@@ -722,7 +701,9 @@ class ClientMeetingOrchestrator:
         score = float((facts.get("recommended_room") or {}).get("score") or 0)
         # Low-risk path auto-books immediately — skip the confirm ask email
         if outcome.requester_email and not is_low_risk_auto_bookable(facts, score):
+            name = resolve_requester_name(self.session, outcome=outcome)
             body = (
+                f"Dear {name},\n\n"
                 f"{intro}"
                 f"Proposed room: {room.name}\n"
                 f"Case: {outcome.case_reference}\n\n"
@@ -810,8 +791,10 @@ class ClientMeetingOrchestrator:
             if modules
             else "No visitor, parking, catering or billing modules were activated.\n"
         )
+        name = resolve_requester_name(self.session, outcome=outcome)
         if low_risk:
             body = (
+                f"Dear {name},\n\n"
                 f"Your meeting room has been booked.\n\n"
                 f"Room: {booking.get('name')}\n"
                 f"Date: {booking.get('date')}\n"
@@ -825,6 +808,7 @@ class ClientMeetingOrchestrator:
             )
         else:
             body = (
+                f"Dear {name},\n\n"
                 f"Your meeting room booking is confirmed.\n\n"
                 f"Room: {booking.get('name')}\n"
                 f"Case: {outcome.case_reference}\n"

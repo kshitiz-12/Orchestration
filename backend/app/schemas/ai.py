@@ -1,6 +1,16 @@
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+_PRIORITY_LEVELS = frozenset({"LOW", "MEDIUM", "HIGH", "CRITICAL"})
+
+
+def _normalize_priority(value: Any) -> str:
+    """LLMs often emit 'medium' — coerce at the contract boundary, never fail the turn."""
+    if value is None or value == "":
+        return "MEDIUM"
+    text = str(value).strip().upper()
+    return text if text in _PRIORITY_LEVELS else "MEDIUM"
 
 
 class ExtractedEntity(BaseModel):
@@ -15,6 +25,11 @@ class ExtractedIssue(BaseModel):
     summary: str
     severity: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"] = "MEDIUM"
     entities: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("severity", mode="before")
+    @classmethod
+    def coerce_severity(cls, value: Any) -> str:
+        return _normalize_priority(value)
 
 
 class MissingInformation(BaseModel):
@@ -49,6 +64,18 @@ class ExtractionResult(BaseModel):
         default_factory=dict,
         description="Interpreter delta: {set, unset, assumptions, speech_acts}",
     )
+
+    @field_validator("recommended_priority", mode="before")
+    @classmethod
+    def coerce_priority(cls, value: Any) -> str:
+        return _normalize_priority(value)
+
+    @field_validator("event_type", mode="before")
+    @classmethod
+    def coerce_event_type(cls, value: Any) -> str:
+        if value is None or value == "":
+            return "UNKNOWN"
+        return str(value).strip().upper()
 
 
 class ConfidenceRoutingResult(BaseModel):

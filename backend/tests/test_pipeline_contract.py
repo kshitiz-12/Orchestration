@@ -35,7 +35,12 @@ def test_incomplete_meeting_event_stays_communication_not_completed(session):
     assert event.processing_stage == ProcessingStage.COMMUNICATION.value
     outcome = session.get(Outcome, result["outcome_id"])
     assert (outcome.facts or {}).get("orchestration_stage") == "AWAITING_REQUIREMENTS"
-    assert meeting_comms(session, outcome.outcome_id)
+    mails = meeting_comms(session, outcome.outcome_id)
+    assert len(mails) == 1
+    assert "INFORMATION REQUIRED" in (mails[0].subject or "")
+    assert "Dear" in (mails[0].body or "")
+    assert "registered" in (mails[0].body or "").lower()
+    assert "Start time" in (mails[0].body or "") or "participants" in (mails[0].body or "").lower()
 
 
 def meeting_comms(session, outcome_id: str) -> list[Communication]:

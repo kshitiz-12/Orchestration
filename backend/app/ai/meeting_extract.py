@@ -14,6 +14,8 @@ from app.services.meeting_room import (
 # System/platform keys that must not be wiped by extraction
 _PRESERVE_KEYS = {
     "registration_ack_sent",
+    "registration_ack_deferred",
+    "clarification_sent",
     "primary_office",
     "operational_status",
     "financial_status",

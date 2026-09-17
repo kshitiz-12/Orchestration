@@ -206,39 +206,93 @@ def test_heuristic_reply_with_prior_facts_completes():
     assert gaps == []
 
 
-def test_llm_service_retries_gemini_503_then_succeeds():
+def test_extraction_result_coerces_lowercase_priority():
+    result = ExtractionResult.model_validate(
+        {
+            "event_type": "meeting_room",
+            "summary": "test",
+            "entities": {},
+            "issues": [{"issue_type": "X", "summary": "y", "severity": "high"}],
+            "missing_information": [],
+            "confidence": 0.9,
+            "reason": "gemini",
+            "recommended_priority": "medium",
+        }
+    )
+    assert result.event_type == "MEETING_ROOM"
+    assert result.recommended_priority == "MEDIUM"
+    assert result.issues[0].severity == "HIGH"
+
+
+def test_gemini_failover_uses_secondary_after_model_failures():
     from app.ai.gemini import GeminiProvider
 
-    class FlakyGemini(GeminiProvider):
+    class RecoveringGemini(GeminiProvider):
         def __init__(self):
-            self.calls = 0
-            self.api_key = "test"
-            self.model = "test"
-            self._client = None
+            self.api_key = "k1"
+            self.api_key_secondary = "k2"
+            self.model = "gemini-3.6-flash"
+            self.fallback_model = "gemini-3.7-flash"
+            self._clients = {}
+            self.last_endpoint = {}
+            self.attempts: list[str] = []
 
-        def extract(self, **kwargs):
-            self.calls += 1
-            if self.calls == 1:
-                raise RuntimeError("503 UNAVAILABLE: model is on high demand")
-            return ExtractionResult(
-                event_type="MEETING_ROOM",
-                summary="delta",
-                entities={"attendees": 8, "meeting_type": "internal meeting"},
-                fact_delta={"set": {"attendees": 8, "meeting_type": "internal meeting"}, "speech_acts": ["provide_facts"]},
-                confidence=0.9,
-                reason="gemini",
-            )
+        def _endpoints(self):
+            return [
+                ("primary:gemini-3.6-flash", "k1", "gemini-3.6-flash"),
+                ("primary:gemini-3.7-flash", "k1", "gemini-3.7-flash"),
+                ("secondary:gemini-3.6-flash", "k2", "gemini-3.6-flash"),
+            ]
 
-    flaky = FlakyGemini()
-    svc = LLMService(provider=flaky)
+        def _generate_once(self, *, api_key, model, user_payload):
+            self.attempts.append(f"{api_key}:{model}")
+            if model == "gemini-3.6-flash" and api_key == "k1":
+                raise RuntimeError("429 RESOURCE_EXHAUSTED quota")
+            if api_key == "k1" and model == "gemini-3.7-flash":
+                raise RuntimeError("503 UNAVAILABLE high demand")
+
+            class Resp:
+                text = (
+                    '{"event_type":"MEETING_ROOM","summary":"ok","entities":{"attendees":8,'
+                    '"meeting_type":"internal meeting"},"issues":[],"missing_information":[],'
+                    '"confidence":0.9,"reason":"gemini","recommended_priority":"MEDIUM"}'
+                )
+
+            return Resp()
+
+    recovering = RecoveringGemini()
+    svc = LLMService(provider=recovering)
     result = svc.extract(
         subject="Re: ROOM-1",
         body="8 people, internal",
         prior_facts={"date": "tomorrow", "preferred_time": "10am", "duration_hours": 1},
     )
-    assert flaky.calls == 2
+    assert recovering.attempts == [
+        "k1:gemini-3.6-flash",
+        "k1:gemini-3.7-flash",
+        "k2:gemini-3.6-flash",
+    ]
     assert result.entities.get("attendees") == 8
+    assert "gemini:secondary:gemini-3.6-flash" in (result.reason or "")
     assert "gemini delta + reducer" in (result.reason or "")
+
+
+def test_gemini_endpoint_order_includes_secondary_key():
+    from app.ai.gemini import GeminiProvider
+
+    p = GeminiProvider(
+        api_key="key-a",
+        api_key_secondary="key-b",
+        model="gemini-3.6-flash",
+        fallback_model="gemini-3.7-flash",
+    )
+    labels = [e[0] for e in p._endpoints()]
+    assert labels == [
+        "primary:gemini-3.6-flash",
+        "primary:gemini-3.7-flash",
+        "secondary:gemini-3.6-flash",
+        "secondary:gemini-3.7-flash",
+    ]
 
 
 def test_llm_service_falls_back_after_gemini_503_exhausted():
@@ -248,12 +302,15 @@ def test_llm_service_falls_back_after_gemini_503_exhausted():
         def __init__(self):
             self.calls = 0
             self.api_key = "test"
-            self.model = "test"
-            self._client = None
+            self.api_key_secondary = ""
+            self.model = "gemini-3.6-flash"
+            self.fallback_model = "gemini-3.7-flash"
+            self._clients = {}
+            self.last_endpoint = {}
 
         def extract(self, **kwargs):
             self.calls += 1
-            raise RuntimeError("503 UNAVAILABLE")
+            raise RuntimeError("429 RESOURCE_EXHAUSTED on all endpoints")
 
     dead = DeadGemini()
     svc = LLMService(provider=dead)
@@ -262,7 +319,7 @@ def test_llm_service_falls_back_after_gemini_503_exhausted():
         body="Book a room for 12 people tomorrow at 3pm for 2 hours, internal, Corporate Office",
         prior_facts={},
     )
-    assert dead.calls == 2
+    assert dead.calls == 1
     assert result.event_type == "MEETING_ROOM"
     assert result.entities.get("attendees") == 12
     assert "heuristic fallback" in (result.reason or "").lower() or "reducer + heuristic" in (result.reason or "")

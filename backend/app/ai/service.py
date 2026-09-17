@@ -36,11 +36,6 @@ def _looks_like_meeting_room(subject: str, body: str, prior_facts: Optional[dict
     )
 
 
-def _is_retryable_ai_error(exc: Exception) -> bool:
-    msg = str(exc).lower()
-    return "503" in msg or "unavailable" in msg or "high demand" in msg or "429" in msg
-
-
 class LLMService:
     """AI gateway. Business logic consumes this — never GeminiProvider directly."""
 
@@ -48,7 +43,7 @@ class LLMService:
         settings = get_settings()
         if provider is not None:
             self.provider = provider
-        elif settings.gemini_api_key:
+        elif settings.gemini_api_key or settings.gemini_api_key_secondary:
             self.provider = GeminiProvider()
         else:
             logger.warning("gemini_api_key_missing_using_heuristic_provider")
@@ -62,17 +57,12 @@ class LLMService:
         result: ExtractionResult | None = None
         last_exc: Exception | None = None
 
-        for attempt in range(2):
-            try:
-                result = self.provider.extract(**kwargs)
-                last_exc = None
-                break
-            except Exception as exc:  # noqa: BLE001
-                last_exc = exc
-                logger.error("ai_extraction_failed", attempt=attempt + 1, error=str(exc))
-                if isinstance(self.provider, GeminiProvider) and _is_retryable_ai_error(exc) and attempt == 0:
-                    continue
-                break
+        try:
+            # GeminiProvider already fails over across model + secondary API key
+            result = self.provider.extract(**kwargs)
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            logger.error("ai_extraction_failed", error=str(exc)[:400])
 
         if result is None:
             used_fallback = True
