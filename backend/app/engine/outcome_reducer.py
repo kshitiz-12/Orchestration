@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
 
 from app.domain.meeting import (
@@ -14,11 +15,35 @@ from app.domain.meeting import (
     facts_from_state,
     state_from_facts,
 )
-from app.services.meeting_room import _answered, is_booking_confirmation, is_employee_satisfied
+from app.services.meeting_room import (
+    _answered,
+    is_booking_confirmation,
+    is_employee_satisfied,
+    looks_like_requirement_update,
+)
 
 
 INVENTABLE_COUNTS = frozenset({"attendees", "external_visitors", "guest_vehicles"})
 
+_INT_WORDS = {
+    1: "one",
+    2: "two",
+    3: "three",
+    4: "four",
+    5: "five",
+    6: "six",
+    7: "seven",
+    8: "eight",
+    9: "nine",
+    10: "ten",
+}
+
+
+def _word_for_int(value: Any) -> str:
+    try:
+        return _INT_WORDS.get(int(value), "")
+    except (TypeError, ValueError):
+        return ""
 
 def _rank(prov: str | Provenance | None) -> int:
     try:
@@ -175,19 +200,51 @@ def reduce_meeting_facts(
         merged = apply_delta(merged, delta, source_text=source_text)
 
     if candidate_entities:
-        # Only fill unknowns
+        # Fill unknowns; also allow grounded updates for operational fields on reply
+        updatable = {
+            "dietary",
+            "guest_vehicles",
+            "vehicle_numbers",
+            "visitor_details",
+            "catering",
+            "hybrid_av",
+            "presentation_display",
+        }
         unknown_only = {}
+        src = (source_text or "").lower()
         for key, value in candidate_entities.items():
             if key in PLATFORM_KEYS and key not in REQUIREMENT_FIELDS:
                 continue
             if not _answered(merged.get(key)):
                 unknown_only[key] = value
+                continue
+            if key in updatable and _answered(value) and value != merged.get(key):
+                # Must be grounded in this message (digit or keyword present)
+                grounded = False
+                if key == "guest_vehicles":
+                    grounded = bool(
+                        re.search(r"\b(parking|vehicle|car)s?\b", src)
+                        and (str(value) in src or _word_for_int(value) in src)
+                    )
+                elif key == "dietary":
+                    grounded = bool(re.search(r"\b(veg|non[-\s]?veg|dietary)\b", src))
+                elif key == "vehicle_numbers":
+                    grounded = str(value).lower() in src
+                else:
+                    grounded = str(value).lower()[:12] in src if value else False
+                if grounded:
+                    unknown_only[key] = value
         if unknown_only:
             cand = delta_from_entities(
                 unknown_only,
                 provenance=Provenance.CANDIDATE_HEURISTIC,
                 speech_acts=speech,
             )
+            # Elevate reply updates so they can replace earlier heuristic fills
+            if any(k in updatable for k in unknown_only) and (
+                "confirm" in speech or looks_like_requirement_update(source_text)
+            ):
+                cand.provenance = Provenance.EXTRACTED
             merged = apply_delta(merged, cand, source_text=source_text)
 
     if "confirm" in speech:

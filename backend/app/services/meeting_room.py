@@ -283,7 +283,25 @@ def meeting_room_details_complete(facts: dict[str, Any]) -> bool:
 def is_booking_confirmation(text: str) -> bool:
     if not text:
         return False
-    lowered = text.lower().strip()
+    from app.services.email_utils import strip_for_ai
+
+    # Never treat legal disclaimer "sender confirms that…" as a booking confirm
+    cleaned = strip_for_ai(text)
+    lowered = cleaned.lower().strip()
+    if not lowered:
+        return False
+    # Long requirement mails that only mention "confirm" inside boilerplate
+    if re.search(r"\bsender\s+confirms\s+that\b", text, re.I) and not re.search(
+        r"^\s*(yes|confirm|confirmed|go ahead|book it|please book)\b",
+        cleaned,
+        re.I | re.M,
+    ):
+        # Still allow if an explicit confirm phrase appears in the cleaned body
+        if not re.search(
+            r"\b(i\s+confirm|yes\s*,?\s*confirm|confirm(?:\s+my\s+booking)?|confirmed|go\s+ahead|book\s+it)\b",
+            lowered,
+        ):
+            return False
     # Bare "yes" in a long requirements reply (e.g. "yes external visitors") is not confirm
     if re.search(r"\byes\b", lowered) and not re.search(
         r"^\s*yes(?:\s+please)?\s*[.!]?$",
@@ -313,16 +331,16 @@ def is_booking_confirmation(text: str) -> bool:
                 r")\b",
                 re.I,
             )
-            return bool(confirm_without_yes.search(text))
-    if "should we confirm" in lowered and len(text.strip()) > 220:
+            return bool(confirm_without_yes.search(cleaned))
+    if "should we confirm" in lowered and len(cleaned.strip()) > 220:
         if not re.search(
             r"^\s*(yes|confirm|confirmed|go ahead|book it|please book)\b",
-            text,
+            cleaned,
             re.I | re.M,
         ) and "i confirm" not in lowered:
-            if not _CONFIRM_RE.search(text):
+            if not _CONFIRM_RE.search(cleaned):
                 return False
-    return bool(_CONFIRM_RE.search(text))
+    return bool(_CONFIRM_RE.search(cleaned))
 
 
 def is_employee_satisfied(text: str) -> bool:

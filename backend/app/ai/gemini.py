@@ -347,11 +347,36 @@ class HeuristicProvider(LLMProvider):
                 "room booking",
                 "meeting space",
                 "information required",
+                "confirm booking",
                 "evt-",
+                "room-",
             ]
         ) or (
             ("room" in text or "meeting" in text or "members" in text)
             and any(k in text for k in ["people", "attendees", "members", "pm", "am", "hours", "tomorrow"])
+        ) or (
+            # Short replies on an open meeting thread (confirm + add-ons)
+            bool(
+                prior.get("pending_confirmation")
+                or prior.get("proposed_room")
+                or prior.get("booked_room")
+                or prior.get("attendees")
+                or prior.get("registration_ack_sent")
+            )
+            and any(
+                k in text
+                for k in [
+                    "confirm",
+                    "parking",
+                    "catering",
+                    "veg",
+                    "visitor",
+                    "vehicle",
+                    "display",
+                    "vc",
+                    "satisfied",
+                ]
+            )
         ):
             event_type = "MEETING_ROOM"
             confidence = 0.9
@@ -536,17 +561,59 @@ class HeuristicProvider(LLMProvider):
             elif any(k in text for k in ["high tea", "catering", "coffee", "snacks", "lunch", "tea", "meals", "refreshment"]):
                 entities["catering"] = "high tea" if "high tea" in text else "requested"
 
-            m_veg = re.search(r"(\d+)\s*vegetarian", text)
-            m_nonveg = re.search(r"(\d+)\s*non[-\s]?veg(?:etarian)?", text)
-            if m_veg or m_nonveg:
+            m_veg = re.search(
+                r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*veg(?:etarian)?\b",
+                text,
+            )
+            m_nonveg = re.search(
+                r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*non[-\s]?veg(?:etarian)?\b",
+                text,
+            )
+            m_rest_non = re.search(
+                r"(?:rest|remaining|others?)\s+(?:are\s+)?non[-\s]?veg(?:etarian)?\b",
+                text,
+            )
+            m_rest_veg = re.search(
+                r"(?:rest|remaining|others?)\s+(?:are\s+)?veg(?:etarian)?\b",
+                text,
+            )
+            _wnum = {
+                "one": 1,
+                "two": 2,
+                "three": 3,
+                "four": 4,
+                "five": 5,
+                "six": 6,
+                "seven": 7,
+                "eight": 8,
+                "nine": 9,
+                "ten": 10,
+            }
+
+            def _cnt(tok: str):
+                t = (tok or "").strip().lower()
+                if t.isdigit():
+                    return int(t)
+                return _wnum.get(t)
+
+            if m_veg or m_nonveg or m_rest_non or m_rest_veg:
                 parts = []
                 if m_veg:
-                    parts.append(f"{m_veg.group(1)} vegetarian")
+                    n = _cnt(m_veg.group(1))
+                    if n:
+                        parts.append(f"{n} vegetarian")
                 if m_nonveg:
-                    parts.append(f"{m_nonveg.group(1)} non-vegetarian")
+                    n = _cnt(m_nonveg.group(1))
+                    if n:
+                        parts.append(f"{n} non-vegetarian")
+                if m_rest_non:
+                    parts.append("rest non-vegetarian")
+                if m_rest_veg:
+                    parts.append("rest vegetarian")
                 if "sugar-free" in text or "sugar free" in text:
                     parts.append("sugar-free required")
-                entities["dietary"] = ", ".join(parts)
+                if parts:
+                    entities["dietary"] = ", ".join(parts)
             elif re.search(r"\bnon[-\s]?veg(etarian)?\b", text):
                 entities["dietary"] = "non-vegetarian"
             elif re.search(r"\b(veg only|all vegetarian|vegetarian only|only veg)\b", text):
@@ -620,10 +687,36 @@ class HeuristicProvider(LLMProvider):
             if re.search(r"\bspecial\s+seat", text):
                 entities["special_access"] = "required"
 
-            # Guest vehicles / parking
-            m_veh = re.search(r"(\d+)\s*(?:guest\s+)?(?:vehicles?|cars?|parking)", text)
+            # Guest vehicles / parking — "2 cars", "parking for two", "two parking"
+            m_veh = re.search(r"(\d+)\s*(?:guest\s+)?(?:vehicles?|cars?|parking\s+slots?)", text)
+            if not m_veh:
+                m_veh = re.search(
+                    r"(?:parking|guest\s+vehicles?|cars?)\s+(?:for\s+|of\s+)?(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b",
+                    text,
+                )
+            if not m_veh:
+                m_veh = re.search(
+                    r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+"
+                    r"(?:guest\s+)?(?:parking|vehicles?|cars?)\b",
+                    text,
+                )
             if m_veh:
-                entities["guest_vehicles"] = int(m_veh.group(1))
+                raw = m_veh.group(1)
+                if str(raw).isdigit():
+                    entities["guest_vehicles"] = int(raw)
+                else:
+                    entities["guest_vehicles"] = {
+                        "one": 1,
+                        "two": 2,
+                        "three": 3,
+                        "four": 4,
+                        "five": 5,
+                        "six": 6,
+                        "seven": 7,
+                        "eight": 8,
+                        "nine": 9,
+                        "ten": 10,
+                    }.get(str(raw).lower(), entities.get("guest_vehicles"))
             vehicle_nos = re.findall(r"\b[A-Z]{2}\d{2}[A-Z]{0,3}\d{3,4}\b", body.upper())
             if vehicle_nos:
                 entities["vehicle_numbers"] = ", ".join(vehicle_nos)

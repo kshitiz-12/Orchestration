@@ -862,6 +862,14 @@ class ClientMeetingOrchestrator:
             else "No visitor, parking, catering or billing modules were activated.\n"
         )
         name = resolve_requester_name(self.session, outcome=outcome)
+        followups: list[str] = []
+        if guest_vehicle_count(facts) > 0 and not str(facts.get("vehicle_numbers") or "").strip():
+            followups.append(
+                f"Please reply with the {guest_vehicle_count(facts)} guest vehicle number(s) for parking."
+            )
+        if catering_needed(facts) and not str(facts.get("dietary") or "").strip():
+            followups.append("Please share dietary split (veg / non-veg) for catering.")
+        follow_block = ("\n" + "\n".join(followups) + "\n") if followups else ""
         if low_risk:
             body = (
                 f"Dear {name},\n\n"
@@ -874,7 +882,8 @@ class ClientMeetingOrchestrator:
                 f"{module_line}"
                 + (f"Assumptions:\n{assumption_lines}\n\n" if assumption_lines else "")
                 + "If any detail is incorrect, reply to this email before the change cutoff.\n"
-                'After the meeting, reply "SATISFIED", "ISSUE REMAINS", or "REOPEN REQUEST".'
+                + follow_block
+                + 'After the meeting, reply "SATISFIED", "ISSUE REMAINS", or "REOPEN REQUEST".'
             )
         else:
             body = (
@@ -885,6 +894,7 @@ class ClientMeetingOrchestrator:
                 f"Hold window: {facts.get('hold_start')} – {facts.get('hold_end')}\n\n"
                 f"{module_line}"
                 + (f"Assumptions:\n{assumption_lines}\n\n" if assumption_lines else "")
+                + follow_block
                 + 'After the meeting, reply "satisfied" to close the operational outcome.'
             )
         if outcome.requester_email:

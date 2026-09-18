@@ -26,8 +26,9 @@ def humanize_email_local(email: str) -> str:
     parts = [p for p in re.split(r"[._+\-]+", local) if p]
     if not parts:
         return "there"
-    # Avoid ugly single-token handles like "anonymousxo"
-    if len(parts) == 1 and len(parts[0]) >= 11:
+    # Avoid ugly single-token handles like "anonymousxo" / "anonymous"
+    joined = "".join(parts).lower()
+    if joined.startswith("anonymous") or (len(parts) == 1 and len(parts[0]) >= 11):
         return "there"
     return " ".join(p[:1].upper() + p[1:].lower() for p in parts)
 

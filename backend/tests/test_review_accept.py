@@ -375,6 +375,37 @@ def test_gemini_fills_blanks_with_heuristic_candidates():
     assert "heuristic fill" in (result.reason or "")
 
 
+def test_confirm_reply_parses_parking_and_dietary_split():
+    from app.ai.gemini import HeuristicProvider
+    from app.ai.service import LLMService
+
+    result = LLMService(provider=HeuristicProvider()).extract(
+        subject="Re: [CONFIRM BOOKING] [ROOM-1]",
+        body="yes confirm also we require parking for two and two veg catering and rest non veg",
+        prior_facts={
+            "pending_confirmation": True,
+            "proposed_room": {"name": "Focus"},
+            "attendees": 12,
+            "external_visitors": 2,
+            "dietary": "non-vegetarian",
+            "catering": "requested",
+            "guest_vehicles": 0,
+            "date": "25th oct",
+            "preferred_time": "10am",
+            "end_time": "1pm",
+            "duration_hours": 3.0,
+            "meeting_type": "internal meeting",
+            "location_preference": "Corporate Office",
+            "registration_ack_sent": True,
+        },
+    )
+    assert result.entities.get("booking_confirmed") is True
+    assert result.entities.get("guest_vehicles") == 2
+    diet = (result.entities.get("dietary") or "").lower()
+    assert "2 vegetarian" in diet or "2 veg" in diet
+    assert "rest non-vegetarian" in diet or "non-veg" in diet
+
+
 def test_display_name_from_from_header():
     from app.services.communication import display_name_from_headers, humanize_email_local
 
