@@ -199,7 +199,22 @@ class MeetingRequirementState(BaseModel):
                     "blocking": True,
                 }
             )
-        if not _answered(self.preferred_time) and not _answered(self.extra.get("time_window")):
+        missing_start = not _answered(self.preferred_time) and not _answered(
+            self.extra.get("time_window")
+        )
+        missing_duration = self.duration_hours is None and not _answered(self.end_time)
+        # One ask when both are open — start vs length is the same reply for requesters
+        if missing_start and missing_duration:
+            gaps.append(
+                {
+                    "field": "preferred_time",
+                    "question": (
+                        "What time slot do you need (e.g. 10:00 AM–1:00 PM, or 2:00 PM for 1 hour)?"
+                    ),
+                    "blocking": True,
+                }
+            )
+        elif missing_start:
             gaps.append(
                 {
                     "field": "preferred_time",
@@ -207,7 +222,7 @@ class MeetingRequirementState(BaseModel):
                     "blocking": True,
                 }
             )
-        if self.duration_hours is None and not _answered(self.end_time):
+        elif missing_duration:
             gaps.append(
                 {
                     "field": "duration",
@@ -420,7 +435,14 @@ def build_field_contract(facts: dict[str, Any] | None) -> dict[str, Any]:
             # End time satisfies duration — skip empty duration_hours row
             continue
         prov = provenance.get(key) or Provenance.UNKNOWN.value
-        is_blocking = key in blocking or (key in {"duration_hours", "end_time"} and "duration" in blocking)
+        # Duration is represented once via blocking["duration"] / preferred_time — not as
+        # separate end_time + duration_hours rows with the same question.
+        if key in {"duration_hours", "end_time"} and (
+            "duration" in blocking or "preferred_time" in blocking
+        ):
+            if not (_answered(value) or value is True or value is False):
+                continue
+        is_blocking = key in blocking
         answered = _answered(value) or value is True or value is False
 
         if is_blocking and not answered:

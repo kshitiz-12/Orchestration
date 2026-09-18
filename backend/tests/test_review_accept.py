@@ -2,6 +2,7 @@
 
 from app.ai.gemini import HeuristicProvider
 from app.ai.meeting_extract import refine_meeting_room_extraction
+from app.ai.messy_meeting_parse import parse_messy_meeting_signals
 from app.ai.service import LLMService
 from app.core.enums import ConfidenceRoute
 from app.schemas.ai import ExtractionResult, MissingInformation
@@ -52,11 +53,14 @@ def test_meeting_room_gaps_only_core_blocks():
         "attendees",
         "date",
         "preferred_time",
-        "duration",
         "meeting_type",
         "location_preference",
     }
-    assert "hybrid_av" not in fields
+    assert "duration" not in fields  # merged into preferred_time when both open
+    qs = [g["question"] for g in meeting_room_gaps({})]
+    time_qs = [q for q in qs if "time" in q.lower()]
+    assert len(time_qs) == 1
+    assert "time slot" in time_qs[0].lower()
 
 
 def test_route_sensitive_not_overwritten_by_low_confidence():
@@ -568,3 +572,86 @@ def test_informal_reply_via_llm_service_against_snapshot():
     assert result.entities.get("visitor_details")
     assert result.entities.get("preferred_time") == "10am"
     assert meeting_room_gaps(result.entities) == []
+
+
+def test_parse_messy_signals_newline_range_and_ish_time():
+    body = (
+        "like 12-13\nemplyees from 10 to 1ish. 2 extrnal visitors coming also - rahul sharma"
+    )
+    got = parse_messy_meeting_signals(body)
+    assert got.get("attendees") == 13
+    assert got.get("preferred_time")
+    assert got.get("end_time")
+    assert got.get("duration_hours") == 3.0
+    assert got.get("external_visitors") == 2
+
+
+def test_heuristic_messy_mail_headcount_and_bare_time_range():
+    body = (
+        "hi,\n\n"
+        "need mtg room asap for tomorow or 25th oct whatever is free – like 12-13\n"
+        "emplyees from 10 to 1ish at gurgaon / gurugram corp office.\n\n"
+        "its an internal review only. 2 extrnal visitors coming also - rahul sharma "
+        "& aman verma will join.\n\n"
+        "pls arrnge tea/cofee , 2 veg n rest non veg ok. need display + vc for "
+        "couple remote ppl.\n\n"
+        "no guest car / parking needed.\n"
+    )
+    r = HeuristicProvider().extract(subject="meetng room req", body=body)
+    assert r.entities.get("attendees") == 13
+    assert r.entities.get("preferred_time")
+    assert r.entities.get("end_time") or r.entities.get("duration_hours")
+    assert r.entities.get("external_visitors") == 2
+    gaps = meeting_room_gaps(r.entities)
+    time_qs = [g["question"] for g in gaps if "time" in (g.get("question") or "").lower()]
+    assert len(time_qs) <= 1
+    assert "attendees" not in {g["field"] for g in gaps}
+    assert "preferred_time" not in {g["field"] for g in gaps}
+
+
+def test_gemini_blank_delta_filled_by_grounded_messy_parse():
+    """ROOM-2026-0003 failure mode: Gemini answers but skips headcount/time."""
+    body = (
+        "hi,\n\n"
+        "need mtg room asap for tomorow or 25th oct whatever is free – like 12-13\n"
+        "emplyees from 10 to 1ish at gurgaon / gurugram corp office.\n\n"
+        "its an internal review only. 2 extrnal visitors coming also - rahul sharma "
+        "& aman verma will join.\n\n"
+        "pls arrnge tea/cofee , 2 veg n rest non veg ok. need display + vc for "
+        "couple remote ppl.\n\n"
+        "no guest car / parking needed.\n"
+    )
+    gemini_partial = ExtractionResult(
+        event_type="MEETING_ROOM",
+        summary="Request for a meeting room at Gurgaon office",
+        entities={
+            "date": "25th oct",
+            "meeting_type": "internal meeting",
+            "location_preference": "Corporate Office",
+            "hybrid_av": "yes",
+            "presentation_display": "yes",
+            "catering": "requested",
+            "dietary": "2 veg rest non veg",
+        },
+        fact_delta={"set": {}, "speech_acts": ["provide_facts"]},
+        missing_information=[],
+        confidence=0.86,
+        reason="gemini:primary:gemini-3.5-flash-lite",
+    )
+    heuristic = HeuristicProvider().extract(subject="meetng room req", body=body)
+    refined = refine_meeting_room_extraction(
+        gemini_partial,
+        subject="meetng room req",
+        body=body,
+        prior_facts={},
+        heuristic_entities=heuristic.entities,
+        primary_is_heuristic=False,
+    )
+    assert refined.entities.get("attendees") == 13
+    assert refined.entities.get("preferred_time")
+    assert refined.entities.get("end_time") or refined.entities.get("duration_hours")
+    assert refined.entities.get("external_visitors") == 2
+    missing_fields = {m.field for m in (refined.missing_information or [])}
+    assert "attendees" not in missing_fields
+    assert "preferred_time" not in missing_fields
+    assert "duration" not in missing_fields

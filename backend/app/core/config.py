@@ -61,7 +61,7 @@ class Settings(BaseSettings):
     gemini_api_key_secondary: str = ""
     # Prefer flash-lite on free tier — 3.6/3.7/3.8 often 503 under load
     gemini_model: str = "gemini-3.5-flash-lite"
-    gemini_fallback_model: str = "gemini-3.7-flash"
+    gemini_fallback_model: str = "gemini-3.1-flash-lite"
     ai_prompt_version: str = "v1.0.0"
 
     # Active email channel: cloudmailin (prototype default) | outlook | gmail

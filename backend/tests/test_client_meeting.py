@@ -114,7 +114,7 @@ def test_minimal_request_date_only_does_not_book(session: Session):
     assert incomplete.facts.get("orchestration_stage") == "AWAITING_REQUIREMENTS"
     assert "attendees" in (incomplete.facts.get("checklist_missing") or [])
     qs = default_meeting_room_questions(incomplete.facts or {})
-    assert any("start time" in q.lower() for q in qs)
+    assert any("time slot" in q.lower() or "start time" in q.lower() for q in qs)
     assert any("people" in q.lower() or "participants" in q.lower() or "attend" in q.lower() for q in qs)
 
     complete = orch.orchestrate(

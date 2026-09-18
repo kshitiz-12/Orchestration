@@ -66,6 +66,9 @@ def _looks_invented_count(key: str, value: Any, source_text: str) -> bool:
     text = (source_text or "").lower()
     if str(n) in text:
         return False
+    # "12-13 emplyees" → attendees=13 is grounded even if only the range appears
+    if key == "attendees" and re.search(rf"\b{n}\s*[-–]\s*\d{{1,2}}\b|\b\d{{1,2}}\s*[-–]\s*{n}\b", text):
+        return False
     # Defaulting visitors to 1 on "yes visitors" is the classic invention
     if key == "external_visitors" and n == 1 and "1" not in text:
         return True

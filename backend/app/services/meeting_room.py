@@ -484,8 +484,14 @@ def default_meeting_room_questions(facts: dict[str, Any] | None = None) -> list[
     )
     questions = [date_line]
     # Skip checklist items we already know
-    if not (_answered(facts.get("preferred_time")) or _answered(facts.get("end_time")) or facts.get("duration_hours") is not None):
-        questions.append("Start time and end time, or expected duration.")
+    has_start = _answered(facts.get("preferred_time")) or _answered(facts.get("time_window"))
+    has_duration = _answered(facts.get("end_time")) or facts.get("duration_hours") is not None
+    if not has_start and not has_duration:
+        questions.append("What time slot do you need (e.g. 10:00 AM–1:00 PM, or 2:00 PM for 1 hour)?")
+    elif not has_start:
+        questions.append("What start time do you need (e.g. 2:00 PM)?")
+    elif not has_duration:
+        questions.append("How long do you need the room (end time or duration)?")
     if not _answered(facts.get("attendees")):
         questions.append("Number of participants (in person).")
     if not _answered(facts.get("location_preference")):

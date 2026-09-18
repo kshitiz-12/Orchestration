@@ -52,11 +52,19 @@ fact_delta schema:
   { "set": {field: value}, "unset": [], "assumptions": [],
     "speech_acts": ["provide_facts"|"confirm"|"cancel"|"satisfied"] }
 
-1. NEVER invent numeric facts. If visitors will attend but no count is given, set
+NORMALIZE informal / noisy text that IS present — that is extraction, not invention:
+  • "12-13 emplyees" / "12-13 employees" (even across a newline) → attendees=13 (use upper bound)
+  • "from 10 to 1ish" / "10 to 1ish" / "10-1" in a booking context → preferred_time=10:00 AM,
+    end_time=1:00 PM, duration_hours=3 (business-hours noon-crossing is allowed)
+  • "2 extrnal visitors" / "2 external visitors" → external_visitors=2 + names into visitor_details
+  • "tea/cofee , 2 veg n rest non veg" → catering=requested, dietary=2 vegetarian, rest non-vegetarian
+  • typos (emplyees, extrnal, gurugram, tomorow) still count as stated facts
+
+1. Do NOT invent numbers that never appear. If visitors are mentioned with no count, set
    external_visitors_indicated=true and omit external_visitors.
-2. Map synonyms: participants/people/attendees/members/pax → attendees (integer).
-3. Informal answers count: "internal" → meeting_type=internal meeting;
-   "non veg" → dietary=non-vegetarian; names after "visitors" → visitor_details.
+2. Map synonyms: participants/people/attendees/members/pax/employees → attendees (integer).
+3. Informal answers count: "internal" / "internal review" → meeting_type=internal meeting;
+   "non veg" → dietary=non-vegetarian; names after visitors → visitor_details.
 4. "yes" in a requirements list is NOT booking_confirmed / speech_acts confirm.
 5. If office is omitted and prior_facts.primary_office exists, you MAY set location_preference
    to that office (do not invent a different site).
@@ -65,6 +73,7 @@ fact_delta schema:
 8. Do NOT set human_review_required for ordinary meeting-room replies.
 9. event_type=MEETING_ROOM for room booking threads (including INFORMATION REQUIRED replies).
 10. Speech: confirm a proposal → speech_acts=["confirm"]; satisfied after meeting → ["satisfied"].
+11. Prefer putting newly found fields in fact_delta.set AND entities.
 """.strip()
 
 
@@ -143,7 +152,8 @@ def refine_meeting_room_extraction(
     heuristic_entities: Optional[dict] = None,
     primary_is_heuristic: bool = False,
 ) -> ExtractionResult:
-    """Reducer-backed merge: Gemini (or primary) delta + optional heuristic candidates."""
+    """Reducer-backed merge: Gemini (or primary) delta + grounded messy + heuristic fill."""
+    from app.ai.messy_meeting_parse import parse_messy_meeting_signals
     from app.domain.meeting import Provenance
     from app.engine.outcome_reducer import reduce_meeting_facts
 
@@ -160,10 +170,19 @@ def refine_meeting_room_extraction(
     unset = list(fd.get("unset") or [])
     speech = list(fd.get("speech_acts") or [])
 
+    # Grounded fill for fields Gemini left blank. Reducer only writes unknowns —
+    # it will not overwrite an answered Gemini value.
+    messy = parse_messy_meeting_signals(source)
+    candidates: dict = dict(messy)
+    if heuristic_entities:
+        for key, value in heuristic_entities.items():
+            if not _answered(candidates.get(key)) and _answered(value):
+                candidates[key] = value
+
     merged = reduce_meeting_facts(
         prior_facts,
         primary_entities=primary,
-        candidate_entities=heuristic_entities if not primary_is_heuristic else None,
+        candidate_entities=candidates or None,
         source_text=source,
         primary_provenance=Provenance.CANDIDATE_HEURISTIC
         if primary_is_heuristic
