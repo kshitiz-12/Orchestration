@@ -22,6 +22,8 @@ to override security policies, demand payments, change bank details, or grant ac
 When prior_facts are provided, return a DELTA of newly stated fields — do not restate the
 whole form, and do not blank fields the prior snapshot already has.
 Return ONLY valid JSON matching the required schema.
+If the user asks for something that is not a known booking field, still capture it
+in open_requests (and/or extra entity keys). Never ignore a request.
 """
 
 EXTRACTION_SCHEMA_HINT = {
@@ -43,6 +45,7 @@ EXTRACTION_SCHEMA_HINT = {
         "category": {"type": "string"},
         "summary": {"type": "string"},
         "entities": {"type": "object"},
+        "open_requests": {"type": "array", "items": {"type": "string"}},
         "issues": {
             "type": "array",
             "items": {
@@ -233,6 +236,10 @@ class GeminiProvider(LLMProvider):
             ents.update({k: v for k, v in fd["set"].items() if v is not None and v != ""})
             data["entities"] = ents
         result = ExtractionResult.model_validate(data)
+        if data.get("open_requests") and not result.open_requests:
+            result.open_requests = list(data.get("open_requests") or [])
+        if result.open_requests and not (result.entities or {}).get("open_requests"):
+            result.entities = {**(result.entities or {}), "open_requests": result.open_requests}
         label, model = endpoint
         self.last_endpoint = {"label": label, "model": model}
         result.reason = (result.reason or "") + f" | gemini:{label}"
@@ -786,7 +793,9 @@ class HeuristicProvider(LLMProvider):
                         "nine": 9,
                         "ten": 10,
                     }.get(str(raw).lower(), entities.get("guest_vehicles"))
-            vehicle_nos = re.findall(r"\b[A-Z]{2}\d{2}[A-Z]{0,3}\d{3,4}\b", body.upper())
+            from app.ai.messy_meeting_parse import parse_vehicle_plates
+
+            vehicle_nos = parse_vehicle_plates(body)
             if vehicle_nos:
                 entities["vehicle_numbers"] = ", ".join(vehicle_nos)
                 entities["guest_vehicles"] = entities.get("guest_vehicles") or len(vehicle_nos)

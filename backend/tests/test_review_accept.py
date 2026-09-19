@@ -2,7 +2,7 @@
 
 from app.ai.gemini import HeuristicProvider
 from app.ai.meeting_extract import refine_meeting_room_extraction
-from app.ai.messy_meeting_parse import parse_messy_meeting_signals
+from app.ai.messy_meeting_parse import parse_messy_meeting_signals, parse_vehicle_plates
 from app.ai.service import LLMService
 from app.core.enums import ConfidenceRoute
 from app.schemas.ai import ExtractionResult, MissingInformation
@@ -584,6 +584,11 @@ def test_parse_messy_signals_newline_range_and_ish_time():
     assert got.get("end_time")
     assert got.get("duration_hours") == 3.0
     assert got.get("external_visitors") == 2
+    assert parse_vehicle_plates("plate HR26 AB 1234") == ["HR26 AB 1234"]
+    more = parse_messy_meeting_signals("1 more visitor: Priya Nair, Infosys\nparking for 1 car plate HR26 AB 1234")
+    assert more.get("external_visitors_add") == 1
+    assert "Priya" in (more.get("visitor_details_append") or "")
+    assert "HR26" in (more.get("vehicle_numbers") or "")
 
 
 def test_heuristic_messy_mail_headcount_and_bare_time_range():
@@ -655,3 +660,94 @@ def test_gemini_blank_delta_filled_by_grounded_messy_parse():
     assert "attendees" not in missing_fields
     assert "preferred_time" not in missing_fields
     assert "duration" not in missing_fields
+
+
+def test_confirm_reply_persists_spaced_plate_and_extra_visitor():
+    """ROOM-2026-0005 failure: confirm + plate + extra visitor must persist."""
+    body = (
+        "confirm F2-R2.\n\n"
+        "Change vs last note:\n"
+        "- parking needed for 1 car — plate HR26 AB 1234\n"
+        "- 1 more visitor: Priya Nair, Infosys\n"
+        "- catering: 2 veg, rest non-veg (not all non-veg)\n\n"
+        "Rest stays same (25 Oct, 10am–1pm, display + VC)."
+    )
+    prior = {
+        "attendees": 12,
+        "external_visitors": 2,
+        "visitor_details": "Rahul Sharma and Aman Verma",
+        "guest_vehicles": 0,
+        "dietary": "non-vegetarian",
+        "catering": "requested",
+        "date": "25th oct",
+        "preferred_time": "10am",
+        "end_time": "1pm",
+        "duration_hours": 3.0,
+        "meeting_type": "internal meeting",
+        "location_preference": "Corporate Office",
+        "pending_confirmation": True,
+        "proposed_room": {"name": "Meeting Room F2-R2"},
+        "registration_ack_sent": True,
+    }
+    gemini_partial = ExtractionResult(
+        event_type="MEETING_ROOM",
+        summary="User confirmed F2-R2, added HR26 AB 1234 and Priya Nair",
+        entities={"dietary": "2 vegetarian, rest non-vegetarian", "guest_vehicles": 1},
+        fact_delta={"set": {"guest_vehicles": 1}, "speech_acts": ["confirm"]},
+        missing_information=[],
+        confidence=0.9,
+        reason="gemini",
+    )
+    heuristic = HeuristicProvider().extract(subject="Re: [CONFIRM BOOKING] [ROOM-2026-0005]", body=body, prior_facts=prior)
+    refined = refine_meeting_room_extraction(
+        gemini_partial,
+        subject="Re: [CONFIRM BOOKING] [ROOM-2026-0005]",
+        body=body,
+        prior_facts=prior,
+        heuristic_entities=heuristic.entities,
+        primary_is_heuristic=False,
+    )
+    plates = refined.entities.get("vehicle_numbers") or ""
+    assert "HR26" in plates and "1234" in plates
+    assert refined.entities.get("guest_vehicles") == 1
+    assert refined.entities.get("external_visitors") == 3
+    details = refined.entities.get("visitor_details") or ""
+    assert "Priya" in details
+    assert "Rahul" in details
+    assert "vehicle_numbers" not in {m.field for m in (refined.missing_information or [])}
+
+    via_service = LLMService(provider=HeuristicProvider()).extract(
+        subject="Re: [CONFIRM BOOKING] [ROOM-2026-0005]",
+        body=body,
+        prior_facts=prior,
+    )
+    assert "HR26" in (via_service.entities.get("vehicle_numbers") or "")
+    assert via_service.entities.get("external_visitors") == 3
+    assert "Priya" in (via_service.entities.get("visitor_details") or "")
+
+
+def test_unmapped_ask_is_kept_on_open_requests():
+    from app.engine.outcome_reducer import reduce_meeting_facts
+
+    merged = reduce_meeting_facts(
+        {
+            "date": "25th oct",
+            "attendees": 12,
+            "preferred_time": "10am",
+            "end_time": "1pm",
+            "meeting_type": "internal meeting",
+            "location_preference": "Corporate Office",
+        },
+        primary_entities={
+            "open_requests": ["photographer for the review", "extra whiteboard markers"],
+            "floor_change": "move to floor 3 if possible",
+        },
+        source_text="also need a photographer and extra whiteboard markers. try floor 3.",
+    )
+    texts = [
+        (x.get("text") if isinstance(x, dict) else str(x)).lower()
+        for x in (merged.get("open_requests") or [])
+    ]
+    blob = " ".join(texts)
+    assert "photographer" in blob
+    assert "whiteboard" in blob or "floor" in blob

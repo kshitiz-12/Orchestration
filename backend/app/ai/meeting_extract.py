@@ -57,6 +57,10 @@ NORMALIZE informal / noisy text that IS present — that is extraction, not inve
   • "from 10 to 1ish" / "10 to 1ish" / "10-1" in a booking context → preferred_time=10:00 AM,
     end_time=1:00 PM, duration_hours=3 (business-hours noon-crossing is allowed)
   • "2 extrnal visitors" / "2 external visitors" → external_visitors=2 + names into visitor_details
+  • "1 more visitor: Priya Nair, Infosys" → ADD 1 to prior external_visitors (do not replace
+    the prior count with 1) and APPEND the name to visitor_details
+  • "plate HR26 AB 1234" / "HR26AB1234" → vehicle_numbers (keep spaces as written) and
+    guest_vehicles at least 1 if parking/car is mentioned
   • "tea/cofee , 2 veg n rest non veg" → catering=requested, dietary=2 vegetarian, rest non-vegetarian
   • typos (emplyees, extrnal, gurugram, tomorow) still count as stated facts
 
@@ -74,6 +78,10 @@ NORMALIZE informal / noisy text that IS present — that is extraction, not inve
 9. event_type=MEETING_ROOM for room booking threads (including INFORMATION REQUIRED replies).
 10. Speech: confirm a proposal → speech_acts=["confirm"]; satisfied after meeting → ["satisfied"].
 11. Prefer putting newly found fields in fact_delta.set AND entities.
+12. Any user ask that is NOT one of the known meeting fields MUST still be captured.
+    Put those in entities.open_requests (array of short phrases) and/or extra entity
+    keys. Never drop a request because it is "not in the schema" (photographer,
+    extra chairs, signage, translator, floor change, etc.).
 """.strip()
 
 
@@ -167,6 +175,8 @@ def refine_meeting_room_extraction(
     fd = extraction.fact_delta if isinstance(extraction.fact_delta, dict) else {}
     if fd.get("set"):
         primary.update({k: v for k, v in fd["set"].items() if v is not None and v != ""})
+    if extraction.open_requests and not primary.get("open_requests"):
+        primary["open_requests"] = list(extraction.open_requests)
     unset = list(fd.get("unset") or [])
     speech = list(fd.get("speech_acts") or [])
 
@@ -191,6 +201,7 @@ def refine_meeting_room_extraction(
         speech_acts=speech or None,
     )
 
+    merged["raw_reply"] = body[:4000]
     extraction.entities = merged
     gaps = meeting_room_gaps(merged)
     extraction.missing_information = [MissingInformation(**g) for g in gaps]

@@ -160,7 +160,14 @@ def delta_from_entities(
 ) -> FactDelta:
     set_fields: dict[str, Any] = {}
     for key, value in (entities or {}).items():
-        if key in {"field_provenance", "checklist_missing", "orchestration_stage", "issues"}:
+        if key in {
+            "field_provenance",
+            "checklist_missing",
+            "orchestration_stage",
+            "issues",
+            "external_visitors_add",
+            "visitor_details_append",
+        }:
             continue
         if _answered(value) or value is True or value is False:
             set_fields[key] = value
@@ -256,6 +263,18 @@ def reduce_meeting_facts(
         merged.pop("booking_confirmed", None)
     if "satisfied" in speech:
         merged["employee_satisfied"] = True
+
+    from app.ai.messy_meeting_parse import apply_grounded_reply_signals
+    from app.domain.open_requests import merge_open_requests
+
+    merged = apply_grounded_reply_signals(
+        merged, prior_facts=prior_facts, source_text=source_text
+    )
+    incoming_for_open = {}
+    for bag in (primary_entities, candidate_entities):
+        if bag:
+            incoming_for_open.update(bag)
+    merged["open_requests"] = merge_open_requests(merged, incoming_for_open)
 
     state = state_from_facts(merged)
     out = facts_from_state(state)

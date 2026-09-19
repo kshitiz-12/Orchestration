@@ -116,39 +116,156 @@ def parse_messy_meeting_signals(text: str) -> dict[str, Any]:
             out["end_time"] = end_label
             out["duration_hours"] = float(max(0.5, duration))
 
-    # "2 extrnal visitors" / typo-tolerant external
-    m_ext = re.search(
-        r"(\d+)\s*(?:ext(?:er)?nal|external|extrnal|client)\s*(?:visitors?|guests?|clients?)?",
+    # Additive: "1 more visitor: Priya Nair, Infosys" — do not treat as absolute count=1
+    m_more = re.search(
+        r"(\d+)\s+more\s+(?:external\s+)?visitors?\s*[:\-–]?\s*"
+        r"([A-Za-z][A-Za-z0-9\s,.'&()-]{1,80})?",
         raw,
         re.I,
     )
-    if not m_ext:
-        m_ext = re.search(r"(\d+)\s*(?:visitors?|guests?)\b", raw, re.I)
-    if m_ext:
-        out["external_visitors"] = int(m_ext.group(1))
-        out["external_visitors_indicated"] = True
-        out["special_access"] = "required"
-    elif re.search(r"\b(?:ext(?:er)?nal|extrnal|external)\s+visitors?\b", lower):
-        out["external_visitors_indicated"] = True
-        out["special_access"] = "required"
-
-    # Visitor names after "visitors ... - Name & Name"
-    m_names = re.search(
-        r"(?:ext(?:er)?nal|extrnal|external)?\s*visitors?\s+"
-        r"(?:coming\s+also|will\s+(?:attend|join)|attend(?:ing)?|join(?:ing)?)\s*[-–:]?\s*"
-        r"([A-Za-z][A-Za-z\s,.&'-]{2,120})",
-        raw,
-        re.I,
-    )
-    if m_names:
-        names = m_names.group(1).strip(" ,.")
-        names = re.split(
-            r"\n|pls\b|please\b|tea\b|coffee\b|catering\b|display\b|no guest\b",
-            names,
+    if m_more:
+        out["external_visitors_add"] = int(m_more.group(1))
+        extra_name = (m_more.group(2) or "").strip(" ,.")
+        extra_name = re.split(
+            r"\n|catering\b|parking\b|tea\b|coffee\b|display\b|rest stays\b|confirm\b",
+            extra_name,
             maxsplit=1,
             flags=re.I,
-        )[0].strip(" ,.")
-        if names and len(names) > 2:
-            out["visitor_details"] = names[:500]
+        )[0].strip(" ,.-")
+        if extra_name and len(extra_name) > 1:
+            out["visitor_details_append"] = extra_name[:200]
 
+    # "2 extrnal visitors" / typo-tolerant external (absolute, not "N more")
+    if not m_more:
+        m_ext = re.search(
+            r"(\d+)\s*(?:ext(?:er)?nal|external|extrnal|client)\s*(?:visitors?|guests?|clients?)?",
+            raw,
+            re.I,
+        )
+        if not m_ext:
+            m_ext = re.search(r"(\d+)\s*(?:visitors?|guests?)\b", raw, re.I)
+        if m_ext:
+            out["external_visitors"] = int(m_ext.group(1))
+            out["external_visitors_indicated"] = True
+            out["special_access"] = "required"
+        elif re.search(r"\b(?:ext(?:er)?nal|extrnal|external)\s+visitors?\b", lower):
+            out["external_visitors_indicated"] = True
+            out["special_access"] = "required"
+
+        # Visitor names after "visitors ... - Name & Name"
+        m_names = re.search(
+            r"(?:ext(?:er)?nal|extrnal|external)?\s*visitors?\s+"
+            r"(?:coming\s+also|will\s+(?:attend|join)|attend(?:ing)?|join(?:ing)?)\s*[-–:]?\s*"
+            r"([A-Za-z][A-Za-z\s,.&'-]{2,120})",
+            raw,
+            re.I,
+        )
+        if m_names:
+            names = m_names.group(1).strip(" ,.")
+            names = re.split(
+                r"\n|pls\b|please\b|tea\b|coffee\b|catering\b|display\b|no guest\b",
+                names,
+                maxsplit=1,
+                flags=re.I,
+            )[0].strip(" ,.")
+            if names and len(names) > 2:
+                out["visitor_details"] = names[:500]
+
+    # Parking count: "parking needed for 1 car"
+    m_park = re.search(
+        r"parking\s+(?:needed\s+)?(?:for\s+)?(\d+)\s+(?:guest\s+)?(?:cars?|vehicles?)",
+        raw,
+        re.I,
+    )
+    if not m_park:
+        m_park = re.search(
+            r"(\d+)\s+(?:guest\s+)?(?:cars?|vehicles?)\b",
+            raw,
+            re.I,
+        )
+    if m_park:
+        out["guest_vehicles"] = int(m_park.group(1))
+
+    plates = parse_vehicle_plates(raw)
+    if plates:
+        out["vehicle_numbers"] = ", ".join(plates)
+        out["guest_vehicles"] = out.get("guest_vehicles") or len(plates)
+
+    return out
+
+
+def parse_vehicle_plates(text: str) -> list[str]:
+    """Indian-style plates with optional spaces/hyphens: HR26 AB 1234, HR26AB1234."""
+    if not text:
+        return []
+    found = re.findall(
+        r"\b([A-Z]{2}\s*-?\s*\d{1,2}\s*-?\s*[A-Z]{1,3}\s*-?\s*\d{3,4})\b",
+        text.upper(),
+    )
+    out: list[str] = []
+    for raw in found:
+        norm = re.sub(r"[\s-]+", " ", raw).strip()
+        if norm and norm not in out:
+            out.append(norm)
+    return out
+
+
+_TRANSIENT_SIGNAL_KEYS = frozenset({"external_visitors_add", "visitor_details_append"})
+
+
+def apply_grounded_reply_signals(
+    merged: dict[str, Any],
+    *,
+    prior_facts: dict[str, Any] | None,
+    source_text: str,
+    signals: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """
+    Persist plate / additive visitor updates that extractors often leave in the
+    summary or treat as a replacement count of 1.
+    """
+    out = dict(merged or {})
+    prior = prior_facts or {}
+    sig = dict(signals or parse_messy_meeting_signals(source_text))
+
+    plates = sig.get("vehicle_numbers")
+    if plates:
+        out["vehicle_numbers"] = plates
+        try:
+            prior_cars = int(prior.get("guest_vehicles") or 0)
+        except (TypeError, ValueError):
+            prior_cars = 0
+        try:
+            cur_cars = int(out.get("guest_vehicles") or 0)
+        except (TypeError, ValueError):
+            cur_cars = 0
+        if cur_cars <= 0:
+            out["guest_vehicles"] = max(prior_cars, len(str(plates).split(",")))
+
+    add = sig.get("external_visitors_add")
+    if add:
+        try:
+            prior_n = int(prior.get("external_visitors") or 0)
+        except (TypeError, ValueError):
+            prior_n = 0
+        expected = prior_n + int(add)
+        try:
+            current = int(out.get("external_visitors") or 0)
+        except (TypeError, ValueError):
+            current = 0
+        if current < expected:
+            out["external_visitors"] = expected
+        out["external_visitors_indicated"] = True
+        out["special_access"] = out.get("special_access") or "required"
+
+    extra_name = sig.get("visitor_details_append")
+    if extra_name:
+        base = str(prior.get("visitor_details") or out.get("visitor_details") or "").strip()
+        if extra_name.lower() not in base.lower():
+            out["visitor_details"] = f"{base}; {extra_name}".strip("; ") if base else extra_name
+        elif not str(out.get("visitor_details") or "").strip():
+            out["visitor_details"] = base
+
+    for key in _TRANSIENT_SIGNAL_KEYS:
+        out.pop(key, None)
     return out

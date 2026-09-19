@@ -436,6 +436,14 @@ def summarize_meeting_requirements(facts: dict[str, Any]) -> list[str]:
     lines.append(f"Confidentiality: {facts.get('confidentiality') or MEETING_ROOM_DEFAULTS['confidentiality']}")
     if guest_vehicle_count(facts):
         lines.append(f"Guest vehicles: {guest_vehicle_count(facts)}")
+        if facts.get("vehicle_numbers"):
+            lines.append(f"Vehicle number(s): {facts['vehicle_numbers']}")
+    if facts.get("visitor_details"):
+        lines.append(f"Visitor names: {facts['visitor_details']}")
+    for item in facts.get("open_requests") or []:
+        text = item.get("text") if isinstance(item, dict) else str(item)
+        if text:
+            lines.append(f"Also requested: {text}")
     defaults = facts.get("defaults_applied") or []
     if defaults:
         pretty = ", ".join(str(d).replace("_", " ") for d in defaults)

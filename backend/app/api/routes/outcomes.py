@@ -25,6 +25,7 @@ from app.schemas.api import (
     TaskStatusUpdate,
 )
 from app.models.org import utcnow
+from app.services.operator_inbox import OPEN_OUTCOME_STATUSES, inbox_kpi_counts
 
 router = APIRouter(tags=["outcomes"])
 
@@ -38,7 +39,7 @@ def dashboard_kpis(session: SessionDep, tenant_id: TenantDep, _user: UserDep):
     return {
         "outcomes_active": count(
             Outcome,
-            Outcome.status.in_(["ACTIVE", "AT_RISK", "BLOCKED", "PARTIALLY_READY", "VALIDATING"]),  # type: ignore
+            Outcome.status.in_(list(OPEN_OUTCOME_STATUSES)),  # type: ignore
         ),
         "at_risk": count(Outcome, Outcome.status == "AT_RISK"),
         "overdue_tasks": session.exec(
@@ -50,8 +51,7 @@ def dashboard_kpis(session: SessionDep, tenant_id: TenantDep, _user: UserDep):
                 Task.status.notin_(["CLOSED", "CANCELLED", "VERIFIED"]),  # type: ignore
             )
         ).one(),
-        "pending_approvals": count(Approval, Approval.decision == "PENDING"),
-        "human_reviews": count(HumanReviewItem, HumanReviewItem.status == "PENDING"),
+        **inbox_kpi_counts(session, tenant_id),
         **_meeting_wait_kpis(session, tenant_id),
         "failures": session.exec(
             select(func.count())
@@ -74,27 +74,23 @@ def _meeting_wait_kpis(session: Session, tenant_id: str) -> dict:
         select(Outcome).where(
             Outcome.tenant_id == tenant_id,
             Outcome.template_code == "MEETING_ROOM",
-            Outcome.status.in_(  # type: ignore
-                ["ACTIVE", "AT_RISK", "BLOCKED", "PARTIALLY_READY", "VALIDATING"]
-            ),
+            Outcome.status.in_(list(OPEN_OUTCOME_STATUSES)),  # type: ignore
         )
     ).all()
-    pending_confirm = 0
     awaiting_requirements = 0
     no_resource = 0
     for outcome in rows:
         facts = outcome.facts or {}
         stage = str(facts.get("orchestration_stage") or "").upper()
         if facts.get("pending_confirmation") and facts.get("proposed_room") and not facts.get("booked_room"):
-            pending_confirm += 1
-        elif stage == "AWAITING_REQUIREMENTS" or (
+            continue
+        if stage == "AWAITING_REQUIREMENTS" or (
             facts.get("checklist_missing") and not facts.get("booked_room") and not facts.get("proposed_room")
         ):
             awaiting_requirements += 1
         elif stage == "NO_RESOURCE":
             no_resource += 1
     return {
-        "pending_confirmations": pending_confirm,
         "awaiting_requirements": awaiting_requirements,
         "no_resource": no_resource,
     }

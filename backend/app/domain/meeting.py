@@ -121,6 +121,9 @@ PLATFORM_KEYS = (
     "modules_active",
     "no_resource_alternatives",
     "sla_at_risk",
+    "open_requests",
+    "post_booking_requests",
+    "raw_reply",
 )
 
 
@@ -506,11 +509,25 @@ def build_field_contract(facts: dict[str, Any] | None) -> dict[str, Any]:
                 "status": "blocking",
             }
 
+    open_requests = list(facts.get("open_requests") or [])
+    for item in open_requests:
+        text = item.get("text") if isinstance(item, dict) else str(item)
+        if text:
+            understood.append(
+                {
+                    "field": "open_request",
+                    "value": text,
+                    "provenance": Provenance.EXTRACTED.value,
+                    "status": "stated",
+                }
+            )
+
     return {
         "understood": understood,
         "assumed": assumed,
         "missing": missing,
         "fields": fields,
+        "open_requests": open_requests,
         "complete": len(missing) == 0,
         "stage": state.derive_stage(facts).value,
     }

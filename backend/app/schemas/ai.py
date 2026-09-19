@@ -64,6 +64,10 @@ class ExtractionResult(BaseModel):
         default_factory=dict,
         description="Interpreter delta: {set, unset, assumptions, speech_acts}",
     )
+    open_requests: list[Any] = Field(
+        default_factory=list,
+        description="User asks that are not known booking fields — never drop these.",
+    )
 
     @field_validator("recommended_priority", mode="before")
     @classmethod

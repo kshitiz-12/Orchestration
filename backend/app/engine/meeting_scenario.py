@@ -347,12 +347,12 @@ class ClientMeetingOrchestrator:
         ensure_meeting_room_resources(self.session, self.tenant_id)
         policy = load_meeting_policy(self.session, self.tenant_id)
         ensure_meeting_policy_rule(self.session, self.tenant_id)
+        prior_snapshot = dict(outcome.facts or {})
         text_blob = ""
         if extraction:
-            text_blob = f"{extraction.summary or ''} {extraction.reason or ''}"
-            raw = (extraction.entities or {}).get("raw_reply")
-            if raw:
-                text_blob = f"{text_blob} {raw}"
+            raw = (extraction.entities or {}).get("raw_reply") or ""
+            # Prefer the actual mail — summary-only reduce drops plates / extra asks
+            text_blob = f"{raw}\n{extraction.summary or ''} {extraction.reason or ''}".strip()
 
         incoming = dict(facts or {})
         if extraction and extraction.entities:
@@ -416,7 +416,7 @@ class ClientMeetingOrchestrator:
             return
 
         if merged.get("booked_room") and (merged.get("operational_status") or "") != "CLOSED":
-            self._handle_post_booking(outcome, merged, extraction)
+            self._handle_post_booking(outcome, merged, extraction, prior=prior_snapshot)
             return
 
         confirmed = bool(
@@ -583,24 +583,37 @@ class ClientMeetingOrchestrator:
         self._propose(outcome, room, merged, updated=False)
         self._maybe_auto_book_low_risk(outcome)
 
-    def _handle_post_booking(self, outcome: Outcome, merged: dict, extraction: Optional[ExtractionResult]) -> None:
-        incoming = (extraction.entities if extraction else {}) or {}
-        deltas = {
-            k: incoming[k]
-            for k in (
-                "catering",
-                "hybrid_av",
-                "special_access",
-                "location_preference",
-                "meeting_type",
-                "dietary",
-                "guest_vehicles",
-                "external_visitors",
-            )
-            if k in incoming
-            and incoming.get(k) not in (None, "")
-            and incoming.get(k) != (merged.get("booked_room") or {}).get(k)
-        }
+    def _handle_post_booking(
+        self,
+        outcome: Outcome,
+        merged: dict,
+        extraction: Optional[ExtractionResult],
+        prior: Optional[dict] = None,
+    ) -> None:
+        prior = prior or {}
+        watch = (
+            "catering",
+            "hybrid_av",
+            "special_access",
+            "location_preference",
+            "meeting_type",
+            "dietary",
+            "guest_vehicles",
+            "vehicle_numbers",
+            "external_visitors",
+            "visitor_details",
+        )
+        deltas = {}
+        for key in watch:
+            new = merged.get(key)
+            if new in (None, ""):
+                continue
+            if new != prior.get(key):
+                deltas[key] = new
+        prior_open = prior.get("open_requests") or []
+        now_open = merged.get("open_requests") or []
+        if len(now_open) > len(prior_open):
+            deltas["open_requests"] = now_open[len(prior_open) :]
         merged["orchestration_stage"] = MeetingStage.MONITORING.value
         if deltas:
             history = list(merged.get("post_booking_requests") or [])

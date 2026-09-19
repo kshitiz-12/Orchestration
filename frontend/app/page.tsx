@@ -48,25 +48,23 @@ export default function HomePage() {
   const waitingReviews = Number(kpis?.human_reviews || 0) + Number(kpis?.pending_approvals || 0);
   const pendingConfirm = Number(kpis?.pending_confirmations || 0);
   const awaitingReqs = Number(kpis?.awaiting_requirements || 0);
-  const waitingYou = waitingReviews + pendingConfirm;
+  const waitingYou =
+    kpis?.waiting_on_you != null
+      ? Number(kpis.waiting_on_you)
+      : waitingReviews + pendingConfirm;
   const late = Number(kpis?.overdue_tasks || 0);
   const problems = Number(kpis?.failures || 0);
   const openCases = Number(kpis?.outcomes_active || 0);
   const needsAttention = Number(kpis?.at_risk || 0) + awaitingReqs + Number(kpis?.no_resource || 0);
 
   const nextSteps: { title: string; detail: string; href: string; tone: "warn" | "danger" | "ok" | "neutral" }[] = [];
-  if (pendingConfirm > 0) {
+  if (waitingYou > 0) {
+    const bits: string[] = [];
+    if (pendingConfirm > 0) bits.push(`${pendingConfirm} room confirm`);
+    if (waitingReviews > 0) bits.push(`${waitingReviews} review/approval`);
     nextSteps.push({
-      title: `${pendingConfirm} room proposal${pendingConfirm === 1 ? "" : "s"} awaiting confirm`,
-      detail: "Requester (or you) needs to confirm the proposed room.",
-      href: "/outcomes",
-      tone: "warn",
-    });
-  }
-  if (waitingReviews > 0) {
-    nextSteps.push({
-      title: `${waitingReviews} item${waitingReviews === 1 ? "" : "s"} waiting for your decision`,
-      detail: "Open these first — the system paused until someone confirms.",
+      title: `${waitingYou} item${waitingYou === 1 ? "" : "s"} waiting for your decision`,
+      detail: bits.length ? bits.join(" · ") : "Open these first — the system paused until someone decides.",
       href: "/reviews",
       tone: "warn",
     });

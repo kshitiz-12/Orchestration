@@ -13,6 +13,7 @@ from app.schemas.ai import ExtractionResult, MissingInformation
 from app.schemas.api import HumanReviewDecision
 from app.services.communication import CommunicationService
 from app.services.context import ContextRetrievalService
+from app.services.operator_inbox import list_operator_inbox
 from app.services.thread_facts import meeting_room_gaps, merge_thread_prior_facts
 
 router = APIRouter(prefix="/reviews", tags=["human-review"])
@@ -20,17 +21,8 @@ router = APIRouter(prefix="/reviews", tags=["human-review"])
 
 @router.get("")
 def list_reviews(session: SessionDep, tenant_id: TenantDep, _user: UserDep, status: str = "PENDING"):
-    rows = session.exec(
-        select(HumanReviewItem)
-        .where(HumanReviewItem.tenant_id == tenant_id, HumanReviewItem.status == status)
-        .order_by(HumanReviewItem.created_at.desc())  # type: ignore
-    ).all()
-    enriched = []
-    for r in rows:
-        event = session.get(RawEmailEvent, r.event_id)
-        decision = session.get(AIDecision, r.ai_decision_id) if r.ai_decision_id else None
-        enriched.append({"review": r, "email": event, "ai_decision": decision})
-    return enriched
+    """Unified inbox: human reviews + pending approvals + room proposals to confirm."""
+    return list_operator_inbox(session, tenant_id, status=status)
 
 
 def _continue_after_accept(
