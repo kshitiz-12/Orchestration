@@ -40,6 +40,12 @@ _PRESERVE_KEYS = {
     "field_status",
     "field_contract",
     "outbound_suppressions",
+    "admin_ops_notices",
+    "admin_ops_last",
+    "no_resource_alternatives",
+    "no_resource_fingerprint",
+    "no_resource_choice",
+    "no_resource_diagnosis",
 }
 
 

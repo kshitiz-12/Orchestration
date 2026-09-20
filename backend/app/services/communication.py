@@ -29,7 +29,7 @@ def humanize_email_local(email: str) -> str:
     # Avoid ugly single-token handles like "anonymousxo" / "anonymous"
     joined = "".join(parts).lower()
     if joined.startswith("anonymous") or (len(parts) == 1 and len(parts[0]) >= 11):
-        return "there"
+        return "team"
     return " ".join(p[:1].upper() + p[1:].lower() for p in parts)
 
 
@@ -99,7 +99,7 @@ def resolve_requester_name(
         return from_name
     if addr:
         return humanize_email_local(addr)
-    return "there"
+    return "team"
 
 
 class CommunicationService:
@@ -318,9 +318,39 @@ class CommunicationService:
         body: str,
         recipients: list[str],
         action_label: Optional[str] = None,
-    ) -> Communication:
+        subject_hint: Optional[str] = None,
+        suppress_fingerprint: Optional[str] = None,
+    ) -> Communication | None:
+        from app.services.no_resource_flow import short_case_subject
+
         label = action_label or communication_type.replace("_", " ")
-        subject = f"[{label}] [{outcome.case_reference}] {outcome.title}"
+        # Suppress identical stage mail when fingerprint unchanged
+        if suppress_fingerprint:
+            facts = dict(outcome.facts or {})
+            last = facts.get("last_outbound") or {}
+            if (
+                isinstance(last, dict)
+                and last.get("status") == "SENT"
+                and last.get("suppress_fingerprint") == suppress_fingerprint
+                and last.get("communication_type") == communication_type
+                and (last.get("action_label") or "") == label
+            ):
+                self.record_suppressed(
+                    outcome=outcome,
+                    reason="duplicate_stage_fingerprint",
+                    detail={
+                        "fingerprint": suppress_fingerprint,
+                        "action_label": label,
+                        "communication_type": communication_type,
+                    },
+                )
+                return None
+        subject = short_case_subject(
+            case_reference=outcome.case_reference or "",
+            action_label=label,
+            summary=subject_hint or (outcome.summary or ""),
+            title=outcome.title or "",
+        )
         thread_id = None
         in_reply_to = None
         event_id = None
@@ -337,7 +367,8 @@ class CommunicationService:
                 event_id = event.event_id
                 in_reply_to = event.provider_message_id or event.gmail_message_id
                 thread_id = thread_id or event.provider_conversation_id or event.gmail_thread_id
-        return self.send(
+        key_suffix = suppress_fingerprint or event_id or hash(body)
+        comm = self.send(
             communication_type=communication_type,
             recipients=recipients,
             subject=subject,
@@ -346,8 +377,24 @@ class CommunicationService:
             outcome_id=outcome.outcome_id,
             thread_id=thread_id,
             in_reply_to_message_id=in_reply_to,
-            idempotency_key=f"update:{outcome.outcome_id}:{communication_type}:{event_id or hash(body)}",
+            idempotency_key=f"update:{outcome.outcome_id}:{communication_type}:{key_suffix}",
         )
+        if suppress_fingerprint and outcome.outcome_id:
+            facts = dict(outcome.facts or {})
+            facts["last_outbound"] = {
+                **(facts.get("last_outbound") or {}),
+                "status": "SENT",
+                "communication_type": communication_type,
+                "action_label": label,
+                "suppress_fingerprint": suppress_fingerprint,
+                "message_id": comm.message_id,
+                "subject": subject,
+                "delivered": True,
+            }
+            outcome.facts = facts
+            self.session.add(outcome)
+            flag_modified(outcome, "facts")
+        return comm
 
     def record_suppressed(
         self,

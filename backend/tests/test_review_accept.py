@@ -415,7 +415,7 @@ def test_display_name_from_from_header():
 
     assert display_name_from_headers({"From": '"Kapil Mantri" <kapil@example.com>'}) == "Kapil Mantri"
     assert display_name_from_headers({"from": "Aditya Test <a@example.com>"}) == "Aditya Test"
-    assert humanize_email_local("anonymousxo@gmail.com") == "there"
+    assert humanize_email_local("anonymousxo@gmail.com") == "team"
 
 
 def test_kapil_style_golden_email_remaining_only_ask():

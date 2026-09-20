@@ -228,29 +228,48 @@ def parse_messy_meeting_signals(text: str) -> dict[str, Any]:
         if m_ext:
             out["external_visitors"] = int(m_ext.group(1))
             out["external_visitors_indicated"] = True
-            out["special_access"] = "required"
         elif re.search(r"\b(?:ext(?:er)?nal|extrnal|external)\s+visitors?\b", lower):
             out["external_visitors_indicated"] = True
-            out["special_access"] = "required"
 
-        # Visitor names after "visitors ... - Name & Name"
+        # Visitor names — tolerate em dash / "will join — Name and Name (Org)"
         m_names = re.search(
             r"(?:ext(?:er)?nal|extrnal|external)?\s*visitors?\s+"
-            r"(?:coming\s+also|will\s+(?:attend|join)|attend(?:ing)?|join(?:ing)?)\s*[-–:]?\s*"
-            r"([A-Za-z][A-Za-z\s,.&'-]{2,120})",
+            r"(?:coming\s+also|will\s+(?:attend|join)|attend(?:ing)?|join(?:ing)?)\s*[-–—:]?\s*"
+            r"([A-Za-z][A-Za-z0-9\s,.'&()-]{2,160})",
             raw,
             re.I,
         )
+        if not m_names:
+            m_names = re.search(
+                r"(?:ext(?:er)?nal|extrnal|external)\s+visitors?\s+"
+                r"(?:will\s+)?(?:join|attend)\s*[-–—,]?\s*"
+                r"([A-Za-z][A-Za-z0-9\s,.'&()-]{2,160})",
+                raw,
+                re.I,
+            )
         if m_names:
             names = m_names.group(1).strip(" ,.")
             names = re.split(
-                r"\n|pls\b|please\b|tea\b|coffee\b|catering\b|display\b|no guest\b",
+                r"\n|pls\b|please\b|tea\b|coffee\b|catering\b|display\b|no guest\b|"
+                r"visitor parking\b|plate\b|also need\b",
                 names,
                 maxsplit=1,
                 flags=re.I,
             )[0].strip(" ,.")
-            if names and len(names) > 2:
+            # Drop trailing junk like "and" alone
+            names = re.sub(r"\s+and\s*$", "", names, flags=re.I).strip(" ,.")
+            if names and len(names) > 2 and not re.fullmatch(r"\d+", names):
                 out["visitor_details"] = names[:500]
+
+    # Explicit special access / badge / security only — not bare "required" from visitors
+    if re.search(
+        r"\b(special\s+access|badge\s+access|security\s+clearance|escort\s+required|"
+        r"nda\s+required|restricted\s+(?:floor|area|access))\b",
+        lower,
+    ):
+        out["special_access"] = "required"
+    elif re.search(r"\bno\s+special\s+access\b", lower):
+        out["special_access"] = "none"
 
     # Parking count: "parking needed for 1 car"
     m_park = re.search(
@@ -347,7 +366,7 @@ def apply_grounded_reply_signals(
         if current < expected:
             out["external_visitors"] = expected
         out["external_visitors_indicated"] = True
-        out["special_access"] = out.get("special_access") or "required"
+        # Do not invent bare special_access=required from visitor count alone
 
     extra_name = sig.get("visitor_details_append")
     if extra_name:

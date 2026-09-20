@@ -667,19 +667,24 @@ class HeuristicProvider(LLMProvider):
                 m_ext = re.search(r"(\d+)\s*(?:client|external|visitor|guests?)", text, re.I)
             if m_ext:
                 entities["external_visitors"] = int(m_ext.group(1))
-                entities["special_access"] = "required"
                 entities["external_visitors_indicated"] = True
             elif re.search(r"\byes\b.*\b(external\s+visitors?|visitors?)\b", text) or re.search(
                 r"\b(external\s+visitors?|visitors?)\b.*\b(will\s+attend|attending|yes)\b",
                 text,
             ):
                 entities["external_visitors_indicated"] = True
-                entities["special_access"] = "required"
             elif any(k in text for k in ["client representatives", "external visitors", "visitor names"]) or re.search(
                 r"\b(?:ext(?:er)?nal|extrnal)\s+visitors?\b", text
             ):
-                entities["special_access"] = "required"
                 entities["external_visitors_indicated"] = True
+
+            if re.search(
+                r"\b(special\s+access|badge\s+access|security\s+clearance|escort\s+required)\b",
+                text,
+            ):
+                entities["special_access"] = "required"
+            elif re.search(r"\bno\s+special\s+access\b", text):
+                entities["special_access"] = "none"
 
             # Merge shared messy-mail grounded signals (ranges, bare times, typo visitors)
             from app.ai.messy_meeting_parse import parse_messy_meeting_signals
@@ -693,8 +698,9 @@ class HeuristicProvider(LLMProvider):
 
             # Names after visitor mention: "2 external visitors will attend - Rahul and Aman"
             m_names = re.search(
-                r"(?:external\s+)?visitors?\s+(?:will\s+)?(?:attend(?:ing)?|join(?:ing)?)\s*[-–:]?\s*"
-                r"([A-Za-z][A-Za-z\s,.&'-]{1,200})",
+                r"(?:external\s+|ext(?:er)?nal\s+|extrnal\s+)?visitors?\s+"
+                r"(?:will\s+)?(?:attend(?:ing)?|join(?:ing)?)\s*[-–—:]?\s*"
+                r"([A-Za-z][A-Za-z0-9\s,.'&()-]{1,200})",
                 body,
                 re.I,
             )

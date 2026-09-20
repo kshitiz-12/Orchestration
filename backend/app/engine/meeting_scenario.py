@@ -22,6 +22,7 @@ from app.policy.meeting_policy import (
 )
 from app.schemas.ai import ExtractionResult
 from app.services.communication import CommunicationService, resolve_requester_name
+from app.services.admin_ops import AdminOpsNotifier
 from app.services.meeting_room import (
     apply_internal_vc_policy,
     apply_meeting_room_defaults,
@@ -39,6 +40,13 @@ from app.services.meeting_room import (
     requirement_fingerprint,
     score_meeting_room,
     requirement_email_sections,
+)
+from app.services.no_resource_flow import (
+    detect_no_resource_choice,
+    diagnose_no_resource,
+    format_outbound_greeting,
+    open_request_delta,
+    search_relevant_changed,
 )
 
 logger = get_logger(__name__)
@@ -336,6 +344,7 @@ class ClientMeetingOrchestrator:
         self.tenant_id = tenant_id
         self.engine = engine
         self.comms = comms
+        self.admin_ops = AdminOpsNotifier(session, tenant_id, comms)
 
     def _save_facts(self, outcome: Outcome, facts: dict) -> None:
         """Persist a new facts dict so JSON mutations are not dropped on commit."""
@@ -384,6 +393,11 @@ class ClientMeetingOrchestrator:
             # consolidated ask from the pipeline; complete cases get propose/book/no-fit.
             merged["registration_ack_sent"] = True
             merged["registration_ack_deferred"] = True
+            self._save_facts(outcome, merged)
+            # First touch: admin FYI for every new case (visibility, not approval)
+            if not (prior_snapshot.get("admin_ops_notices") or prior_snapshot.get("registration_ack_sent")):
+                self.admin_ops.fyi_case_opened(outcome, facts=merged)
+                merged = dict(outcome.facts or merged)
 
         if not merged.get("primary_office"):
             merged["primary_office"] = "Corporate Office, Gurugram"
@@ -401,6 +415,9 @@ class ClientMeetingOrchestrator:
                 + (f"–{end}" if end else "")
                 + (f" ({duration}h)" if duration else "")
             )
+            # Keep mail subjects operational — not Gemini narrative titles
+            if not (outcome.title or "").startswith("Meeting for "):
+                outcome.title = outcome.summary[:200]
 
         if merged.get("booked_room") and (
             merged.get("employee_satisfied")
@@ -441,6 +458,20 @@ class ClientMeetingOrchestrator:
             merged["last_action"] = "await_requirements"
             self._save_facts(outcome, merged)
             return
+
+        # Already in NO_RESOURCE: act on choice / extras / fact change — don't blindly
+        # re-mail the same options menu.
+        prior_stage = (prior_snapshot.get("orchestration_stage") or "").upper()
+        if prior_stage == MeetingStage.NO_RESOURCE.value:
+            handled = self._handle_no_resource_reply(
+                outcome,
+                merged,
+                prior=prior_snapshot,
+                text_blob=text_blob,
+                policy=policy,
+            )
+            if handled:
+                return
 
         merged["checklist_missing"] = []
         merged = apply_meeting_room_defaults(merged)
@@ -483,7 +514,7 @@ class ClientMeetingOrchestrator:
                     outcome=outcome,
                     communication_type="ACTION_REQUIRED",
                     body=(
-                        f"Dear {name},\n\n"
+                        f"{format_outbound_greeting(name)}\n\n"
                         f"We still have {room_name} proposed for this request.\n\n"
                         "Reply \"confirm\" to lock it in, or tell us what to change "
                         "(time, headcount, equipment).\n\n"
@@ -496,76 +527,7 @@ class ClientMeetingOrchestrator:
 
         room = self._pick_room(merged)
         if not room:
-            max_cap = self._max_room_capacity()
-            # Collect zero-score rooms for near-miss alternatives
-            all_rooms = self.session.exec(
-                select(Resource).where(
-                    Resource.tenant_id == self.tenant_id,
-                    Resource.type == "MEETING_ROOM",
-                )
-            ).all()
-            zero_scores = []
-            for r in all_rooms:
-                s, reasons = score_meeting_room(r, merged)
-                if s <= 0:
-                    zero_scores.append({"name": r.name, "score": s, "reasons": reasons})
-            alternatives = build_no_resource_alternatives(
-                merged,
-                max_capacity=max_cap,
-                room_scores=zero_scores,
-                policy=policy,
-            )
-            merged["needs_ops"] = True
-            merged["auto_book_skipped"] = "no_room_available"
-            merged["orchestration_stage"] = MeetingStage.NO_RESOURCE.value
-            merged["outbound_required"] = "no_resource"
-            merged["last_action"] = "no_resource"
-            merged["inventory_max_capacity"] = max_cap
-            merged["no_resource_alternatives"] = alternatives
-            merged = append_decision_trace(
-                merged,
-                {
-                    "at": utcnow().isoformat(),
-                    "kind": "no_resource",
-                    "policy_version": policy.version,
-                    "alternatives": [a["code"] for a in alternatives],
-                    "max_capacity": max_cap,
-                    "requested_attendees": merged.get("attendees"),
-                },
-            )
-            self._save_facts(outcome, merged)
-            self.engine.create_exception(
-                outcome=outcome,
-                exception_type="NO_MEETING_ROOM",
-                title="No suitable meeting room available",
-                description=(
-                    f"No available room met capacity/equipment for {merged.get('attendees')} attendees."
-                ),
-                options=[
-                    {"code": a["code"], "label": a["label"]} for a in alternatives if a.get("code") != "REVIEW_NEAR_MISS"
-                ],
-                severity="MEDIUM",
-                owner_role="OPERATOR",
-            )
-            if outcome.requester_email:
-                name = resolve_requester_name(self.session, outcome=outcome)
-                alt_lines = "\n".join(f"- {a['label']}" for a in alternatives if a.get("code") != "REVIEW_NEAR_MISS")
-                self.comms.send_case_update(
-                    outcome=outcome,
-                    communication_type="INFORMATION_ONLY",
-                    body=(
-                        f"Dear {name},\n\n"
-                        "We could not find a room that fits this request "
-                        f"({merged.get('attendees')} people"
-                        f"{', display/VC as needed' if merged.get('hybrid_av') or merged.get('presentation_display') else ''}"
-                        f"; largest room holds {merged.get('inventory_max_capacity') or 'fewer'}).\n\n"
-                        "Please reply with one of these options:\n"
-                        f"{alt_lines}\n\n"
-                        f"Case: {outcome.case_reference}"
-                    ),
-                    recipients=[outcome.requester_email],
-                    action_label="NO ROOM AVAILABLE",
-                )
+            self._enter_no_resource(outcome, merged, prior=prior_snapshot, policy=policy)
             return
 
         merged["orchestration_stage"] = MeetingStage.PROPOSED.value
@@ -582,6 +544,295 @@ class ClientMeetingOrchestrator:
         )
         self._propose(outcome, room, merged, updated=False)
         self._maybe_auto_book_low_risk(outcome)
+
+    def _handle_no_resource_reply(
+        self,
+        outcome: Outcome,
+        merged: dict,
+        *,
+        prior: dict,
+        text_blob: str,
+        policy: Any,
+    ) -> bool:
+        """Return True if the reply was fully handled (do not re-search)."""
+        alts = list(prior.get("no_resource_alternatives") or merged.get("no_resource_alternatives") or [])
+        choice = detect_no_resource_choice(text_blob, alts)
+        facts_changed = search_relevant_changed(prior, merged)
+        new_opens = open_request_delta(prior, merged)
+
+        if facts_changed and not choice:
+            # Date/time/headcount changed — fall through to re-search
+            return False
+
+        if facts_changed and choice:
+            # Choice + new search facts: note choice, still re-search
+            merged["no_resource_choice"] = choice
+            return False
+
+        # Stay in NO_RESOURCE
+        merged["orchestration_stage"] = MeetingStage.NO_RESOURCE.value
+        merged["needs_ops"] = True
+        merged["auto_book_skipped"] = "no_room_available"
+        merged["no_resource_alternatives"] = alts or merged.get("no_resource_alternatives")
+        merged["no_resource_fingerprint"] = prior.get("no_resource_fingerprint") or requirement_fingerprint(
+            merged
+        )
+        if prior.get("no_resource_diagnosis"):
+            merged["no_resource_diagnosis"] = prior.get("no_resource_diagnosis")
+
+        name = resolve_requester_name(self.session, outcome=outcome)
+        greet = format_outbound_greeting(name)
+
+        if choice:
+            merged["no_resource_choice"] = choice
+            merged["last_action"] = f"no_resource_choice:{choice['code']}"
+            merged["outbound_required"] = "no_resource_ack"
+            merged = append_decision_trace(
+                merged,
+                {
+                    "at": utcnow().isoformat(),
+                    "kind": "no_resource_choice",
+                    "policy_version": policy.version,
+                    "choice": choice.get("code"),
+                    "open_requests_delta": new_opens,
+                },
+            )
+            self._save_facts(outcome, merged)
+            self._annotate_open_no_room_exception(outcome, choice=choice, extras=new_opens)
+            if outcome.requester_email:
+                extra_lines = ""
+                if new_opens:
+                    bits = []
+                    for item in new_opens:
+                        text = item.get("text") if isinstance(item, dict) else str(item)
+                        if text:
+                            bits.append(f"- {text}")
+                    if bits:
+                        extra_lines = "\n\nAlso noted:\n" + "\n".join(bits)
+                self.comms.send_case_update(
+                    outcome=outcome,
+                    communication_type="INFORMATION_ONLY",
+                    body=(
+                        f"{greet}\n\n"
+                        f"Thanks — we've recorded your choice: {choice.get('label')}.\n"
+                        "Our ops team will take it from here and follow up on this case."
+                        f"{extra_lines}\n\n"
+                        f"Case: {outcome.case_reference}"
+                    ),
+                    recipients=[outcome.requester_email],
+                    action_label="CHOICE NOTED",
+                    subject_hint=outcome.summary or f"Choice: {choice.get('code')}",
+                    suppress_fingerprint=f"choice:{outcome.outcome_id}:{choice.get('code')}",
+                )
+            self.admin_ops.action_requester_choice(
+                outcome,
+                choice_label=str(choice.get("label") or choice.get("code")),
+                facts=dict(outcome.facts or merged),
+            )
+            return True
+
+        # No choice, no search change — extras only or empty/thanks
+        merged["last_action"] = "no_resource_noted" if new_opens else "no_resource_idle"
+        if new_opens:
+            merged["outbound_required"] = "update_noted"
+            self._save_facts(outcome, merged)
+            if outcome.requester_email:
+                bits = []
+                for item in new_opens:
+                    text = item.get("text") if isinstance(item, dict) else str(item)
+                    if text:
+                        bits.append(f"- {text}")
+                self.comms.send_case_update(
+                    outcome=outcome,
+                    communication_type="INFORMATION_ONLY",
+                    body=(
+                        f"{greet}\n\n"
+                        "Thanks — we've noted your additional request(s) against this case.\n"
+                        + "\n".join(bits)
+                        + "\n\nWe're still working the room options with ops.\n\n"
+                        f"Case: {outcome.case_reference}"
+                    ),
+                    recipients=[outcome.requester_email],
+                    action_label="UPDATE NOTED",
+                    subject_hint=outcome.summary or "Additional requests noted",
+                    suppress_fingerprint=f"extras:{outcome.outcome_id}:{len(merged.get('open_requests') or [])}",
+                )
+            return True
+
+        merged["outbound_required"] = "suppressed"
+        self._save_facts(outcome, merged)
+        self.comms.record_suppressed(
+            outcome=outcome,
+            reason="no_resource_no_new_choice_or_facts",
+            detail={"fingerprint": merged.get("no_resource_fingerprint")},
+        )
+        return True
+
+    def _annotate_open_no_room_exception(
+        self,
+        outcome: Outcome,
+        *,
+        choice: dict,
+        extras: list | None = None,
+    ) -> None:
+        from app.models.outcome import ExceptionRecord
+
+        row = self.session.exec(
+            select(ExceptionRecord).where(
+                ExceptionRecord.outcome_id == outcome.outcome_id,
+                ExceptionRecord.exception_type == "NO_MEETING_ROOM",
+                ExceptionRecord.status == "OPEN",
+            )
+        ).first()
+        note = f"Requester chose {choice.get('code')}: {choice.get('label')}"
+        if extras:
+            texts = [
+                (x.get("text") if isinstance(x, dict) else str(x)) for x in extras
+            ]
+            texts = [t for t in texts if t]
+            if texts:
+                note += " | extras: " + "; ".join(texts)
+        if row:
+            row.description = ((row.description or "") + f"\n{note}").strip()
+            opts = list(row.options or [])
+            opts.append({"code": "REQUESTER_CHOICE", "label": choice.get("label"), "selected": choice.get("code")})
+            row.options = opts
+            self.session.add(row)
+        else:
+            self.engine.create_exception(
+                outcome=outcome,
+                exception_type="NO_MEETING_ROOM",
+                title="No suitable meeting room available",
+                description=note,
+                options=[{"code": choice.get("code"), "label": choice.get("label"), "selected": True}],
+                severity="MEDIUM",
+                owner_role="OPERATOR",
+            )
+
+    def _enter_no_resource(
+        self,
+        outcome: Outcome,
+        merged: dict,
+        *,
+        prior: dict,
+        policy: Any,
+    ) -> None:
+        max_cap = self._max_room_capacity()
+        all_rooms = self.session.exec(
+            select(Resource).where(
+                Resource.tenant_id == self.tenant_id,
+                Resource.type == "MEETING_ROOM",
+            )
+        ).all()
+        zero_scores = []
+        for r in all_rooms:
+            s, reasons = score_meeting_room(r, merged)
+            if s <= 0:
+                zero_scores.append({"name": r.name, "score": s, "reasons": reasons})
+        alternatives = build_no_resource_alternatives(
+            merged,
+            max_capacity=max_cap,
+            room_scores=zero_scores,
+            policy=policy,
+        )
+        fp = requirement_fingerprint(merged)
+        diagnosis = diagnose_no_resource(
+            attendees=merged.get("attendees"),
+            max_capacity=max_cap,
+            zero_scores=zero_scores,
+        )
+        already_mailed = (
+            (prior.get("orchestration_stage") or "").upper() == MeetingStage.NO_RESOURCE.value
+            and prior.get("no_resource_fingerprint") == fp
+            and not merged.get("no_resource_choice")
+        )
+
+        merged["needs_ops"] = True
+        merged["auto_book_skipped"] = "no_room_available"
+        merged["orchestration_stage"] = MeetingStage.NO_RESOURCE.value
+        merged["outbound_required"] = "suppressed" if already_mailed else "no_resource"
+        merged["last_action"] = "no_resource"
+        merged["inventory_max_capacity"] = max_cap
+        merged["no_resource_alternatives"] = alternatives
+        merged["no_resource_fingerprint"] = fp
+        merged["no_resource_diagnosis"] = diagnosis
+        merged = append_decision_trace(
+            merged,
+            {
+                "at": utcnow().isoformat(),
+                "kind": "no_resource",
+                "policy_version": policy.version,
+                "alternatives": [a["code"] for a in alternatives],
+                "max_capacity": max_cap,
+                "requested_attendees": merged.get("attendees"),
+                "diagnosis": diagnosis.get("primary"),
+                "suppressed_duplicate": already_mailed,
+            },
+        )
+        self._save_facts(outcome, merged)
+
+        # Upsert open exception once
+        from app.models.outcome import ExceptionRecord
+
+        existing = self.session.exec(
+            select(ExceptionRecord).where(
+                ExceptionRecord.outcome_id == outcome.outcome_id,
+                ExceptionRecord.exception_type == "NO_MEETING_ROOM",
+                ExceptionRecord.status == "OPEN",
+            )
+        ).first()
+        if not existing:
+            self.engine.create_exception(
+                outcome=outcome,
+                exception_type="NO_MEETING_ROOM",
+                title="No suitable meeting room available",
+                description=(
+                    diagnosis.get("line")
+                    or f"No available room met capacity/equipment for {merged.get('attendees')} attendees."
+                ),
+                options=[
+                    {"code": a["code"], "label": a["label"]}
+                    for a in alternatives
+                    if a.get("code") != "REVIEW_NEAR_MISS"
+                ],
+                severity="MEDIUM",
+                owner_role="OPERATOR",
+            )
+
+        if already_mailed:
+            self.comms.record_suppressed(
+                outcome=outcome,
+                reason="duplicate_no_resource_fingerprint",
+                detail={"fingerprint": fp, "diagnosis": diagnosis.get("primary")},
+            )
+            return
+
+        if outcome.requester_email:
+            name = resolve_requester_name(self.session, outcome=outcome)
+            greet = format_outbound_greeting(name)
+            alt_lines = "\n".join(
+                f"- {a['label']}" for a in alternatives if a.get("code") != "REVIEW_NEAR_MISS"
+            )
+            self.comms.send_case_update(
+                outcome=outcome,
+                communication_type="INFORMATION_ONLY",
+                body=(
+                    f"{greet}\n\n"
+                    f"{diagnosis.get('line')}\n\n"
+                    "Please reply with one of these options:\n"
+                    f"{alt_lines}\n\n"
+                    f"Case: {outcome.case_reference}"
+                ),
+                recipients=[outcome.requester_email],
+                action_label="NO ROOM AVAILABLE",
+                subject_hint=outcome.summary or "No room available",
+                suppress_fingerprint=f"no_resource:{fp}",
+            )
+        self.admin_ops.action_no_resource(
+            outcome,
+            diagnosis=str(diagnosis.get("line") or ""),
+            facts=dict(outcome.facts or merged),
+        )
 
     def _handle_post_booking(
         self,
@@ -630,7 +881,7 @@ class ClientMeetingOrchestrator:
                     outcome=outcome,
                     communication_type="INFORMATION_ONLY",
                     body=(
-                        f"Dear {name},\n\n"
+                        f"{format_outbound_greeting(name)}\n\n"
                         "Thanks — we’ve noted your additional request against the confirmed booking.\n\n"
                         + "\n".join(f"- {k.replace('_', ' ')}: {v}" for k, v in deltas.items())
                         + f"\n\nCase: {outcome.case_reference}"
@@ -711,7 +962,7 @@ class ClientMeetingOrchestrator:
             return
         name = resolve_requester_name(self.session, outcome=outcome)
         body = (
-            f"Dear {name},\n\n"
+            f"{format_outbound_greeting(name)}\n\n"
             "Thank you for your meeting room request.\n\n"
             "Your request needs a short review by our workplace team "
             f"({reason.replace('_', ' ')}).\n\n"
@@ -728,6 +979,7 @@ class ClientMeetingOrchestrator:
         )
         facts["ops_ack_sent"] = True
         self._save_facts(outcome, facts)
+        self.admin_ops.action_needs_review(outcome, reason=reason, facts=facts)
 
     def _propose(self, outcome: Outcome, room: Resource, facts: dict, *, updated: bool) -> None:
         try:
@@ -790,7 +1042,7 @@ class ClientMeetingOrchestrator:
         if outcome.requester_email and not is_low_risk_auto_bookable(facts, score):
             name = resolve_requester_name(self.session, outcome=outcome)
             body = (
-                f"Dear {name},\n\n"
+                f"{format_outbound_greeting(name)}\n\n"
                 f"{intro}"
                 f"Proposed room: {room.name}\n"
                 f"Case: {outcome.case_reference}\n\n"
@@ -808,6 +1060,7 @@ class ClientMeetingOrchestrator:
                 recipients=[outcome.requester_email],
                 action_label="CONFIRM BOOKING",
             )
+        self.admin_ops.fyi_proposed(outcome, room_name=room.name, facts=dict(outcome.facts or facts))
         self._sync_conversation_facts(outcome)
         logger.info("meeting_room_proposed", outcome_id=outcome.outcome_id, room=room.name, updated=updated)
 
@@ -890,7 +1143,7 @@ class ClientMeetingOrchestrator:
         follow_block = ("\n" + "\n".join(followups) + "\n") if followups else ""
         if low_risk:
             body = (
-                f"Dear {name},\n\n"
+                f"{format_outbound_greeting(name)}\n\n"
                 f"Your meeting room has been booked.\n\n"
                 f"Room: {booking.get('name')}\n"
                 f"Date: {booking.get('date')}\n"
@@ -905,7 +1158,7 @@ class ClientMeetingOrchestrator:
             )
         else:
             body = (
-                f"Dear {name},\n\n"
+                f"{format_outbound_greeting(name)}\n\n"
                 f"Your meeting room booking is confirmed.\n\n"
                 f"Room: {booking.get('name')}\n"
                 f"Case: {outcome.case_reference}\n"
@@ -923,6 +1176,11 @@ class ClientMeetingOrchestrator:
                 recipients=[outcome.requester_email],
                 action_label="BOOKING CONFIRMED",
             )
+        self.admin_ops.fyi_booked(
+            outcome,
+            room_name=str(booking.get("name") or "room"),
+            facts=dict(outcome.facts or facts),
+        )
         self._sync_conversation_facts(outcome)
         self.engine._recompute_readiness(outcome)
 
@@ -1120,6 +1378,7 @@ class ClientMeetingOrchestrator:
         }
         outcome.facts = {**(outcome.facts or {}), **facts}
         self.session.add(outcome)
+        self.admin_ops.action_approval(outcome, approval_type="CATERING_SPEND", facts=facts)
 
     def on_catering_approved(self, outcome: Outcome) -> None:
         facts = dict(outcome.facts or {})

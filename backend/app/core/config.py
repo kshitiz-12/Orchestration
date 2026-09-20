@@ -54,6 +54,8 @@ class Settings(BaseSettings):
 
     admin_email: str = "admin@prototype.local"
     admin_password: str = "admin123"
+    # Dedicated ops mailbox for FYI + ACTION REQUIRED case mail (empty = disabled)
+    admin_ops_email: str = ""
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 480
 

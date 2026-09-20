@@ -19,6 +19,7 @@ from app.models.org import utcnow
 from app.connectors.factory import get_email_provider
 from app.schemas.ai import ExtractionResult, MissingInformation
 from app.services.communication import CommunicationService, resolve_requester_name
+from app.services.admin_ops import AdminOpsNotifier
 from app.services.context import ContextRetrievalService
 from app.services.intake import JobQueueService
 from app.services.meeting_room import (
@@ -260,7 +261,7 @@ class ProcessingPipeline:
             )
             facts = dict(outcome.facts or {})
             facts["clarification_sent"] = True
-            if name and name.lower() != "there":
+            if name and name.lower() not in {"there", "team"}:
                 facts["requester_display_name"] = name
             path = (extraction.entities or {}).get("interpretation_path")
             if path:
@@ -270,6 +271,10 @@ class ProcessingPipeline:
             from sqlalchemy.orm.attributes import flag_modified
 
             flag_modified(outcome, "facts")
+            if is_first_contact:
+                AdminOpsNotifier(self.session, self.tenant_id, self.comms).fyi_awaiting_requirements(
+                    outcome, facts=facts
+                )
             self.audit.record(
                 tenant_id=self.tenant_id,
                 actor="system",
@@ -325,7 +330,7 @@ class ProcessingPipeline:
                 greeting_name=name,
             )
             facts["clarification_sent"] = True
-            if name and name.lower() != "there":
+            if name and name.lower() not in {"there", "team"}:
                 facts["requester_display_name"] = name
             path = (extraction.entities or {}).get("interpretation_path")
             if path:
@@ -335,6 +340,10 @@ class ProcessingPipeline:
             from sqlalchemy.orm.attributes import flag_modified
 
             flag_modified(outcome, "facts")
+            if is_first_contact:
+                AdminOpsNotifier(self.session, self.tenant_id, self.comms).fyi_awaiting_requirements(
+                    outcome, facts=facts
+                )
             event.processing_stage = ProcessingStage.COMMUNICATION.value
             self.session.add(event)
             self.session.commit()
