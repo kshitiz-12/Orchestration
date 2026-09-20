@@ -7,7 +7,7 @@ from app.core.config import get_settings
 from app.core.enums import ConfidenceRoute
 from app.core.logging import get_logger
 from app.schemas.ai import ConfidenceRoutingResult, ExtractionResult
-from app.services.email_utils import strip_for_ai
+from app.services.email_utils import prepare_interpreter_view
 
 logger = get_logger(__name__)
 
@@ -53,9 +53,10 @@ class LLMService:
     def extract(self, **kwargs) -> ExtractionResult:
         subject = kwargs.get("subject") or ""
         raw_body = kwargs.get("body") or ""
-        # Always strip disclaimer / signature noise before interpretation
-        body = strip_for_ai(raw_body)
-        kwargs = {**kwargs, "body": body}
+        view = kwargs.get("interpreter_view") or prepare_interpreter_view(raw_body)
+        # Heuristic/refine use the cleaned requester slice; Gemini also gets the view.
+        body = view.get("combined_for_parsers") or ""
+        kwargs = {**kwargs, "body": body, "interpreter_view": view, "raw_body": raw_body}
         prior_facts = kwargs.get("prior_facts") or {}
         used_fallback = False
         result: ExtractionResult | None = None

@@ -350,6 +350,12 @@ def is_employee_satisfied(text: str) -> bool:
 def looks_like_requirement_update(text: str) -> bool:
     if not text or len(text.strip()) < 2:
         return False
+    if re.search(
+        r"\b(?:(?:pls|please)\s+)?find\s+the\s+same\b|\bas\s+below\b|\bin\s+line\b|\banswers?\s+below\b",
+        text,
+        re.I,
+    ):
+        return True
     return bool(_ADDON_HINT_RE.search(text))
 
 
@@ -398,59 +404,211 @@ def is_new_meeting_request(
     return "update"
 
 
-def summarize_meeting_requirements(facts: dict[str, Any]) -> list[str]:
-    lines: list[str] = []
-    if facts.get("attendees"):
-        lines.append(f"Attendees (in person): {facts['attendees']}")
-    if facts.get("external_visitors"):
-        lines.append(f"External visitors: {facts['external_visitors']}")
-    if facts.get("date"):
-        lines.append(f"Date: {facts['date']}")
-    start = facts.get("preferred_time") or facts.get("time_window")
-    end = facts.get("end_time")
+_PLACEHOLDER_VALUES = frozenset(
+    {
+        "to be confirmed",
+        "tbd",
+        "unknown",
+        "unconfirmed",
+        "not confirmed",
+        "pending",
+        "n/a",
+        "na",
+    }
+)
+
+_CONFIRMED_PROVENANCE = frozenset({"extracted", "user_confirmed", "candidate_heuristic"})
+_ASSUMED_PROVENANCE = frozenset({"inferred_policy", "system", "master"})
+
+_FIELD_LABELS = (
+    ("attendees", "Attendees (in person)"),
+    ("date", "Date"),
+    ("meeting_type", "Meeting type"),
+    ("hybrid_av", "Hybrid / AV"),
+    ("presentation_display", "Presentation display"),
+    ("location_preference", "Location preference"),
+    ("catering", "Catering / amenities"),
+    ("dietary", "Dietary"),
+    ("special_access", "Special access / security"),
+    ("confidentiality", "Confidentiality"),
+    ("external_visitors", "External visitors"),
+    ("visitor_details", "Visitor names"),
+    ("guest_vehicles", "Guest vehicles"),
+    ("vehicle_numbers", "Vehicle number(s)"),
+)
+
+_OPTIONAL_UNCONFIRMED = {
+    "hybrid_av",
+    "presentation_display",
+    "catering",
+    "special_access",
+    "confidentiality",
+    "meeting_type",
+    "location_preference",
+    "dietary",
+    "external_visitors",
+    "visitor_details",
+    "guest_vehicles",
+    "vehicle_numbers",
+}
+
+
+def _defaults_applied_fields(facts: dict[str, Any]) -> set[str]:
+    out: set[str] = set()
+    for item in facts.get("defaults_applied") or []:
+        if isinstance(item, str) and item:
+            out.add(item)
+        elif isinstance(item, dict) and item.get("field"):
+            out.add(str(item["field"]))
+    return out
+
+
+def _is_placeholder(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return text in _PLACEHOLDER_VALUES
+
+
+def _field_is_confirmed(facts: dict[str, Any], key: str, value: Any | None = None) -> bool:
+    """Extracted or requester-confirmed values only — not silent defaults."""
+    value = facts.get(key) if value is None else value
+    if not _answered(value) or _is_placeholder(value):
+        return False
+    if key == "special_access" and re.fullmatch(r"\d{1,3}\s*employees?", str(value).strip(), re.I):
+        return False
+    prov = str((facts.get("field_provenance") or {}).get(key) or "").lower()
+    if prov in _CONFIRMED_PROVENANCE:
+        return True
+    if prov in _ASSUMED_PROVENANCE:
+        return False
+    if key in _defaults_applied_fields(facts):
+        return False
+    default = MEETING_ROOM_DEFAULTS.get(key)
+    if default is not None and str(value).strip().lower() == str(default).strip().lower():
+        return False
+    return True
+
+
+def _looks_like_time(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    if not text or not re.search(r"\d", text):
+        return False
+    return bool(re.search(r"(am|pm|:|noon|morning|afternoon|evening)", text))
+
+
+def _time_summary(facts: dict[str, Any], *, confirmed_only: bool) -> str | None:
+    start = facts.get("preferred_time")
+    if not _looks_like_time(start):
+        window = facts.get("time_window")
+        start = window if _looks_like_time(window) else None
+    end = facts.get("end_time") if _looks_like_time(facts.get("end_time")) else None
     duration = facts.get("duration_hours")
+    if confirmed_only:
+        if start and not _field_is_confirmed(facts, "preferred_time", facts.get("preferred_time")):
+            if not _field_is_confirmed(facts, "time_window", facts.get("time_window")):
+                start = None
+        if end and not _field_is_confirmed(facts, "end_time", end):
+            end = None
+        if duration is not None and not _field_is_confirmed(facts, "duration_hours", duration):
+            duration = None
     if start and end:
-        lines.append(f"Time: {start} – {end}")
-    elif start and duration:
-        lines.append(f"Time: {start} ({duration}h)")
-    elif start:
-        lines.append(f"Start: {start}")
-    elif duration:
-        lines.append(f"Duration: {duration}h")
-    if facts.get("hold_start") or facts.get("hold_end"):
-        lines.append(
-            f"Room hold (incl. buffers): {facts.get('hold_start') or '—'} – {facts.get('hold_end') or '—'}"
-        )
-    lines.append(f"Meeting type: {facts.get('meeting_type') or 'to be confirmed'}")
-    lines.append(f"Hybrid / AV: {facts.get('hybrid_av') or 'to be confirmed'}")
-    lines.append(
-        f"Presentation display: {facts.get('presentation_display') or MEETING_ROOM_DEFAULTS['presentation_display']}"
-    )
-    lines.append(f"Location preference: {facts.get('location_preference') or 'to be confirmed'}")
-    lines.append(f"Catering / amenities: {facts.get('catering') or MEETING_ROOM_DEFAULTS['catering']}")
-    if facts.get("dietary"):
-        lines.append(f"Dietary: {facts['dietary']}")
-    lines.append(
-        f"Special access / security: {facts.get('special_access') or MEETING_ROOM_DEFAULTS['special_access']}"
-    )
-    lines.append(f"Confidentiality: {facts.get('confidentiality') or MEETING_ROOM_DEFAULTS['confidentiality']}")
-    if guest_vehicle_count(facts):
-        lines.append(f"Guest vehicles: {guest_vehicle_count(facts)}")
-        if facts.get("vehicle_numbers"):
-            lines.append(f"Vehicle number(s): {facts['vehicle_numbers']}")
-    if facts.get("visitor_details"):
-        lines.append(f"Visitor names: {facts['visitor_details']}")
+        return f"Time: {start} – {end}"
+    if start and duration:
+        return f"Time: {start} ({duration}h)"
+    if start:
+        return f"Start: {start}"
+    if duration:
+        return f"Duration: {duration}h"
+    return None
+
+
+def summarize_meeting_requirements(facts: dict[str, Any]) -> list[str]:
+    """Upper block: confirmed / extracted fields only."""
+    facts = facts or {}
+    lines: list[str] = []
+    if _field_is_confirmed(facts, "attendees"):
+        lines.append(f"Attendees (in person): {facts['attendees']}")
+    if _field_is_confirmed(facts, "external_visitors") and external_visitor_count(facts):
+        lines.append(f"External visitors: {facts['external_visitors']}")
+    if _field_is_confirmed(facts, "date"):
+        lines.append(f"Date: {facts['date']}")
+    time_line = _time_summary(facts, confirmed_only=True)
+    if time_line:
+        lines.append(time_line)
+    for key, label in _FIELD_LABELS:
+        if key in {"attendees", "date", "external_visitors"}:
+            continue
+        if not _field_is_confirmed(facts, key):
+            continue
+        lines.append(f"{label}: {facts.get(key)}")
     for item in facts.get("open_requests") or []:
         text = item.get("text") if isinstance(item, dict) else str(item)
         if text:
             lines.append(f"Also requested: {text}")
-    defaults = facts.get("defaults_applied") or []
-    if defaults:
-        pretty = ", ".join(str(d).replace("_", " ") for d in defaults)
-        lines.append(f"(Assumed where not mentioned: {pretty})")
-    for assumption in facts.get("policy_assumptions") or []:
-        lines.append(f"Policy: {assumption.get('message') or assumption}")
     return lines
+
+
+def unconfirmed_meeting_requirements(
+    facts: dict[str, Any] | None = None,
+    *,
+    exclude_fields: set[str] | None = None,
+) -> list[str]:
+    """Lower block: not confirmed, assumed, or unanswered (excluding fields already asked)."""
+    facts = facts or {}
+    exclude = set(exclude_fields or ())
+    if "duration" in exclude:
+        exclude.update({"preferred_time", "end_time", "duration_hours", "time_window"})
+    if "preferred_time" in exclude:
+        exclude.update({"end_time", "duration_hours", "duration"})
+    lines: list[str] = []
+
+    time_confirmed = _time_summary(facts, confirmed_only=True)
+    if not time_confirmed and "preferred_time" not in exclude and "duration" not in exclude:
+        raw = _time_summary(facts, confirmed_only=False)
+        if raw:
+            lines.append(f"{raw} (not confirmed)")
+        else:
+            lines.append("Time slot: not answered")
+
+    for key, label in _FIELD_LABELS:
+        if key in exclude or key in {"attendees", "date"}:
+            continue
+        if key == "dietary" and key not in exclude and not catering_needed(facts):
+            continue
+        if key in {"external_visitors", "visitor_details"} and not facts.get("external_visitors_indicated"):
+            if not _answered(facts.get(key)) or not _field_is_confirmed(facts, key):
+                if key not in _OPTIONAL_UNCONFIRMED:
+                    continue
+                if not _answered(facts.get(key)) and key != "external_visitors":
+                    continue
+        if _field_is_confirmed(facts, key):
+            continue
+        if key not in _OPTIONAL_UNCONFIRMED and key not in {"attendees", "date", "meeting_type", "location_preference"}:
+            continue
+        if key in {"external_visitors", "guest_vehicles", "vehicle_numbers", "visitor_details"}:
+            if not facts.get("external_visitors_indicated") and not guest_vehicle_count(facts) and not external_visitor_count(facts):
+                continue
+        value = facts.get(key)
+        assumed = key in _defaults_applied_fields(facts) or str(
+            (facts.get("field_provenance") or {}).get(key) or ""
+        ).lower() in _ASSUMED_PROVENANCE
+        if _answered(value) and not _is_placeholder(value):
+            suffix = "assumed" if assumed else "not confirmed"
+            lines.append(f"{label}: {value} ({suffix})")
+        elif key in _OPTIONAL_UNCONFIRMED or key in {"meeting_type", "location_preference"}:
+            if key in {"guest_vehicles", "vehicle_numbers", "visitor_details", "external_visitors"}:
+                if not facts.get("external_visitors_indicated") and not guest_vehicle_count(facts):
+                    continue
+            lines.append(f"{label}: not answered")
+    return lines
+
+
+def requirement_email_sections(facts: dict[str, Any] | None = None) -> tuple[list[str], list[str]]:
+    """Confirmed (upper) vs unconfirmed (lower), excluding blocking questions already asked."""
+    facts = facts or {}
+    confirmed = summarize_meeting_requirements(facts)
+    gap_fields = {g["field"] for g in meeting_room_gaps(facts)}
+    unconfirmed = unconfirmed_meeting_requirements(facts, exclude_fields=gap_fields)
+    return confirmed, unconfirmed
 
 
 def remaining_meeting_room_questions(facts: dict[str, Any] | None = None) -> list[str]:

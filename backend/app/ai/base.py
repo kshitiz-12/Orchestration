@@ -16,6 +16,7 @@ class LLMProvider(ABC):
         attachment_summaries: Optional[list[str]] = None,
         prior_facts: Optional[dict] = None,
         allowed_context: Optional[dict] = None,
+        **kwargs,
     ) -> ExtractionResult:
         raise NotImplementedError
 

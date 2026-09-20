@@ -21,7 +21,11 @@ from app.schemas.ai import ExtractionResult, MissingInformation
 from app.services.communication import CommunicationService, resolve_requester_name
 from app.services.context import ContextRetrievalService
 from app.services.intake import JobQueueService
-from app.services.meeting_room import default_meeting_room_questions, meeting_room_gaps, summarize_meeting_requirements
+from app.services.meeting_room import (
+    default_meeting_room_questions,
+    meeting_room_gaps,
+    requirement_email_sections,
+)
 from app.services.thread_facts import merge_thread_prior_facts
 
 logger = get_logger(__name__)
@@ -101,7 +105,7 @@ class ProcessingPipeline:
 
         extraction = self.llm.extract(
             subject=event.subject,
-            body=event.body_for_ai or event.body_text,
+            body=event.body_text or event.body_for_ai,
             attachment_summaries=[
                 a.get("filename", "") for a in (event.attachments or []) if a.get("validation", {}).get("allowed", True)
             ],
@@ -117,7 +121,7 @@ class ProcessingPipeline:
         if relevant_ctx != preliminary_ctx:
             extraction = self.llm.extract(
                 subject=event.subject,
-                body=event.body_for_ai or event.body_text,
+                body=event.body_text or event.body_for_ai,
                 attachment_summaries=[
                     a.get("filename", "")
                     for a in (event.attachments or [])
@@ -236,7 +240,7 @@ class ProcessingPipeline:
             elif not questions:
                 questions = default_meeting_room_questions(facts_for_q)
 
-            understood = summarize_meeting_requirements(facts_for_q)[:12]
+            understood, unconfirmed = requirement_email_sections(facts_for_q)
             name = resolve_requester_name(
                 self.session,
                 outcome=outcome,
@@ -249,6 +253,7 @@ class ProcessingPipeline:
                 questions=questions,
                 case_reference=outcome.case_reference,
                 understood=understood or None,
+                unconfirmed=unconfirmed or None,
                 force_send_key=event.event_id,
                 first_contact=is_first_contact,
                 greeting_name=name,
@@ -301,7 +306,7 @@ class ProcessingPipeline:
             questions = [g["question"] for g in blocking if g.get("question")]
             if not questions:
                 questions = default_meeting_room_questions(facts)
-            understood = summarize_meeting_requirements(facts)[:12]
+            understood, unconfirmed = requirement_email_sections(facts)
             name = resolve_requester_name(
                 self.session,
                 outcome=outcome,
@@ -314,6 +319,7 @@ class ProcessingPipeline:
                 questions=questions,
                 case_reference=outcome.case_reference,
                 understood=understood or None,
+                unconfirmed=unconfirmed or None,
                 force_send_key=event.event_id,
                 first_contact=is_first_contact,
                 greeting_name=name,
@@ -481,7 +487,7 @@ class ProcessingPipeline:
     ) -> ExtractionResult:
         """Merge prior thread facts and recompute meeting-room gaps for short replies."""
         subject = event.subject or ""
-        body = event.body_for_ai or event.body_text or ""
+        body = event.body_text or event.body_for_ai or ""
         merged = {**(prior_facts or {}), **(extraction.entities or {})}
 
         # Always run heuristic over current mail with prior facts for meeting-room threads

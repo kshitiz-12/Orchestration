@@ -38,7 +38,7 @@ from app.services.meeting_room import (
     presentation_needed,
     requirement_fingerprint,
     score_meeting_room,
-    summarize_meeting_requirements,
+    requirement_email_sections,
 )
 
 logger = get_logger(__name__)
@@ -780,7 +780,11 @@ class ClientMeetingOrchestrator:
             if updated
             else "Good news — a room is available for your request.\n\n"
         )
-        req_block = "\n".join(f"- {line}" for line in summarize_meeting_requirements(facts))
+        confirmed, unconfirmed = requirement_email_sections(facts)
+        req_block = "\n".join(f"- {line}" for line in confirmed) or "- (none confirmed yet)"
+        unc_block = ""
+        if unconfirmed:
+            unc_block = "\n\nNot confirmed yet:\n" + "\n".join(f"- {line}" for line in unconfirmed)
         score = float((facts.get("recommended_room") or {}).get("score") or 0)
         # Low-risk path auto-books immediately — skip the confirm ask email
         if outcome.requester_email and not is_low_risk_auto_bookable(facts, score):
@@ -790,7 +794,8 @@ class ClientMeetingOrchestrator:
                 f"{intro}"
                 f"Proposed room: {room.name}\n"
                 f"Case: {outcome.case_reference}\n\n"
-                f"Here’s what we understood as your requirements:\n{req_block}\n\n"
+                f"Here’s what we have as confirmed / extracted:\n{req_block}"
+                f"{unc_block}\n\n"
                 "Should we confirm this booking?\n"
                 'Reply "confirm" (or "yes") to lock it in.\n'
                 "If you need any other facilities — AV, catering, visitors, parking, a different floor — "

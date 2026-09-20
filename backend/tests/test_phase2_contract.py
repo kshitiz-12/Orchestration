@@ -99,3 +99,55 @@ def test_record_suppressed_writes_reason_and_history(monkeypatch):
     assert len(outcome.facts["outbound_suppressions"]) == 1
     action = svc.audit.record.call_args.kwargs["action"]
     assert getattr(action, "value", action) == "COMMUNICATION_SUPPRESSED"
+
+
+def test_requirement_split_confirmed_upper_unconfirmed_lower():
+    from app.services.meeting_room import apply_meeting_room_defaults, requirement_email_sections
+
+    facts = apply_meeting_room_defaults(
+        {
+            "date": "26th sep",
+            "meeting_type": "internal meeting",
+            "field_provenance": {
+                "date": "extracted",
+                "meeting_type": "extracted",
+            },
+        }
+    )
+    confirmed, unconfirmed = requirement_email_sections(facts)
+    upper = " ".join(confirmed).lower()
+    lower = " ".join(unconfirmed).lower()
+    assert "26th sep" in upper
+    assert "internal meeting" in upper
+    assert "to be confirmed" not in upper
+    assert "presentation display" not in upper
+    assert "confidentiality" not in upper
+    assert "catering" not in upper
+    assert any("presentation" in line.lower() or "catering" in line.lower() for line in unconfirmed)
+    assert "assumed" in lower or "not answered" in lower
+
+
+def test_extracted_explicit_none_stays_in_confirmed():
+    from app.services.meeting_room import requirement_email_sections
+
+    confirmed, unconfirmed = requirement_email_sections(
+        {
+            "date": "26th sep",
+            "attendees": 20,
+            "preferred_time": "9:30 AM",
+            "end_time": "6:00 PM",
+            "catering": "none",
+            "field_provenance": {
+                "date": "extracted",
+                "attendees": "extracted",
+                "preferred_time": "extracted",
+                "end_time": "extracted",
+                "catering": "extracted",
+            },
+        }
+    )
+    upper = " ".join(confirmed).lower()
+    assert "20" in upper
+    assert "9:30" in upper
+    assert "catering" in upper
+    assert not any("catering" in line.lower() for line in unconfirmed)

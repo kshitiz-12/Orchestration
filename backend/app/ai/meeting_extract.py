@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from app.domain.meeting import REQUIREMENT_FIELDS
 from app.schemas.ai import ExtractionResult, MissingInformation
 from app.services.meeting_room import (
     is_booking_confirmation,
@@ -43,46 +44,131 @@ _PRESERVE_KEYS = {
 
 
 MEETING_ROOM_AI_INSTRUCTIONS = """
-MEETING ROOM INTERPRETER (delta extraction):
+You are reading a workplace email the way ChatGPT / Gemini would in chat.
 
-Return entities AND fact_delta as a DELTA for THIS email only. Do not copy the entire
-prior_facts snapshot into entities. The platform reducer merges your delta onto prior state.
+People type however they want. Fragments, typos, mixed Hindi/English, "pls find the
+same", answers written after our questions, extra asks that are not booking fields.
+There is no form. Understand the intent of THIS message, then emit JSON.
 
-fact_delta schema:
-  { "set": {field: value}, "unset": [], "assumptions": [],
-    "speech_acts": ["provide_facts"|"confirm"|"cancel"|"satisfied"] }
+You will receive:
+  this_message — new text they typed
+  answers_they_typed_on_our_questions — text after our '?' (may be incomplete)
+  read_as — cleaned requester text for convenience
+  quoted_thread.excerpt — mostly OUR previous outbound mail; they may have answered
+    inline or edited bullets. Extract what THEY added. Do not copy our
+    "already have on file" lines, example times in parentheses, or sample answers.
+  already_on_file — compact known state. Return a DELTA only. Do not restate the
+    whole form and do not blank known fields.
+  still_asking — questions we still need
 
-NORMALIZE informal / noisy text that IS present — that is extraction, not invention:
-  • "12-13 emplyees" / "12-13 employees" (even across a newline) → attendees=13 (use upper bound)
-  • "from 10 to 1ish" / "10 to 1ish" / "10-1" in a booking context → preferred_time=10:00 AM,
-    end_time=1:00 PM, duration_hours=3 (business-hours noon-crossing is allowed)
-  • "2 extrnal visitors" / "2 external visitors" → external_visitors=2 + names into visitor_details
-  • "1 more visitor: Priya Nair, Infosys" → ADD 1 to prior external_visitors (do not replace
-    the prior count with 1) and APPEND the name to visitor_details
-  • "plate HR26 AB 1234" / "HR26AB1234" → vehicle_numbers (keep spaces as written) and
-    guest_vehicles at least 1 if parking/car is mentioned
-  • "tea/cofee , 2 veg n rest non veg" → catering=requested, dietary=2 vegetarian, rest non-vegetarian
-  • typos (emplyees, extrnal, gurugram, tomorow) still count as stated facts
+Job:
+  1. Understand EVERYTHING they want. Map what you can onto meeting-room fields.
+  2. Put every other ask in open_requests (photographer, extra chairs, signage,
+     translator, cake, specific floor, markers, parking escort, …). Never drop an
+     ask because it is "not in the schema".
+  3. summary = one human sentence of what they want, including those extra asks.
 
-1. Do NOT invent numbers that never appear. If visitors are mentioned with no count, set
-   external_visitors_indicated=true and omit external_visitors.
-2. Map synonyms: participants/people/attendees/members/pax/employees → attendees (integer).
-3. Informal answers count: "internal" / "internal review" → meeting_type=internal meeting;
-   "non veg" → dietary=non-vegetarian; names after visitors → visitor_details.
-4. "yes" in a requirements list is NOT booking_confirmed / speech_acts confirm.
-5. If office is omitted and prior_facts.primary_office exists, you MAY set location_preference
-   to that office (do not invent a different site).
-6. Catering without dietary → leave dietary unset (platform will ask).
-7. missing_information = blocking fields still unknown AFTER merge with prior_facts.
-8. Do NOT set human_review_required for ordinary meeting-room replies.
-9. event_type=MEETING_ROOM for room booking threads (including INFORMATION REQUIRED replies).
-10. Speech: confirm a proposal → speech_acts=["confirm"]; satisfied after meeting → ["satisfied"].
-11. Prefer putting newly found fields in fact_delta.set AND entities.
-12. Any user ask that is NOT one of the known meeting fields MUST still be captured.
-    Put those in entities.open_requests (array of short phrases) and/or extra entity
-    keys. Never drop a request because it is "not in the schema" (photographer,
-    extra chairs, signage, translator, floor change, etc.).
+Same facts can look like anything. Illustrations, not an exhaustive list:
+  • "expected participants is around 20" / "20 ppl" / "12-13 emplyees" → attendees
+    (use the upper bound of a range). Do not invent a number that never appears.
+  • "from 10 to 1ish" / "9.30 a. M to 6 p. M" → start and end times.
+  • "pls find the same" + answers after questions = they are answering. Extract
+    those answers. That is NOT booking confirmation unless already_on_file has a
+    proposed room / pending_confirmation.
+  • A number on a Special access line ("5 employee") is not a new headcount if they
+    already said ~20. Do not replace attendees unless they clearly change the count.
+  • "1 more visitor: Priya" ADDS to prior visitors; do not replace the prior count
+    with 1. Names go in visitor_details.
+  • "yes" in a requirements list is not confirm. Confirm only if they are accepting
+    a proposed room.
+
+fact_delta: { "set": {}, "unset": [], "assumptions": [],
+  "speech_acts": ["provide_facts"|"confirm"|"cancel"|"satisfied"] }
+Put newly found fields in fact_delta.set AND entities.
+event_type=MEETING_ROOM for room-booking threads (including INFORMATION REQUIRED).
+Do NOT set human_review_required for ordinary meeting-room replies.
+missing_information = blocking fields still unknown AFTER merge with already_on_file.
+Catering without dietary → leave dietary unset (platform will ask).
+If office is omitted and already_on_file.primary_office exists, you MAY set
+location_preference to that office (do not invent a different site).
 """.strip()
+
+
+_INTERPRETER_STATE_KEYS = REQUIREMENT_FIELDS + (
+    "open_requests",
+    "primary_office",
+    "pending_confirmation",
+    "proposed_room",
+    "booked_room",
+    "orchestration_stage",
+    "checklist_missing",
+    "field_status",
+)
+
+
+def compact_interpreter_state(prior_facts: Optional[dict]) -> dict[str, Any]:
+    """Small known-state blob for the chat model — not the whole outcome snapshot."""
+    prior = prior_facts or {}
+    out: dict[str, Any] = {}
+    for key in _INTERPRETER_STATE_KEYS:
+        value = prior.get(key)
+        if value is None or value == "" or value == [] or value == {}:
+            continue
+        if key in {"proposed_room", "booked_room"} and isinstance(value, dict):
+            slim = {
+                k: value.get(k)
+                for k in ("name", "id", "capacity", "location")
+                if value.get(k) is not None
+            }
+            if slim:
+                out[key] = slim
+            continue
+        if key == "field_status" and isinstance(value, dict):
+            slim = {k: v for k, v in value.items() if k in REQUIREMENT_FIELDS and v}
+            if slim:
+                out[key] = slim
+            continue
+        out[key] = value
+    last = prior.get("last_outbound")
+    if isinstance(last, dict) and last.get("questions"):
+        out["last_questions_we_sent"] = last.get("questions")
+    return out
+
+
+def build_interpreter_payload(
+    *,
+    subject: str,
+    interpreter_view: dict[str, Any],
+    prior_facts: Optional[dict] = None,
+    allowed_context: Optional[dict] = None,
+    attachment_summaries: Optional[list[str]] = None,
+) -> dict[str, Any]:
+    prior = prior_facts or {}
+    return {
+        "task": (
+            "Read this workplace email the way ChatGPT or Gemini would in chat. "
+            "Typing will be messy. Understand everything they want."
+        ),
+        "subject": subject,
+        "this_message": interpreter_view.get("this_message") or "",
+        "answers_they_typed_on_our_questions": interpreter_view.get(
+            "answers_typed_on_quoted_questions"
+        )
+        or [],
+        "read_as": interpreter_view.get("combined_for_parsers") or "",
+        "quoted_thread": {
+            "excerpt": interpreter_view.get("quoted_thread_excerpt") or "",
+            "note": (
+                "This is mostly OUR previous outbound email. Extract answers they typed "
+                "onto it. Do not copy our examples or already-on-file bullets as new facts."
+            ),
+        },
+        "already_on_file": compact_interpreter_state(prior),
+        "still_asking": prior.get("checklist_missing") or [],
+        "attachments": attachment_summaries or [],
+        "allowed_context": allowed_context or {},
+        "instructions": MEETING_ROOM_AI_INSTRUCTIONS,
+    }
 
 
 def _answered(value: Any) -> bool:
@@ -161,7 +247,7 @@ def refine_meeting_room_extraction(
     primary_is_heuristic: bool = False,
 ) -> ExtractionResult:
     """Reducer-backed merge: Gemini (or primary) delta + grounded messy + heuristic fill."""
-    from app.ai.messy_meeting_parse import parse_messy_meeting_signals
+    from app.ai.messy_meeting_parse import looks_like_headcount_as_access, parse_messy_meeting_signals
     from app.domain.meeting import Provenance
     from app.engine.outcome_reducer import reduce_meeting_facts
 
@@ -182,12 +268,26 @@ def refine_meeting_room_extraction(
 
     # Grounded fill for fields Gemini left blank. Reducer only writes unknowns —
     # it will not overwrite an answered Gemini value.
+    if looks_like_headcount_as_access(primary.get("special_access")):
+        primary.pop("special_access", None)
+
     messy = parse_messy_meeting_signals(source)
     candidates: dict = dict(messy)
     if heuristic_entities:
         for key, value in heuristic_entities.items():
             if not _answered(candidates.get(key)) and _answered(value):
                 candidates[key] = value
+    if looks_like_headcount_as_access(candidates.get("special_access")):
+        candidates.pop("special_access", None)
+
+    # Heuristic path: grounded parse beats regex copies of our outbound (e.g.
+    # "Corporate Office" vs "down town Gurugram" typed after the question).
+    # Gemini path: model leads; grounded parse only fills blanks.
+    for key in ("attendees", "preferred_time", "end_time", "duration_hours", "location_preference"):
+        if not _answered(messy.get(key)):
+            continue
+        if primary_is_heuristic or not _answered(primary.get(key)):
+            primary[key] = messy[key]
 
     merged = reduce_meeting_facts(
         prior_facts,

@@ -7,6 +7,53 @@ import { friendlyAudit, friendlyStatus, friendlyType } from "@/lib/labels";
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
 
+const CONFIRMED_PROV = new Set(["extracted", "user_confirmed", "candidate_heuristic"]);
+const ASSUMED_PROV = new Set(["inferred_policy", "system", "master"]);
+
+function prettyField(field: string) {
+  return String(field || "").replaceAll("_", " ");
+}
+
+function isPlaceholder(value: unknown) {
+  const t = String(value ?? "").trim().toLowerCase();
+  return ["to be confirmed", "tbd", "unknown", "unconfirmed", "not confirmed", "pending", "n/a", "na"].includes(
+    t,
+  );
+}
+
+function isConfirmedRow(r: any) {
+  if (!r) return false;
+  const prov = String(r.provenance || "").toLowerCase();
+  if (r.value == null || r.value === "" || isPlaceholder(r.value)) return false;
+  if (CONFIRMED_PROV.has(prov)) return true;
+  if (ASSUMED_PROV.has(prov) || r.status === "assumed") return false;
+  return r.status === "stated";
+}
+
+function FieldTable({ rows }: { rows: any[] }) {
+  return (
+    <table>
+      <tbody>
+        {rows.map((r, i) => (
+          <tr key={`${r.field || r.question || i}`}>
+            <td className="muted" style={{ textTransform: "capitalize", width: "28%" }}>
+              {prettyField(r.field || "item")}
+            </td>
+            <td>
+              {r.question && (r.status === "blocking" || r.note === "still needed")
+                ? r.question
+                : String(r.value ?? "not answered")}
+            </td>
+            <td className="muted" style={{ width: "22%" }}>
+              {prettyField(r.note || r.provenance || r.status || "")}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
 export default function OutcomeDetailPage() {
   const params = useParams();
   const id = params.id as string;
@@ -75,12 +122,28 @@ export default function OutcomeDetailPage() {
         ? conversation.missing_information
         : [];
 
-  const understood =
-    understoodRows.length > 0
-      ? understoodRows.map((r: any) => `${String(r.field).replaceAll("_", " ")}: ${r.value}`).join(" · ")
-      : ai_decision?.output?.summary ||
-        outcome.summary ||
-        "The system is still gathering details.";
+  const confirmedRows: any[] = understoodRows.filter(isConfirmedRow);
+  const seenFields = new Set(confirmedRows.map((r: any) => r.field).filter(Boolean));
+  const lowerRows: any[] = [];
+  const pushLower = (r: any, note: string) => {
+    if (!r) return;
+    if (r.field && seenFields.has(r.field)) return;
+    if (r.field) seenFields.add(r.field);
+    lowerRows.push({ ...r, note });
+  };
+  understoodRows.filter((r: any) => !isConfirmedRow(r)).forEach((r: any) => pushLower(r, "not confirmed"));
+  assumedRows.forEach((r: any) => pushLower(r, "assumed"));
+  stillNeeded.forEach((r: any) =>
+    pushLower({ ...r, value: r.question || r.value || "not answered", status: "blocking" }, "still needed"),
+  );
+  Object.values(contract.fields || {}).forEach((r: any) => {
+    if (!r || r.status !== "unknown") return;
+    if (["duration_hours", "end_time", "primary_office", "external_visitors_indicated"].includes(r.field)) return;
+    pushLower({ ...r, value: r.value ?? "not answered" }, "not answered");
+  });
+  if (confirmedRows.length === 0 && factEntries.length > 0 && understoodRows.length === 0) {
+    factEntries.forEach(([k, v]) => confirmedRows.push({ field: k, value: v, status: "stated", provenance: "extracted" }));
+  }
 
   const interpretationPath =
     facts.interpretation_path ||
@@ -220,6 +283,31 @@ export default function OutcomeDetailPage() {
           </p>
         </div>
       )}
+
+      <div className="panel" style={{ marginBottom: "1.25rem" }}>
+        <div className="field-split-upper">
+          <h2 style={{ marginBottom: "0.5rem" }}>Confirmed / extracted</h2>
+          <p className="muted" style={{ marginTop: 0 }}>
+            Stated in the request or confirmed by the requester.
+          </p>
+          {confirmedRows.length > 0 ? (
+            <FieldTable rows={confirmedRows} />
+          ) : (
+            <p className="muted">Nothing confirmed yet.</p>
+          )}
+        </div>
+        <div className="field-split-lower">
+          <h2 style={{ marginBottom: "0.5rem" }}>Not confirmed / still needed</h2>
+          <p className="muted" style={{ marginTop: 0 }}>
+            Unanswered questions, assumed defaults, and fields not yet confirmed.
+          </p>
+          {lowerRows.length > 0 ? (
+            <FieldTable rows={lowerRows} />
+          ) : (
+            <p className="muted">No open fields.</p>
+          )}
+        </div>
+      </div>
 
       {outcome.template_code === "MEETING_ROOM" && (
         <div className="panel" style={{ marginBottom: "1.25rem" }}>
@@ -424,76 +512,10 @@ export default function OutcomeDetailPage() {
       <div className="cols-2">
         <div className="stack">
           <div className="panel">
-            <h2 style={{ marginBottom: "0.75rem" }}>Understood vs assumed vs missing</h2>
-            <p style={{ marginTop: 0 }}>{understood}</p>
-            {understoodRows.length > 0 && (
-              <div style={{ marginBottom: "0.75rem" }}>
-                <div className="muted" style={{ fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.35rem" }}>
-                  Understood (stated)
-                </div>
-                <table>
-                  <tbody>
-                    {understoodRows.map((r: any) => (
-                      <tr key={`u-${r.field}`}>
-                        <td className="muted" style={{ textTransform: "capitalize" }}>
-                          {String(r.field).replaceAll("_", " ")}
-                        </td>
-                        <td>{String(r.value)}</td>
-                        <td className="muted">{r.provenance}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-            {assumedRows.length > 0 && (
-              <div style={{ marginBottom: "0.75rem" }}>
-                <div className="muted" style={{ fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.35rem" }}>
-                  Assumed (policy / default)
-                </div>
-                <table>
-                  <tbody>
-                    {assumedRows.map((r: any) => (
-                      <tr key={`a-${r.field}`}>
-                        <td className="muted" style={{ textTransform: "capitalize" }}>
-                          {String(r.field).replaceAll("_", " ")}
-                        </td>
-                        <td>{String(r.value)}</td>
-                        <td className="muted">{r.provenance}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-            {stillNeeded.length > 0 ? (
-              <div style={{ marginTop: "0.75rem" }}>
-                <div className="muted" style={{ fontSize: "0.8rem", fontWeight: 600, marginBottom: "0.35rem" }}>
-                  Still needed (blocking only)
-                </div>
-                <ul className="muted" style={{ margin: 0, paddingLeft: "1.1rem" }}>
-                  {stillNeeded.map((m: any, i: number) => (
-                    <li key={i}>{m.question || m.field}</li>
-                  ))}
-                </ul>
-              </div>
-            ) : (
-              <p className="muted">No blocking gaps.</p>
-            )}
-            {factEntries.length > 0 && understoodRows.length === 0 && (
-              <table style={{ marginTop: "0.75rem" }}>
-                <tbody>
-                  {factEntries.map(([k, v]) => (
-                    <tr key={k}>
-                      <td className="muted" style={{ textTransform: "capitalize" }}>
-                        {k.replaceAll("_", " ")}
-                      </td>
-                      <td>{String(v)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
+            <h2 style={{ marginBottom: "0.75rem" }}>Summary</h2>
+            <p style={{ marginTop: 0 }}>
+              {ai_decision?.output?.summary || outcome.summary || "The system is still gathering details."}
+            </p>
           </div>
 
           {outcome.template_code === "MEETING_ROOM" && (

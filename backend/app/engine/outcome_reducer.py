@@ -53,6 +53,40 @@ def _rank(prov: str | Provenance | None) -> int:
     return FIELD_PROVENANCE_RANK.get(p, 0)
 
 
+def _strong_headcount_restatement(n: int, source_text: str) -> bool:
+    text = source_text or ""
+    if re.search(
+        rf"(?i)\b(?:only|now|change(?:d)?(?:\s+to)?|update(?:d)?(?:\s+to)?)\s+{n}\b",
+        text,
+    ):
+        return True
+    if re.search(
+        rf"(?i)\b{n}\s*(?:people|participants|attendees|pax|members|persons?)\b",
+        text,
+    ):
+        return True
+    if re.search(
+        rf"(?i)(?:people|participants|attendees|expected|around|about).{{0,24}}\b{n}\b",
+        text,
+    ):
+        return True
+    if re.search(rf"(?i)(?:for|of)\s+{n}\s+[a-z']{{0,4}}emp", text):
+        return True
+    return False
+
+
+def _weak_employee_label_only(n: int, source_text: str) -> bool:
+    """True when N only appears as 'N employee' on an access line / outbound label."""
+    text = source_text or ""
+    if _strong_headcount_restatement(n, text):
+        return False
+    if re.search(rf"(?i)(?:special access|security)[^\n]{{0,60}}{n}\s*emp", text):
+        return True
+    if re.search(rf"(?i)^[-*]\s*special access[^\n]*{n}\s*emp", text, re.M):
+        return True
+    return False
+
+
 def _looks_invented_count(key: str, value: Any, source_text: str) -> bool:
     """Reject heuristic counts that are not grounded in the current message."""
     if key not in INVENTABLE_COUNTS:
@@ -64,6 +98,8 @@ def _looks_invented_count(key: str, value: Any, source_text: str) -> bool:
     if n <= 0:
         return False
     text = (source_text or "").lower()
+    if key == "attendees" and _weak_employee_label_only(n, source_text):
+        return True
     if str(n) in text:
         return False
     # "12-13 emplyees" → attendees=13 is grounded even if only the range appears
@@ -115,6 +151,30 @@ def apply_delta(
                     continue
         existing = prior.get(key)
         existing_rank = _rank(provenance.get(key))
+        if key == "special_access":
+            from app.ai.messy_meeting_parse import looks_like_headcount_as_access
+
+            if looks_like_headcount_as_access(value):
+                continue
+        if key == "attendees":
+            try:
+                new_n = int(value)
+            except (TypeError, ValueError):
+                new_n = None
+            if new_n is not None and _weak_employee_label_only(new_n, source_text):
+                continue
+            if new_n is not None and _answered(existing):
+                try:
+                    old_n = int(existing)
+                except (TypeError, ValueError):
+                    old_n = None
+                if (
+                    old_n is not None
+                    and old_n != new_n
+                    and not _strong_headcount_restatement(new_n, source_text)
+                    and re.search(rf"(?i)\b{new_n}\s*employees?\b", source_text or "")
+                ):
+                    continue
         if _answered(existing) and incoming_rank < existing_rank:
             continue
         # Heuristic must not clobber extracted/user values
@@ -188,9 +248,14 @@ def reduce_meeting_facts(
     speech_acts: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     """Apply interpreter entities, then optional heuristic candidates for unknown fields only."""
+    can_confirm = bool(
+        (prior_facts or {}).get("pending_confirmation") or (prior_facts or {}).get("proposed_room")
+    )
     speech: list[str] = list(speech_acts or [])
-    if is_booking_confirmation(source_text) and "confirm" not in speech:
+    if can_confirm and is_booking_confirmation(source_text) and "confirm" not in speech:
         speech.append("confirm")
+    if "confirm" in speech and not can_confirm:
+        speech = [s for s in speech if s != "confirm"]
     if is_employee_satisfied(source_text) and "satisfied" not in speech:
         speech.append("satisfied")
     if not speech:
@@ -219,6 +284,9 @@ def reduce_meeting_facts(
             "catering",
             "hybrid_av",
             "presentation_display",
+            "location_preference",
+            "preferred_time",
+            "end_time",
         }
         unknown_only = {}
         src = (source_text or "").lower()
@@ -240,6 +308,10 @@ def reduce_meeting_facts(
                     grounded = bool(re.search(r"\b(veg|non[-\s]?veg|dietary)\b", src))
                 elif key == "vehicle_numbers":
                     grounded = str(value).lower() in src
+                elif key == "location_preference":
+                    grounded = bool(re.search(r"\bdown\s*-?\s*town\b", src)) or str(value).lower()[:12] in src
+                elif key in {"preferred_time", "end_time"}:
+                    grounded = bool(re.search(r"\d", str(value))) and str(value).split()[0][:4] in src.replace(" ", "")
                 else:
                     grounded = str(value).lower()[:12] in src if value else False
                 if grounded:
@@ -257,9 +329,9 @@ def reduce_meeting_facts(
                 cand.provenance = Provenance.EXTRACTED
             merged = apply_delta(merged, cand, source_text=source_text)
 
-    if "confirm" in speech:
+    if can_confirm and "confirm" in speech:
         merged["booking_confirmed"] = True
-    elif not is_booking_confirmation(source_text):
+    else:
         merged.pop("booking_confirmed", None)
     if "satisfied" in speech:
         merged["employee_satisfied"] = True

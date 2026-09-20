@@ -10,6 +10,7 @@ from app.ai.gemini import HeuristicProvider
 from app.domain.meeting import Provenance
 from app.engine.outcome_reducer import reduce_meeting_facts
 from app.models.intake import Conversation, RawEmailEvent
+from app.services.email_utils import strip_for_ai
 from app.services.meeting_room import (  # noqa: F401 — re-export for existing imports
     MEETING_ROOM_REQUIRED,
     default_meeting_room_questions,
@@ -40,7 +41,7 @@ def merge_thread_prior_facts(
     for row in rows:
         if exclude_event_id and row.event_id == exclude_event_id:
             continue
-        body = (row.body_for_ai or row.body_text or "").strip()
+        body = strip_for_ai(row.body_text or row.body_for_ai or "").strip()
         if not body:
             continue
         extracted = heuristic.extract(

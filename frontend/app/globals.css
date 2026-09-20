@@ -317,6 +317,13 @@ button, input, select, textarea { font: inherit; }
 .panel h2, .panel h3 {
   font-family: var(--font-display);
   margin: 0;
+}
+
+.field-split-lower {
+  margin-top: 1.15rem;
+  padding-top: 1.05rem;
+  border-top: 1px solid var(--line);
+}
   font-size: 1.05rem;
   letter-spacing: -0.02em;
 }

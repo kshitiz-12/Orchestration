@@ -751,3 +751,236 @@ def test_unmapped_ask_is_kept_on_open_requests():
     blob = " ".join(texts)
     assert "photographer" in blob
     assert "whiteboard" in blob or "floor" in blob
+
+
+def test_expected_participants_around_n_is_attendees():
+    body = (
+        "Hi,\n\nWe are having internal review meet and expected participants is around 20, "
+        "we will need meeting room on 26th Sep.\n\nRegards,\n"
+    )
+    signals = parse_messy_meeting_signals(body)
+    assert signals.get("attendees") == 20
+    result = LLMService(provider=HeuristicProvider()).extract(subject="meeting room", body=body)
+    assert result.entities.get("attendees") == 20
+    assert result.entities.get("date")
+    assert not result.entities.get("booking_confirmed")
+
+
+def test_yahoo_inline_answers_are_not_lost_and_not_false_confirm():
+    from app.services.email_utils import strip_for_ai
+
+    body = (
+        "Hi,\n\n"
+        "Pls find the same\n\n"
+        "Yahoo Mail: Search, organise, conquer\n\n"
+        "  On Sun, 20 Sept 2026 at 12:03 pm, orchestration@adminservices.in"
+        "<orchestration@adminservices.in> wrote:   Dear kapil mantri,\n\n"
+        "Your meeting-room request has been registered as ROOM-2026-0008.\n\n"
+        "Here’s what we already have on file (no need to repeat these):\n\n"
+        "- Date: 26th sep\n"
+        "- Meeting type: internal meeting\n"
+        "- Hybrid / AV: to be confirmed\n"
+        "- Presentation display: yes\n"
+        "- Location preference: downtown\n"
+        "- Catering / amenities: yes\n"
+        "- Special access / security: 5 employee\n"
+        "- Confidentiality: standard\n\n"
+        "We only still need:\n\n"
+        "- How many people will attend in person?\n"
+        "- What time slot do you need (e.g. 10:00 AM–1:00 PM, or 2:00 PM for 1 hour)? "
+        "9.30 a. M to 6 p. M\n"
+        "- Which office or building is required? Your primary office is Corporate Office - "
+        "down town Gurugram.\n"
+    )
+    clean = strip_for_ai(body)
+    assert "Pls find the same" in clean
+    assert "5 employee" not in clean
+    assert "to be confirmed" not in clean
+    assert "9.30" in clean
+    assert "6 p" in clean.lower() or "6p" in clean.lower().replace(" ", "")
+    signals = parse_messy_meeting_signals(clean)
+    assert signals.get("preferred_time")
+    assert signals.get("end_time")
+    result = LLMService(provider=HeuristicProvider()).extract(
+        subject="Re: [INFORMATION REQUIRED] [ROOM-2026-0008] Request registered",
+        body=body,
+        prior_facts={
+            "date": "26th sep",
+            "meeting_type": "internal meeting",
+            "registration_ack_sent": True,
+            "primary_office": "Corporate Office, Gurugram",
+        },
+    )
+    assert result.entities.get("booking_confirmed") is not True
+    assert result.entities.get("attendees") != 5
+    start = str(result.entities.get("preferred_time") or "").lower()
+    end = str(result.entities.get("end_time") or "").lower()
+    assert "9" in start
+    assert "6" in end
+    loc = str(result.entities.get("location_preference") or "").lower()
+    assert "town" in loc or "gurugram" in loc
+
+
+def test_five_employee_on_special_access_does_not_replace_headcount():
+    from app.ai.messy_meeting_parse import parse_messy_meeting_signals
+    from app.domain.meeting import Provenance
+    from app.engine.outcome_reducer import reduce_meeting_facts
+
+    leaked = (
+        "Here’s what we already have on file:\n"
+        "- Date: 26th sep\n"
+        "- Special access / security: 5 employee\n"
+        "- Confidentiality: standard\n"
+    )
+    signals = parse_messy_meeting_signals(leaked)
+    assert signals.get("attendees") is None
+
+    first = (
+        "We are having internal review meet and expected participants is around 20, "
+        "we will need meeting room on 26th Sep."
+    )
+    merged = reduce_meeting_facts(
+        {},
+        primary_entities=parse_messy_meeting_signals(first),
+        source_text=first,
+    )
+    assert merged.get("attendees") == 20
+
+    reply = (
+        "Pls find the same\n\n"
+        "On Sun, 20 Sept wrote:\n"
+        "- Special access / security: 5 employee\n"
+        "- How many people will attend in person?\n"
+    )
+    updated = reduce_meeting_facts(
+        merged,
+        primary_entities={
+            "attendees": 5,
+            "special_access": "5 employee",
+        },
+        source_text=reply,
+        primary_provenance=Provenance.EXTRACTED,
+    )
+    assert updated.get("attendees") == 20
+    sa = str(updated.get("special_access") or "")
+    assert "5 employee" not in sa.lower()
+
+    result = LLMService(provider=HeuristicProvider()).extract(
+        subject="Re: ROOM-2026-0008",
+        body=reply,
+        prior_facts={"attendees": 20, "date": "26th sep", "meeting_type": "internal meeting"},
+    )
+    assert result.entities.get("attendees") == 20
+    assert "5 employee" not in str(result.entities.get("special_access") or "").lower()
+
+
+def test_interpreter_view_keeps_quote_for_the_model():
+    from app.services.email_utils import prepare_interpreter_view
+
+    body = (
+        "Hi,\n\nPls find the same. also need a photographer.\n\n"
+        "Yahoo Mail: Search, organise, conquer\n\n"
+        "  On Sun, 20 Sept 2026 at 12:03 pm, orchestration@adminservices.in"
+        "<orchestration@adminservices.in> wrote:   Dear kapil,\n\n"
+        "Here’s what we already have on file:\n"
+        "- Special access / security: 5 employee\n"
+        "- What time slot do you need (e.g. 10:00 AM–1:00 PM)? 9.30 a. M to 6 p. M\n"
+    )
+    view = prepare_interpreter_view(body)
+    assert "Pls find the same" in view["this_message"]
+    assert "photographer" in view["this_message"].lower()
+    assert "5 employee" not in view["combined_for_parsers"]
+    assert "9.30" in view["combined_for_parsers"]
+    assert "5 employee" in view["quoted_thread_excerpt"]
+    assert any("9.30" in a for a in view["answers_typed_on_quoted_questions"])
+
+
+def test_compact_interpreter_state_drops_platform_noise():
+    from app.ai.meeting_extract import compact_interpreter_state
+
+    slim = compact_interpreter_state(
+        {
+            "attendees": 20,
+            "date": "26th sep",
+            "decision_trace": ["a", "b"],
+            "execution_plan": {"steps": [1]},
+            "inventory_max_capacity": 40,
+            "proposed_room": {"name": "Orchid", "id": "r1", "capacity": 24, "wifi": "yes"},
+            "last_outbound": {"kind": "clarification", "questions": ["How many people?"]},
+        }
+    )
+    assert slim["attendees"] == 20
+    assert "decision_trace" not in slim
+    assert "execution_plan" not in slim
+    assert "inventory_max_capacity" not in slim
+    assert slim["proposed_room"] == {"name": "Orchid", "id": "r1", "capacity": 24}
+    assert slim["last_questions_we_sent"] == ["How many people?"]
+
+
+def test_gemini_reads_mail_like_chat_not_a_form():
+    from app.ai.gemini import GeminiProvider
+
+    captured: dict = {}
+
+    class CapturingGemini(GeminiProvider):
+        def __init__(self):
+            self.api_key = "k1"
+            self.api_key_secondary = ""
+            self.model = "gemini-3.5-flash-lite"
+            self.fallback_model = "gemini-3.1-flash-lite"
+            self._clients = {}
+            self.last_endpoint = {}
+
+        def _endpoints(self):
+            return [("primary:lite", "k1", "lite")]
+
+        def _generate_once(self, *, api_key, model, user_payload):
+            captured["payload"] = user_payload
+
+            class Resp:
+                text = (
+                    '{"event_type":"MEETING_ROOM","summary":"9:30-6 downtown plus photographer",'
+                    '"entities":{"preferred_time":"9:30 AM","end_time":"6:00 PM",'
+                    '"location_preference":"downtown Gurugram",'
+                    '"open_requests":["photographer"]},'
+                    '"open_requests":["photographer"],"issues":[],"missing_information":[],'
+                    '"confidence":0.9,"reason":"gemini"}'
+                )
+
+            return Resp()
+
+    yahoo = (
+        "Hi,\n\nPls find the same. also need a photographer.\n\n"
+        "Yahoo Mail: Search, organise, conquer\n\n"
+        "  On Sun, 20 Sept 2026 at 12:03 pm, orchestration@adminservices.in"
+        "<orchestration@adminservices.in> wrote:   Dear kapil,\n\n"
+        "Here’s what we already have on file:\n"
+        "- Special access / security: 5 employee\n"
+        "- What time slot do you need (e.g. 10:00 AM–1:00 PM)? 9.30 a. M to 6 p. M\n"
+    )
+    result = LLMService(provider=CapturingGemini()).extract(
+        subject="Re: ROOM-2026-0008",
+        body=yahoo,
+        prior_facts={
+            "attendees": 20,
+            "date": "26th sep",
+            "decision_trace": ["noise"],
+            "execution_plan": {"steps": [1]},
+        },
+    )
+    payload = captured["payload"]
+    assert "prior_facts" not in payload
+    assert "this_message" in payload
+    assert "Pls find the same" in payload["this_message"]
+    assert "photographer" in payload["this_message"].lower()
+    assert "5 employee" in (payload["quoted_thread"].get("excerpt") or "")
+    assert payload["already_on_file"].get("attendees") == 20
+    assert "decision_trace" not in payload["already_on_file"]
+    assert "execution_plan" not in payload["already_on_file"]
+    texts = [
+        (x.get("text") if isinstance(x, dict) else str(x)).lower()
+        for x in (result.entities.get("open_requests") or [])
+    ]
+    assert any("photographer" in t for t in texts)
+    assert result.entities.get("attendees") == 20
+

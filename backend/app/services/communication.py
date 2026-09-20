@@ -241,6 +241,7 @@ class CommunicationService:
         questions: list[str],
         case_reference: Optional[str] = None,
         understood: Optional[list[str]] = None,
+        unconfirmed: Optional[list[str]] = None,
         force_send_key: Optional[str] = None,
         first_contact: bool = False,
         greeting_name: Optional[str] = None,
@@ -262,15 +263,22 @@ class CommunicationService:
                 f"Your meeting-room request has been registered as {ref}.\n"
             )
         if understood:
-            parts.append("Here’s what we already have on file (no need to repeat these):\n")
+            parts.append("Here’s what we already have on file (confirmed / extracted — no need to repeat these):\n")
             parts.extend(f"- {line}" for line in understood if line)
-            parts.append("\nWe only still need:\n" if questions else "\n")
-        elif first_contact:
-            parts.append("To proceed, please share:\n")
-        else:
-            parts.append("We still need:\n")
+            parts.append("")
         if questions:
+            if understood:
+                parts.append("We still need:\n")
+            elif first_contact:
+                parts.append("To proceed, please share:\n")
+            else:
+                parts.append("We still need:\n")
             parts.extend(f"- {q}" for q in questions)
+        if unconfirmed:
+            parts.append("")
+            parts.append("Not confirmed yet (reply if any of these should be different):\n")
+            parts.extend(f"- {line}" for line in unconfirmed if line)
+        if questions:
             parts.append(
                 "\nPlease reply with just the missing items above (Reply keeps this thread)."
             )

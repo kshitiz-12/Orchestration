@@ -240,7 +240,7 @@ def resend_clarification(outcome_id: str, session: SessionDep, tenant_id: Tenant
     from app.services.meeting_room import (
         default_meeting_room_questions,
         meeting_room_gaps,
-        summarize_meeting_requirements,
+        requirement_email_sections,
     )
 
     outcome = session.get(Outcome, outcome_id)
@@ -258,7 +258,7 @@ def resend_clarification(outcome_id: str, session: SessionDep, tenant_id: Tenant
                 questions.append(item["question"])
     if not questions:
         questions = default_meeting_room_questions(facts)
-    understood = summarize_meeting_requirements(facts)[:12]
+    understood, unconfirmed = requirement_email_sections(facts)
 
     email = get_email_provider(session, tenant_id)
     sender = email if email.is_connected() else None
@@ -276,6 +276,7 @@ def resend_clarification(outcome_id: str, session: SessionDep, tenant_id: Tenant
         questions=questions,
         case_reference=outcome.case_reference,
         understood=understood or None,
+        unconfirmed=unconfirmed or None,
         force_send_key=f"resend:{int(time.time())}",
         first_contact=False,
         greeting_name=name,

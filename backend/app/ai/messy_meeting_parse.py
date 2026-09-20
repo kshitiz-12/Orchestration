@@ -10,6 +10,94 @@ from __future__ import annotations
 import re
 from typing import Any
 
+_SYSTEM_FIELD_LINE = re.compile(
+    r"(?i)^(?:[-*]\s*)?(?:"
+    r"special access(?:\s*/\s*security)?|"
+    r"attendees(?:\s*\(in person\))?|"
+    r"hybrid\s*/\s*av|"
+    r"presentation display|"
+    r"catering(?:\s*/\s*amenities)?|"
+    r"confidentiality|"
+    r"location preference|"
+    r"meeting type|"
+    r"date|"
+    r"time|"
+    r"dietary|"
+    r"guest vehicles|"
+    r"external visitors|"
+    r"visitor names"
+    r")\s*:"
+)
+
+_HEADCOUNT_ON_ACCESS = re.compile(
+    r"(?i)(?:special access|security)[^\n]{0,60}\d{1,3}\s*emp"
+)
+
+
+def mask_outbound_field_lines(text: str) -> str:
+    """Drop our labeled 'already have' rows so they cannot be re-parsed as new facts."""
+    keep: list[str] = []
+    for line in (text or "").splitlines():
+        if _SYSTEM_FIELD_LINE.match(line.strip()):
+            continue
+        keep.append(line)
+    return "\n".join(keep)
+
+
+def looks_like_headcount_as_access(value: Any) -> bool:
+    return bool(re.fullmatch(r"\d{1,3}\s*employees?", str(value or "").strip(), re.I))
+
+
+def parse_attendees_from_text(text: str) -> int | None:
+    """Headcount from people/participants phrasing — never from 'Special access: 5 employee'."""
+    raw = mask_outbound_field_lines(text or "")
+    if _HEADCOUNT_ON_ACCESS.search(text or "") and not re.search(
+        r"(?i)\b(?:people|participants|attendees|pax|members|persons?)\b", raw
+    ):
+        raw = re.sub(r"(?i)\d{1,3}\s*employees?", " ", raw)
+    m_people_range = re.search(
+        r"(\d{1,2})\s*[-–]\s*(\d{1,2})\s+[a-z']{0,4}emp[a-z']{0,12}",
+        raw,
+        re.I,
+    )
+    if m_people_range:
+        return max(int(m_people_range.group(1)), int(m_people_range.group(2)))
+    m_around = re.search(
+        r"(?:expected\s+)?(?:participants|attendees|people|pax|headcount|members)"
+        r"\s+(?:is|are|:)?\s*(?:around|about|approx(?:imately)?|~)?\s*(\d{1,3})",
+        raw,
+        re.I,
+    )
+    if not m_around:
+        m_around = re.search(
+            r"(?:around|about|approx(?:imately)?|~)\s*(\d{1,3})\s*"
+            r"(?:people|attendees|persons?|pax|members|participants|employees?|staff)",
+            raw,
+            re.I,
+        )
+    if m_around:
+        return int(m_around.group(1))
+    m_people = re.search(
+        r"(\d+)\s*(?:people|attendees|persons?|pax|members|participants|heads|staff)",
+        raw,
+        re.I,
+    )
+    if m_people:
+        return int(m_people.group(1))
+    m_emp = re.search(
+        r"(?:for|of)\s+(\d{1,3})\s+[a-z']{0,4}emp[a-z']{0,12}",
+        raw,
+        re.I,
+    )
+    if not m_emp:
+        m_emp = re.search(r"(\d{1,3})\s+employees\b", raw, re.I)
+    if m_emp:
+        return int(m_emp.group(1))
+    m_only = re.fullmatch(r"\s*(\d{1,3})\s*employees?\s*[.]?\s*", raw.strip(), re.I)
+    if m_only:
+        return int(m_only.group(1))
+    return None
+
 
 def _hour_label(hour: int, *, pm: bool) -> str:
     if pm:
@@ -22,13 +110,25 @@ def _hour_label(hour: int, *, pm: bool) -> str:
 
 
 def _to_24(label: str) -> float:
-    tok = label.lower().replace(" ", "")
+    tok = re.sub(r"\s+", "", label.lower())
+    tok = re.sub(r"a\.?m\.?", "am", tok)
+    tok = re.sub(r"p\.?m\.?", "pm", tok)
     ampm = "pm" if "pm" in tok else ("am" if "am" in tok else "")
-    num = float(re.sub(r"[^0-9.]", "", tok.split(":")[0]) or 0)
-    if ampm == "pm" and num != 12:
+    core = re.sub(r"[^0-9.:]", "", tok)
+    if ":" in core:
+        h, _, m = core.partition(":")
+        num = float(h or 0) + float(m or 0) / 60.0
+    elif "." in core:
+        h, _, m = core.partition(".")
+        num = float(h or 0) + (float(m) / 60.0 if len(m) == 2 else float(core or 0) - float(h or 0))
+        if len(m) != 2:
+            num = float(core or 0)
+    else:
+        num = float(core or 0)
+    if ampm == "pm" and num < 12:
         num += 12
-    if ampm == "am" and num == 12:
-        num = 0
+    if ampm == "am" and int(num) == 12:
+        num = num - 12
     return num
 
 
@@ -43,33 +143,14 @@ def parse_messy_meeting_signals(text: str) -> dict[str, Any]:
     lower = text.lower()
     out: dict[str, Any] = {}
 
-    # "12-13 emplyees" / "10–12 employees" (newline-tolerant)
-    m_people_range = re.search(
-        r"(\d{1,2})\s*[-–]\s*(\d{1,2})\s+[a-z']{0,4}emp[a-z']{0,12}",
-        raw,
-        re.I,
-    )
-    if m_people_range:
-        out["attendees"] = max(int(m_people_range.group(1)), int(m_people_range.group(2)))
-    else:
-        m_people = re.search(
-            r"(\d+)\s*(?:people|attendees|persons?|pax|members|participants|heads|"
-            r"emp+l?oy+e*e*'?s?|employees?|staff)",
-            raw,
-            re.I,
-        )
-        if not m_people:
-            m_people = re.search(
-                r"(?:for|of)\s+(\d+)\s+[a-z']{0,4}emp[a-z']{0,8}",
-                raw,
-                re.I,
-            )
-        if m_people:
-            out["attendees"] = int(m_people.group(1))
+    attendees = parse_attendees_from_text(raw)
+    if attendees is not None:
+        out["attendees"] = attendees
 
-    # Explicit am/pm range first
+    # Explicit am/pm range first (allow "9.30 a. m" / "6 p. M")
+    _ampm = r"(?:a\.?\s*m\.?|p\.?\s*m\.?|am|pm)"
     m_range = re.search(
-        r"(\d{1,2}(?::\d{2})?\s*(?:am|pm))\s*(?:to|-|–)\s*(\d{1,2}(?::\d{2})?\s*(?:am|pm))",
+        rf"(\d{{1,2}}(?:[.:]\d{{2}})?\s*{_ampm})\s*(?:to|-|–)\s*(\d{{1,2}}(?:[.:]\d{{2}})?\s*{_ampm})",
         raw,
         re.I,
     )
@@ -191,6 +272,14 @@ def parse_messy_meeting_signals(text: str) -> dict[str, Any]:
         out["vehicle_numbers"] = ", ".join(plates)
         out["guest_vehicles"] = out.get("guest_vehicles") or len(plates)
 
+    m_downtown = re.search(r"\bdown\s*-?\s*town(?:\s+gurugram|\s+gurgaon)?\b", raw, re.I)
+    if m_downtown and not out.get("location_preference"):
+        loc = re.sub(r"\s+", " ", m_downtown.group(0)).strip()
+        if re.search(r"gurugram|gurgaon|corporate office", raw, re.I):
+            out["location_preference"] = loc
+        else:
+            out["location_preference"] = loc
+
     return out
 
 
@@ -225,6 +314,8 @@ def apply_grounded_reply_signals(
     summary or treat as a replacement count of 1.
     """
     out = dict(merged or {})
+    if looks_like_headcount_as_access(out.get("special_access")):
+        out.pop("special_access", None)
     prior = prior_facts or {}
     sig = dict(signals or parse_messy_meeting_signals(source_text))
 
