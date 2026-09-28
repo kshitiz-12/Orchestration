@@ -20,6 +20,7 @@ from app.services.meeting_room import (
     external_visitor_count,
     guest_vehicle_count,
     meeting_room_gaps,
+    seats_needed,
     unconfirmed_meeting_requirements,
 )
 
@@ -114,13 +115,18 @@ def build_admin_briefing(
     case = outcome.case_reference or outcome.outcome_id
     stage = bag.get("orchestration_stage") or outcome.status or "—"
     requester = outcome.requester_email or "unknown"
-    name = (bag.get("requester_display_name") or "").strip()
+    name = str(bag.get("requester_name") or bag.get("requester_display_name") or "").strip()
+    if name.lower() in {"there", "team"}:
+        name = ""
 
     # --- Meeting details (schema fields only; no open_requests here)
     meeting: list[str] = []
     if _field_is_confirmed(bag, "attendees") or bag.get("attendees") not in (None, ""):
         if bag.get("attendees") not in (None, ""):
-            meeting.append(f"Attendees (in person): {bag['attendees']}")
+            meeting.append(f"Attendees: {bag['attendees']}")
+            seats = seats_needed(bag)
+            if seats and str(seats) != str(bag.get("attendees")):
+                meeting.append(f"Seats needed in room: {seats} (incl. {external_visitor_count(bag)} visitor(s))")
     if bag.get("date"):
         meeting.append(f"Date: {bag['date']}")
     time_line = _time_summary(bag, confirmed_only=False)
@@ -133,7 +139,17 @@ def build_admin_briefing(
     if bag.get("primary_office") and not bag.get("location_preference"):
         meeting.append(f"Primary office: {bag['primary_office']}")
     for key, label in _FIELD_LABELS:
-        if key in {"attendees", "date", "external_visitors", "visitor_details", "guest_vehicles", "vehicle_numbers", "special_access"}:
+        if key in {
+            "attendees",
+            "date",
+            "meeting_type",
+            "location_preference",
+            "external_visitors",
+            "visitor_details",
+            "guest_vehicles",
+            "vehicle_numbers",
+            "special_access",
+        }:
             continue
         if key not in _BOOKING_KEYS:
             continue
@@ -190,8 +206,13 @@ def build_admin_briefing(
     # --- Still needed from requester
     gaps = meeting_room_gaps(bag)
     still = [g["question"] for g in gaps if g.get("question")]
+    defaults: list[str] = []
     if not still:
-        still = unconfirmed_meeting_requirements(bag)[:8]
+        for line in unconfirmed_meeting_requirements(bag)[:8]:
+            if line.endswith("(assumed)"):
+                defaults.append(line[: -len("(assumed)")].strip())
+            else:
+                still.append(line)
 
     # --- Status
     status_lines = [f"Stage: {stage}", f"Event: {event_title}"]
@@ -220,6 +241,7 @@ def build_admin_briefing(
         _section("VISITORS / ACCESS / PARKING", access) if access else "",
         _section("ROOM / INVENTORY", room_lines) if room_lines else "",
         _section("STILL NEEDED FROM REQUESTER", still) if still else "",
+        _section("DEFAULTS APPLIED (requester didn't say)", defaults) if defaults else "",
     ]
 
     if kind == "decision":

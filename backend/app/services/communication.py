@@ -60,6 +60,15 @@ def display_name_from_headers(headers: Optional[dict]) -> Optional[str]:
     return None
 
 
+def _clean_signed_name(value: object) -> Optional[str]:
+    text = re.sub(r"\s+", " ", str(value or "")).strip().strip(",.-").strip()
+    if not text or "@" in text or len(text) > 60 or len(text.split()) > 4:
+        return None
+    if text.lower() in {"there", "team", "user", "unknown", "admin", "regards", "thanks"}:
+        return None
+    return text
+
+
 def resolve_requester_name(
     session: Session,
     *,
@@ -70,16 +79,19 @@ def resolve_requester_name(
     headers: Optional[dict] = None,
     event: Optional[RawEmailEvent] = None,
 ) -> str:
-    """Prefer HR/master person name, then From display name, then email local-part."""
+    """HR/master name, then the name they signed with, then From display name, then email local-part."""
     pid = person_id
     addr = (email or "").strip().lower()
     hdrs = headers
+    signed = None
+    cached = None
     if outcome is not None:
         pid = pid or outcome.requester_person_id
         addr = addr or (outcome.requester_email or "").strip().lower()
-        cached = (outcome.facts or {}).get("requester_display_name")
-        if cached and str(cached).strip() and str(cached).strip().lower() != "there":
-            return str(cached).strip()
+        facts = outcome.facts or {}
+        signed = _clean_signed_name(facts.get("requester_name"))
+        cached = facts.get("requester_display_name")
+        cached = str(cached).strip() if cached and str(cached).strip().lower() != "there" else None
     if conversation is not None:
         pid = pid or conversation.requester_person_id
         addr = addr or (conversation.requester_email or "").strip().lower()
@@ -94,6 +106,10 @@ def resolve_requester_name(
         person = session.exec(select(Person).where(Person.email == addr)).first()
         if person and (person.name or "").strip():
             return person.name.strip()
+    if signed:
+        return signed
+    if cached:
+        return cached
     from_name = display_name_from_headers(hdrs)
     if from_name:
         return from_name
@@ -128,6 +144,7 @@ class CommunicationService:
         idempotency_key: Optional[str] = None,
         sender: Optional[str] = None,
         in_reply_to_message_id: Optional[str] = None,
+        polish: Optional[dict] = None,
     ) -> Communication:
         key = idempotency_key or (
             f"comm:{communication_type}:{outcome_id}:{subject}:{','.join(sorted(recipients))}"
@@ -137,6 +154,11 @@ class CommunicationService:
         ) or "orchestration@prototype.local"
 
         def _execute():
+            nonlocal body
+            if polish:
+                from app.ai.mail_writer import write_requester_mail
+
+                body = write_requester_mail(draft=body, **polish) or body
             msg = Communication(
                 tenant_id=self.tenant_id,
                 conversation_id=conversation_id,
@@ -257,34 +279,41 @@ class CommunicationService:
             subject = f"[INFORMATION REQUIRED] [{ref}] Request registered — details needed"
         else:
             subject = f"[INFORMATION REQUIRED] [{ref}] Additional details needed"
-        parts: list[str] = [f"Dear {name},\n"]
+        from app.services.no_resource_flow import format_outbound_greeting
+
+        parts: list[str] = [f"{format_outbound_greeting(name)}\n"]
         if first_contact:
-            parts.append(
-                f"Your meeting-room request has been registered as {ref}.\n"
-            )
+            parts.append(f"Thanks for your meeting-room request — it's registered as {ref}.\n")
         if understood:
-            parts.append("Here’s what we already have on file (confirmed / extracted — no need to repeat these):\n")
+            parts.append("Here's what I have so far:\n")
             parts.extend(f"- {line}" for line in understood if line)
             parts.append("")
         if questions:
-            if understood:
-                parts.append("We still need:\n")
-            elif first_contact:
-                parts.append("To proceed, please share:\n")
-            else:
-                parts.append("We still need:\n")
+            parts.append("To lock in a room I just need:\n" if understood or not first_contact else "To find you a room, please share:\n")
             parts.extend(f"- {q}" for q in questions)
-        if unconfirmed:
+        lines = [line for line in (unconfirmed or []) if line]
+        open_items = [line.replace(" (not confirmed)", "") for line in lines if not line.endswith("(assumed)")]
+        defaults = [line[: -len("(assumed)")].strip() for line in lines if line.endswith("(assumed)")]
+        if open_items:
             parts.append("")
-            parts.append("Not confirmed yet (reply if any of these should be different):\n")
-            parts.extend(f"- {line}" for line in unconfirmed if line)
+            parts.append("Also worth a quick check:\n")
+            parts.extend(f"- {line}" for line in open_items)
+        if defaults:
+            parts.append("")
+            parts.append("I've set these for you — reply if any should change:\n")
+            parts.extend(f"- {line}" for line in defaults)
         if questions:
-            parts.append(
-                "\nPlease reply with just the missing items above (Reply keeps this thread)."
-            )
+            parts.append("\nJust reply to this email with the details.")
         else:
-            parts.append("\nPlease reply to confirm we can proceed.")
+            parts.append("\nReply to this email to confirm and I'll go ahead.")
         body = "\n".join(parts)
+        outcome = self.session.get(Outcome, conversation.current_outcome_id) if conversation.current_outcome_id else None
+        polish = {
+            "purpose": "INFORMATION REQUIRED — ask for the missing details",
+            "facts": dict((outcome.facts if outcome else None) or {}),
+            "requester_name": name,
+            "case_reference": ref if ref != "PENDING" else None,
+        }
         # Prefer latest inbound provider message for Graph reply
         in_reply_to = None
         event = self.session.exec(
@@ -308,6 +337,7 @@ class CommunicationService:
             thread_id=conversation.thread_id,
             in_reply_to_message_id=in_reply_to,
             idempotency_key=f"clarify:{conversation.conversation_id}:{key_suffix}",
+            polish=polish,
         )
 
     def send_case_update(
@@ -368,6 +398,15 @@ class CommunicationService:
                 in_reply_to = event.provider_message_id or event.gmail_message_id
                 thread_id = thread_id or event.provider_conversation_id or event.gmail_thread_id
         key_suffix = suppress_fingerprint or event_id or hash(body)
+        polish = None
+        requester = (outcome.requester_email or "").strip().lower()
+        if requester and [r.strip().lower() for r in recipients] == [requester]:
+            polish = {
+                "purpose": label,
+                "facts": dict(outcome.facts or {}),
+                "requester_name": resolve_requester_name(self.session, outcome=outcome),
+                "case_reference": outcome.case_reference,
+            }
         comm = self.send(
             communication_type=communication_type,
             recipients=recipients,
@@ -378,6 +417,7 @@ class CommunicationService:
             thread_id=thread_id,
             in_reply_to_message_id=in_reply_to,
             idempotency_key=f"update:{outcome.outcome_id}:{communication_type}:{key_suffix}",
+            polish=polish,
         )
         if suppress_fingerprint and outcome.outcome_id:
             facts = dict(outcome.facts or {})

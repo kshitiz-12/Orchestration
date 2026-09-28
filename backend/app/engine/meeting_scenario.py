@@ -32,6 +32,7 @@ from app.services.meeting_room import (
     external_visitor_count,
     guest_vehicle_count,
     hybrid_needed,
+    seats_needed,
     is_booking_confirmation,
     is_employee_satisfied,
     is_low_risk_auto_bookable,
@@ -938,7 +939,7 @@ class ClientMeetingOrchestrator:
                 alt["label"] = f"{alt['label']} — {' + '.join(r.name for r in split)} are free"
         fp = requirement_fingerprint(merged)
         diagnosis = diagnose_no_resource(
-            attendees=merged.get("attendees"),
+            attendees=seats_needed(merged) or merged.get("attendees"),
             max_capacity=max_cap,
             zero_scores=zero_scores,
             busy_fits=merged.get("busy_fit_rooms"),
@@ -1120,7 +1121,7 @@ class ClientMeetingOrchestrator:
         merged.update(compute_hold_window(merged))
         booked = dict(merged.get("booked_room") or {})
         window = meeting_window(merged)
-        needed = _int(merged.get("attendees"))
+        needed = seats_needed(merged)
         parts = booked.get("rooms") or ([booked] if booked.get("resource_id") else [])
         current = [self.session.get(Resource, p.get("resource_id")) for p in parts if p.get("resource_id")]
         current = [r for r in current if r is not None]
@@ -1138,8 +1139,8 @@ class ClientMeetingOrchestrator:
 
         changed = {
             k: merged.get(k)
-            for k in ("attendees", "date", "preferred_time", "end_time", "duration_hours", "hybrid_av",
-                      "presentation_display", "location_preference")
+            for k in ("attendees", "external_visitors", "date", "preferred_time", "end_time", "duration_hours",
+                      "hybrid_av", "presentation_display", "location_preference")
             if merged.get(k) != prior.get(k)
         }
         change_lines = [f"- {k.replace('_', ' ')}: {v}" for k, v in changed.items()]
@@ -1228,7 +1229,7 @@ class ClientMeetingOrchestrator:
                 )
 
         if catering_needed(merged) and (
-            merged.get("attendees") != prior.get("attendees") or not catering_needed(prior)
+            seats_needed(merged) != seats_needed(prior) or not catering_needed(prior)
         ):
             self._requote_catering(outcome)
         self._sync_conversation_facts(outcome)
@@ -1342,19 +1343,20 @@ class ClientMeetingOrchestrator:
 
     def _pick_offsite(self, facts: dict, outcome_id: Optional[str] = None) -> Optional[Resource]:
         """Smallest free off-site venue that seats the whole group."""
-        needed = _int(facts.get("attendees"))
+        needed = seats_needed(facts)
         fits = [r for r in self._free_resources("OFFSITE_VENUE", facts, outcome_id) if _capacity(r) >= needed]
         return min(fits, key=_capacity) if fits else None
 
     def _plan_split(self, facts: dict, outcome_id: Optional[str] = None, max_rooms: int = 3) -> list[Resource]:
         """Fewest free rooms (same floor preferred) whose seats add up to the headcount."""
-        needed = _int(facts.get("attendees"))
+        needed = seats_needed(facts)
         if needed <= 0:
             return []
         usable = [
             r
             for r in self._free_resources("MEETING_ROOM", facts, outcome_id)
-            if _capacity(r) > 0 and score_meeting_room(r, {**facts, "attendees": _capacity(r)})[0] > 0
+            if _capacity(r) > 0
+            and score_meeting_room(r, {**facts, "attendees": _capacity(r), "external_visitors": 0})[0] > 0
         ]
 
         def greedy(pool: list[Resource]) -> list[Resource]:
@@ -1516,10 +1518,7 @@ class ClientMeetingOrchestrator:
         extra_rooms: Optional[list[Resource]] = None,
         intro_note: Optional[str] = None,
     ) -> None:
-        try:
-            needed = int(facts.get("attendees") or 1)
-        except (TypeError, ValueError):
-            needed = 1
+        needed = seats_needed(facts) or 1
         rooms = [room, *(extra_rooms or [])]
         offsite = room.type == "OFFSITE_VENUE"
         display_name = " + ".join(r.name for r in rooms)
@@ -1588,9 +1587,9 @@ class ClientMeetingOrchestrator:
         self._save_facts(outcome, facts)
 
         intro = (
-            "Thanks — we’ve updated what we have on file for your request.\n\n"
+            "Thanks — I've updated your request with the changes.\n\n"
             if updated
-            else "Good news — a room is available for your request.\n\n"
+            else "Good news — I found a room that fits and I'm holding it for you.\n\n"
         )
         replaced = facts.pop("replaced_room_note", None)
         if replaced:
@@ -1599,18 +1598,24 @@ class ClientMeetingOrchestrator:
         if intro_note:
             intro = f"{intro_note}\n\n"
         if len(rooms) > 1:
-            room_line = "Proposed rooms (group split across them): " + ", ".join(
+            room_line = "Rooms (your group split across them): " + ", ".join(
                 f"{r.name} (seats {_capacity(r)})" for r in rooms
             )
         elif offsite:
-            room_line = f"Proposed venue (off-site): {room.name}"
+            room_line = f"Venue (off-site): {room.name} (seats {_capacity(room)})"
         else:
-            room_line = f"Proposed room: {room.name}"
+            room_line = f"Room: {room.name} (seats {_capacity(room)})"
         confirmed, unconfirmed = requirement_email_sections(facts)
-        req_block = "\n".join(f"- {line}" for line in confirmed) or "- (none confirmed yet)"
+        req_block = "\n".join(f"- {line}" for line in confirmed)
+        open_items = [line.replace(" (not confirmed)", "") for line in unconfirmed if not line.endswith("(assumed)")]
+        defaults = [line[: -len("(assumed)")].strip() for line in unconfirmed if line.endswith("(assumed)")]
         unc_block = ""
-        if unconfirmed:
-            unc_block = "\n\nNot confirmed yet:\n" + "\n".join(f"- {line}" for line in unconfirmed)
+        if open_items:
+            unc_block += "\n\nPlease double-check:\n" + "\n".join(f"- {line}" for line in open_items)
+        if defaults:
+            unc_block += "\n\nI've set these for you — reply if any should change:\n" + "\n".join(
+                f"- {line}" for line in defaults
+            )
         score = float((facts.get("recommended_room") or {}).get("score") or 0)
         # Low-risk path auto-books immediately — skip the confirm ask email
         special = len(rooms) > 1 or offsite
@@ -1620,14 +1625,12 @@ class ClientMeetingOrchestrator:
                 f"{format_outbound_greeting(name)}\n\n"
                 f"{intro}"
                 f"{room_line}\n"
-                f"Case: {outcome.case_reference}\n\n"
-                f"Here’s what we have as confirmed / extracted:\n{req_block}"
-                f"{unc_block}\n\n"
-                "Should we confirm this booking?\n"
-                'Reply "confirm" (or "yes") to lock it in.\n'
-                f"We're holding the room for you for {_hold_hours_label()}; after that it's released for others.\n"
-                "If you need any other facilities — AV, catering, visitors, parking, a different floor — "
-                "mention them in your reply and we’ll update before confirming."
+                + (f"\nYour booking:\n{req_block}" if req_block else "")
+                + f"{unc_block}\n\n"
+                f'Reply "confirm" to lock it in — I\'m holding the room for {_hold_hours_label()}, '
+                "after which it's released for others.\n"
+                "Need anything else (catering, AV, parking, a different floor)? Just mention it in your reply.\n\n"
+                f"Case: {outcome.case_reference}"
             )
             self.comms.send_case_update(
                 outcome=outcome,
@@ -1914,10 +1917,7 @@ class ClientMeetingOrchestrator:
             self._na_task(outcome, "INVOICE_POST")
             self._na_task(outcome, "INVOICE_PAY")
             return
-        try:
-            headcount = int(facts.get("attendees") or 1)
-        except (TypeError, ValueError):
-            headcount = 1
+        headcount = seats_needed(facts) or 1
         from app.core.config import get_settings
         from app.services.catering import catering_quote
 

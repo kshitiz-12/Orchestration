@@ -103,6 +103,22 @@ Same facts can look like anything. Illustrations, not an exhaustive list:
     are ordinary fact updates — put them in fact_delta.set; the platform re-checks.
   • open_requests must list EVERY non-field ask in THIS message, even if several appear
     in one sentence ("photographer, name tents and a translator" → three items).
+    But an ask you already mapped onto a field is NOT an open request: "non veg is fine"
+    → dietary, "display + VC" → presentation_display / hybrid_av, "2 clients visiting" →
+    external_visitors, "no parking" → guest_vehicles. Only what no field captures goes in
+    open_requests ("tea coffee" stays — it says WHAT catering; so do "extra chairs", etc.).
+
+Seating — the room must seat everyone physically present:
+  • attendees = the headcount they state. external_visitors = in-person guests from outside.
+  • Set visitors_counted_in_attendees=true when the stated headcount ALREADY includes the
+    visitors ("15 people including 2 clients", "total 14 of which 2 are external").
+    Set it false when visitors come on top ("12 of us + 2 clients", "12 employees; 2
+    external visitors will join"). Remote / VC participants never need a seat and are
+    not external_visitors.
+
+Requester name:
+  • If the sender signs off with their name ("Regards, Aditya Test", "- Priya"), set
+    requester_name to it. Never guess from the email address.
 
 fact_delta: { "set": {}, "unset": [], "assumptions": [],
   "speech_acts": ["provide_facts"|"confirm"|"cancel"|"satisfied"],
@@ -118,6 +134,8 @@ location_preference to that office (do not invent a different site).
 
 
 _INTERPRETER_STATE_KEYS = REQUIREMENT_FIELDS + (
+    "visitors_counted_in_attendees",
+    "requester_name",
     "open_requests",
     "primary_office",
     "pending_confirmation",

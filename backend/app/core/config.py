@@ -85,6 +85,10 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-3.5-flash-lite"
     gemini_fallback_model: str = "gemini-3.1-flash-lite"
     ai_prompt_version: str = "v1.1.0"
+    # Gemini rewrites requester emails in natural language (template is the fallback)
+    ai_mail_writer: bool = True
+    # Sign-off on requester emails
+    mail_signature: str = "Workplace Team"
 
     # Active email channel: cloudmailin (prototype default) | outlook | gmail
     email_provider: str = "cloudmailin"

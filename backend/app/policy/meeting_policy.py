@@ -127,10 +127,9 @@ def build_no_resource_alternatives(
 ) -> list[dict[str, Any]]:
     """Structured alternatives when inventory cannot satisfy the request."""
     policy = policy or default_meeting_policy()
-    try:
-        needed = int(facts.get("attendees") or 0)
-    except (TypeError, ValueError):
-        needed = 0
+    from app.services.meeting_room import seats_needed
+
+    needed = seats_needed(facts)
     alts: list[dict[str, Any]] = []
     if policy.no_resource_offer_larger and max_capacity and needed > max_capacity:
         alts.append(

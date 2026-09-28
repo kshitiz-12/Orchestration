@@ -57,6 +57,8 @@ How to decide:
 - "no / reject / not possible / budget nahi hai" → REJECT with reason.
 - Naming a room or venue to use ("put them in F2-R2", "go with Hyatt ballroom", "book the auditorium") → BOOK.
   Match inventory names loosely (f2 r2 → F2-R2). Off-site names are allowed.
+  A room must seat case.seats_needed_in_room (attendees plus in-person visitors). If they name one that is
+  too small, still return it but set needs_clarification and ask whether to proceed.
   Prefer rooms marked free_for_this_meeting; if they name a busy one, still return it (the system will refuse and tell them).
   "put them in F2-R1 and F2-R2" → BOOK with rooms ["Meeting Room F2-R1", "Huddle Room F2-R2"].
   Naming a room when the case is ALREADY booked means move the booking → BOOK.

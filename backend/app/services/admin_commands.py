@@ -27,6 +27,7 @@ from app.services.meeting_room import (
     apply_meeting_room_defaults,
     compute_hold_window,
     requirement_fingerprint,
+    seats_needed,
 )
 from app.services.no_resource_flow import detect_no_resource_choice, format_outbound_greeting
 from app.services.room_booking import meeting_window
@@ -334,6 +335,7 @@ class AdminCommandHandler:
                 if facts.get("pending_confirmation")
                 else None,
                 "booked_room": (facts.get("booked_room") or {}).get("name"),
+                "seats_needed_in_room": seats_needed(facts),
                 "pending_approvals": [
                     {"type": a.approval_type, "payload": a.payload} for a in self._pending_approvals(outcome)
                 ],
@@ -694,7 +696,7 @@ class AdminCommandHandler:
             name=name[:120],
             status="AVAILABLE",
             attributes={
-                "capacity": int(facts.get("attendees") or 0) or None,
+                "capacity": seats_needed(facts) or None,
                 "offsite": True,
                 "added_by": self.admin_email,
             },

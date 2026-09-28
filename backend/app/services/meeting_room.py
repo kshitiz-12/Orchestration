@@ -160,6 +160,24 @@ def external_visitor_count(facts: dict[str, Any]) -> int:
         return 0
 
 
+def seats_needed(facts: dict[str, Any]) -> int:
+    """People physically in the room: attendees plus in-person external visitors.
+
+    The interpreter sets ``visitors_counted_in_attendees`` when the stated headcount
+    already includes the visitors ("15 people including 2 clients"). Remote
+    participants never need a seat.
+    """
+    try:
+        attendees = int(facts.get("attendees") or 0)
+    except (TypeError, ValueError):
+        attendees = 0
+    visitors = external_visitor_count(facts)
+    included = str(facts.get("visitors_counted_in_attendees") or "").strip().lower() in {"true", "yes", "1"}
+    if included or facts.get("visitors_counted_in_attendees") is True:
+        return max(attendees, visitors)
+    return attendees + visitors
+
+
 def guest_vehicle_count(facts: dict[str, Any]) -> int:
     try:
         return int(facts.get("guest_vehicles") or 0)
@@ -525,10 +543,18 @@ def summarize_meeting_requirements(facts: dict[str, Any]) -> list[str]:
     """Upper block: confirmed / extracted fields only."""
     facts = facts or {}
     lines: list[str] = []
+    visitors = external_visitor_count(facts) if _field_is_confirmed(facts, "external_visitors") else 0
+    names = facts.get("visitor_details") if _field_is_confirmed(facts, "visitor_details") else None
     if _field_is_confirmed(facts, "attendees"):
-        lines.append(f"Attendees (in person): {facts['attendees']}")
-    if _field_is_confirmed(facts, "external_visitors") and external_visitor_count(facts):
-        lines.append(f"External visitors: {facts['external_visitors']}")
+        line = f"Attendees: {facts['attendees']}"
+        if visitors:
+            line += f" + {visitors} visitor{'s' if visitors != 1 else ''}"
+            if names:
+                line += f" ({names})"
+            line += f" — {seats_needed(facts)} seats"
+        lines.append(line)
+    elif visitors:
+        lines.append(f"External visitors: {visitors}" + (f" ({names})" if names else ""))
     if _field_is_confirmed(facts, "date"):
         lines.append(f"Date: {facts['date']}")
     time_line = _time_summary(facts, confirmed_only=True)
@@ -537,9 +563,14 @@ def summarize_meeting_requirements(facts: dict[str, Any]) -> list[str]:
     for key, label in _FIELD_LABELS:
         if key in {"attendees", "date", "external_visitors"}:
             continue
+        if key == "visitor_details" and visitors:
+            continue
         if not _field_is_confirmed(facts, key):
             continue
-        lines.append(f"{label}: {facts.get(key)}")
+        value = facts.get(key)
+        if key in {"special_access", "guest_vehicles", "vehicle_numbers"} and str(value).strip().lower() in _NONE_LIKE | {"0"}:
+            continue
+        lines.append(f"{label}: {value}")
     for item in facts.get("open_requests") or []:
         text = item.get("text") if isinstance(item, dict) else str(item)
         if text:
@@ -704,6 +735,7 @@ def requirement_fingerprint(facts: dict[str, Any]) -> str:
         "presentation_display",
         "guest_vehicles",
         "external_visitors",
+        "visitors_counted_in_attendees",
         "dietary",
         "confidentiality",
     )
@@ -749,10 +781,7 @@ def score_meeting_room(room: Any, facts: dict[str, Any]) -> tuple[float, list[st
     attrs = getattr(room, "attributes", None) or {}
     reasons: list[str] = []
     score = 60.0
-    try:
-        needed = int(facts.get("attendees") or 1)
-    except (TypeError, ValueError):
-        needed = 1
+    needed = seats_needed(facts) or 1
     try:
         capacity = int(attrs.get("capacity") or 0) or 999
     except (TypeError, ValueError):

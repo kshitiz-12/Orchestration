@@ -471,7 +471,7 @@ def test_meeting_room_proposes_then_confirms(session: Session):
         select(Communication).where(Communication.outcome_id == outcome.outcome_id)
     ).all()
     assert any("CONFIRM BOOKING" in (m.subject or "") for m in propose_mail)
-    assert any("should we confirm" in (m.body or "").lower() for m in propose_mail)
+    assert any('reply "confirm"' in (m.body or "").lower() for m in propose_mail)
     assert any("hybrid / av: no" in (m.body or "").lower() for m in propose_mail)
 
     confirm = ExtractionResult(
@@ -618,4 +618,6 @@ def test_meeting_room_full_checklist_with_catering_proposes(session: Session):
     ).all()
     assert any("CONFIRM BOOKING" in (m.subject or "") for m in mails)
     confirm = next(m for m in mails if "CONFIRM BOOKING" in (m.subject or ""))
-    assert "should we confirm" in (confirm.body or "").lower()
+    body = (confirm.body or "").lower()
+    assert 'reply "confirm"' in body
+    assert "assumed" not in body and "extracted" not in body
