@@ -187,7 +187,10 @@ async def cloudmailin_inbound(
             body_text=normalized.body_text,
             source=PROVIDER,
             attachments=[a.model_dump() for a in normalized.attachments],
-            headers=normalized.original_metadata.get("headers") or {},
+            headers={
+                **(normalized.original_metadata.get("headers") or {}),
+                **({"_envelope": payload["envelope"]} if isinstance(payload.get("envelope"), dict) else {}),
+            },
             body_html=normalized.body_html,
         )
     except Exception as exc:  # noqa: BLE001

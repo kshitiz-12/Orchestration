@@ -55,6 +55,14 @@ def run_forever() -> None:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("sla_tick_failed", error=str(exc))
 
+            try:
+                from app.services.hold_sweeper import sweep_proposal_holds
+
+                sweep_proposal_holds(session, tenant.tenant_id)
+            except Exception as exc:  # noqa: BLE001
+                session.rollback()
+                logger.warning("hold_sweep_failed", error=str(exc))
+
             # Outlook/Gmail poll only — CloudMailin pushes via webhook
             if poll_enabled:
                 now = time.time()

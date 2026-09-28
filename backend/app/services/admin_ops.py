@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal, Optional
 
 from sqlalchemy.orm.attributes import flag_modified
@@ -49,6 +50,38 @@ def admin_ops_email() -> Optional[str]:
     if not raw:
         return None
     return raw.lower()
+
+
+def _emails(raw: Optional[str]) -> list[str]:
+    return [e.strip().lower() for e in re.split(r"[,;\s]+", raw or "") if "@" in e]
+
+
+def backup_ops_emails() -> list[str]:
+    return _emails(get_settings().admin_backup_emails)
+
+
+def approver_emails(approval_type: str) -> list[str]:
+    """Who decides this approval: manager for spend, finance for money movement, else ops."""
+    settings = get_settings()
+    kind = (approval_type or "").upper()
+    if any(t in kind for t in ("INVOICE", "PAYMENT", "FINANCE", "PO_")):
+        picked = _emails(settings.approval_finance_email)
+    elif "SPEND" in kind or "CATERING" in kind or "MANAGER" in kind:
+        picked = _emails(settings.approval_manager_email)
+    else:
+        picked = []
+    return picked or ([admin_ops_email()] if admin_ops_email() else [])
+
+
+def trusted_ops_senders() -> set[str]:
+    """Mailboxes whose replies may act on cases."""
+    settings = get_settings()
+    out = set(backup_ops_emails())
+    out.update(_emails(settings.approval_manager_email))
+    out.update(_emails(settings.approval_finance_email))
+    if admin_ops_email():
+        out.add(admin_ops_email())
+    return out
 
 
 def _open_request_texts(facts: dict[str, Any]) -> list[str]:
@@ -213,7 +246,20 @@ def build_admin_briefing(
             )
         )
 
-    parts.append("Reply on this thread from the ops mailbox, or use the dashboard.")
+    parts.append(
+        _section(
+            "JUST REPLY IN YOUR OWN WORDS — FOR EXAMPLE",
+            [
+                "\"approve\" / \"go ahead\"",
+                "\"put them in F2-R2\" / \"book Hyatt ballroom\"",
+                "\"make it 25 people and 3pm\"",
+                "\"reject, no off-site budget this quarter\"",
+                "\"hold, checking with finance\"",
+                "\"tell them the venue visit is Monday 11am\"",
+            ],
+        )
+    )
+    parts.append("You'll get an OPS DONE / OPS NOT APPLIED receipt showing how your reply was understood.")
     parts.append("")
 
     body = "\n".join(p for p in parts if p is not None).rstrip() + "\n"
@@ -240,18 +286,23 @@ class AdminOpsNotifier:
         detail: str = "",
         fingerprint: str,
         facts: Optional[dict[str, Any]] = None,
+        recipients: Optional[list[str]] = None,
     ) -> bool:
         """Returns True if a mail was sent. Dedupes by fingerprint."""
-        to = admin_ops_email()
-        if not to:
+        primary = [e for e in (recipients or [admin_ops_email()]) if e]
+        if kind == "decision":
+            primary += backup_ops_emails()
+        requester = (outcome.requester_email or "").strip().lower()
+        to_list: list[str] = []
+        for addr in primary:
+            if addr == requester:
+                logger.warning("admin_ops_email_matches_requester_skipped", case=outcome.case_reference, email=addr)
+                continue
+            if addr not in to_list:
+                to_list.append(addr)
+        if not to_list:
             return False
-        if outcome.requester_email and to == outcome.requester_email.strip().lower():
-            logger.warning(
-                "admin_ops_email_matches_requester_skipped",
-                case=outcome.case_reference,
-                email=to,
-            )
-            return False
+        to = ", ".join(to_list)
 
         bag = dict(facts or outcome.facts or {})
         history = list(bag.get("admin_ops_notices") or [])
@@ -270,7 +321,7 @@ class AdminOpsNotifier:
             outcome=outcome,
             communication_type="ACTION_REQUIRED" if kind == "decision" else "INFORMATION_ONLY",
             body=body,
-            recipients=[to],
+            recipients=to_list,
             action_label=label,
             subject_hint=subject_hint,
             suppress_fingerprint=f"admin_ops:{fingerprint}",
@@ -379,6 +430,7 @@ class AdminOpsNotifier:
             outcome,
             kind="decision",
             headline=f"Approval needed — {approval_type.replace('_', ' ')}",
-            fingerprint=f"approval:{outcome.outcome_id}:{approval_type}",
+            fingerprint=f"approval:{outcome.outcome_id}:{approval_type}:{(facts or {}).get('catering_approval_id') or ''}",
             facts=facts,
+            recipients=approver_emails(approval_type) + ([admin_ops_email()] if admin_ops_email() else []),
         )

@@ -342,11 +342,19 @@ def reduce_meeting_facts(
     merged = apply_grounded_reply_signals(
         merged, prior_facts=prior_facts, source_text=source_text
     )
-    incoming_for_open = {}
+    incoming_for_open: dict[str, Any] = {}
+    asks: list[Any] = []
     for bag in (primary_entities, candidate_entities):
         if bag:
             incoming_for_open.update(bag)
-    merged["open_requests"] = merge_open_requests(merged, incoming_for_open)
+            for key in ("open_requests", "additional_requests"):
+                value = bag.get(key)
+                asks.extend(value if isinstance(value, list) else [value] if value else [])
+    # The delta may have overwritten the list; the ledger is always prior + everything new.
+    current = merged.get("open_requests")
+    incoming_for_open["open_requests"] = (current if isinstance(current, list) else []) + asks
+    incoming_for_open.pop("additional_requests", None)
+    merged["open_requests"] = merge_open_requests(prior_facts or {}, incoming_for_open)
 
     state = state_from_facts(merged)
     out = facts_from_state(state)

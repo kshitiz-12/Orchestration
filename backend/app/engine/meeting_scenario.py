@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
 
 from sqlalchemy.orm.attributes import flag_modified
@@ -48,8 +49,99 @@ from app.services.no_resource_flow import (
     open_request_delta,
     search_relevant_changed,
 )
+from app.services.room_booking import RoomBookingService, meeting_window
 
 logger = get_logger(__name__)
+
+
+_CANCEL_RE = re.compile(
+    r"\b(?:cancel(?:l?ed)?|call(?:ed)?\s+off|scrap)\s+(?:the\s+|my\s+|this\s+|our\s+)?"
+    r"(?:meeting|booking|room|request|reservation|event|it)\b"
+    r"|\bno\s+longer\s+need(?:ed)?\b"
+    r"|\b(?:meeting|booking|event)\s+(?:is\s+|has\s+been\s+)?(?:cancel(?:l?ed)?|called\s+off)\b",
+    re.I,
+)
+
+
+def wants_cancel(extraction: Optional[ExtractionResult], text: str) -> bool:
+    """Gemini's speech act leads; phrase match only when the model gave no speech acts."""
+    if extraction is not None:
+        fd = extraction.fact_delta if isinstance(extraction.fact_delta, dict) else {}
+        acts = [str(a).lower() for a in (fd.get("speech_acts") or [])]
+        if "cancel" in acts:
+            return True
+        if acts:
+            return False
+    return bool(_CANCEL_RE.search(text or ""))
+
+
+def _hold_hours_label() -> str:
+    from app.core.config import get_settings
+
+    hours = float(get_settings().proposal_hold_hours or 24)
+    return f"{int(hours)} hours" if hours == int(hours) else f"{hours:g} hours"
+
+
+def ai_alternative_choice(extraction: Optional[ExtractionResult]) -> Optional[str]:
+    """Gemini's pick among no-room options. None = the model didn't answer (use fallback)."""
+    if extraction is None:
+        return None
+    fd = extraction.fact_delta if isinstance(extraction.fact_delta, dict) else {}
+    code = str(fd.get("alternative_choice") or "").strip().upper()
+    if not code:
+        return None
+    return code if code in {"LARGER_VENUE", "SPLIT_ROOMS", "DIFFERENT_TIME", "REDUCE_HEADCOUNT"} else "NONE"
+
+
+def _int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _capacity(room: Resource) -> int:
+    return _int((room.attributes or {}).get("capacity"))
+
+
+def ensure_offsite_venues(session: Session, tenant_id: str) -> None:
+    """Upsert OFFSITE_VENUE resources from OFFSITE_VENUES ("Name:capacity; Name:capacity")."""
+    from app.core.config import get_settings
+
+    raw = (get_settings().offsite_venues or "").strip()
+    if not raw:
+        return
+    existing = {
+        (r.name or "").strip().lower(): r
+        for r in session.exec(
+            select(Resource).where(Resource.tenant_id == tenant_id, Resource.type == "OFFSITE_VENUE")
+        ).all()
+    }
+    for chunk in re.split(r"[;\n]", raw):
+        if not chunk.strip():
+            continue
+        name, _, cap = chunk.rpartition(":")
+        if not name.strip():
+            name, cap = cap, ""
+        name = name.strip()
+        capacity = _int(cap.strip())
+        row = existing.get(name.lower())
+        if row is None:
+            session.add(
+                Resource(
+                    tenant_id=tenant_id,
+                    type="OFFSITE_VENUE",
+                    name=name,
+                    status="AVAILABLE",
+                    attributes={"capacity": capacity, "offsite": True, "video_conferencing": True,
+                                "presentation_display": True, "display": True},
+                )
+            )
+        elif capacity and _capacity(row) != capacity:
+            row.attributes = {**(row.attributes or {}), "capacity": capacity}
+            session.add(row)
+    session.flush()
+
 
 MEETING_ROOM_TEMPLATE = {
     "code": "MEETING_ROOM",
@@ -345,6 +437,7 @@ class ClientMeetingOrchestrator:
         self.engine = engine
         self.comms = comms
         self.admin_ops = AdminOpsNotifier(session, tenant_id, comms)
+        self.bookings = RoomBookingService(session, tenant_id)
 
     def _save_facts(self, outcome: Outcome, facts: dict) -> None:
         """Persist a new facts dict so JSON mutations are not dropped on commit."""
@@ -352,11 +445,20 @@ class ClientMeetingOrchestrator:
         self.session.add(outcome)
         flag_modified(outcome, "facts")
 
-    def run(self, outcome: Outcome, facts: dict, extraction: Optional[ExtractionResult] = None) -> None:
+    def run(
+        self,
+        outcome: Outcome,
+        facts: dict,
+        extraction: Optional[ExtractionResult] = None,
+        *,
+        prior_facts: Optional[dict] = None,
+    ) -> None:
+        """`prior_facts` = the case before this message; callers that pre-merge facts must pass it."""
         ensure_meeting_room_resources(self.session, self.tenant_id)
+        ensure_offsite_venues(self.session, self.tenant_id)
         policy = load_meeting_policy(self.session, self.tenant_id)
         ensure_meeting_policy_rule(self.session, self.tenant_id)
-        prior_snapshot = dict(outcome.facts or {})
+        prior_snapshot = dict(prior_facts if prior_facts is not None else (outcome.facts or {}))
         text_blob = ""
         if extraction:
             raw = (extraction.entities or {}).get("raw_reply") or ""
@@ -419,6 +521,11 @@ class ClientMeetingOrchestrator:
             if not (outcome.title or "").startswith("Meeting for "):
                 outcome.title = outcome.summary[:200]
 
+        if wants_cancel(extraction, text_blob) and (merged.get("orchestration_stage") or "") != MeetingStage.CANCELLED.value:
+            self._save_facts(outcome, merged)
+            self.cancel_case(outcome, actor="requester", reason=(extraction.summary if extraction else "") or "")
+            return
+
         if merged.get("booked_room") and (
             merged.get("employee_satisfied")
             or is_employee_satisfied(text_blob)
@@ -445,6 +552,21 @@ class ClientMeetingOrchestrator:
             merged = apply_internal_vc_policy(merged)
             hold = compute_hold_window(merged)
             merged.update(hold)
+            if self._proposed_room_taken(outcome, merged):
+                # Hold lapsed and someone else booked the slot — find another room
+                taken = (merged.get("proposed_room") or {}).get("name")
+                merged["pending_confirmation"] = False
+                merged["booking_confirmed"] = False
+                merged["proposed_room"] = None
+                merged["last_action"] = "proposal_slot_taken"
+                self._save_facts(outcome, merged)
+                room = self._pick_room(merged, outcome.outcome_id)
+                if room:
+                    merged["replaced_room_note"] = f"{taken} was booked by someone else after the hold expired."
+                    self._propose(outcome, room, merged, updated=True)
+                else:
+                    self._enter_no_resource(outcome, merged, prior=prior_snapshot, policy=policy)
+                return
             merged["orchestration_stage"] = MeetingStage.AUTO_BOOKED.value
             self._save_facts(outcome, merged)
             self._finalize_booking(outcome, actor="requester")
@@ -469,6 +591,7 @@ class ClientMeetingOrchestrator:
                 prior=prior_snapshot,
                 text_blob=text_blob,
                 policy=policy,
+                extraction=extraction,
             )
             if handled:
                 return
@@ -498,7 +621,7 @@ class ClientMeetingOrchestrator:
             prev_fp = (merged.get("proposed_room") or {}).get("fingerprint")
             new_fp = requirement_fingerprint(merged)
             if prev_fp and prev_fp != new_fp:
-                room = self._pick_room(merged)
+                room = self._pick_room(merged, outcome.outcome_id)
                 if room:
                     self._propose(outcome, room, merged, updated=True)
                     self._maybe_auto_book_low_risk(outcome)
@@ -525,7 +648,7 @@ class ClientMeetingOrchestrator:
                 )
             return
 
-        room = self._pick_room(merged)
+        room = self._pick_room(merged, outcome.outcome_id)
         if not room:
             self._enter_no_resource(outcome, merged, prior=prior_snapshot, policy=policy)
             return
@@ -553,10 +676,18 @@ class ClientMeetingOrchestrator:
         prior: dict,
         text_blob: str,
         policy: Any,
+        extraction: Optional[ExtractionResult] = None,
     ) -> bool:
         """Return True if the reply was fully handled (do not re-search)."""
         alts = list(prior.get("no_resource_alternatives") or merged.get("no_resource_alternatives") or [])
-        choice = detect_no_resource_choice(text_blob, alts)
+        ai_code = ai_alternative_choice(extraction)
+        if ai_code is None:
+            choice = detect_no_resource_choice(text_blob, alts)
+        elif ai_code == "NONE":
+            choice = None
+        else:
+            label = next((a.get("label") for a in alts if a.get("code") == ai_code), None)
+            choice = {"code": ai_code, "label": label or ai_code.replace("_", " ").title(), "source": "gemini"}
         facts_changed = search_relevant_changed(prior, merged)
         new_opens = open_request_delta(prior, merged)
 
@@ -599,6 +730,8 @@ class ClientMeetingOrchestrator:
             )
             self._save_facts(outcome, merged)
             self._annotate_open_no_room_exception(outcome, choice=choice, extras=new_opens)
+            if self._fulfil_choice(outcome, merged, choice):
+                return True
             if outcome.requester_email:
                 extra_lines = ""
                 if new_opens:
@@ -668,6 +801,59 @@ class ClientMeetingOrchestrator:
         )
         return True
 
+    def _fulfil_choice(self, outcome: Outcome, merged: dict, choice: dict) -> bool:
+        """Hold a concrete off-site venue / split plan right away when inventory allows it."""
+        code = choice.get("code")
+        facts = apply_meeting_room_defaults(dict(merged))
+        facts.update(compute_hold_window(facts))
+        if code == "LARGER_VENUE":
+            venue = self._pick_offsite(facts, outcome.outcome_id)
+            if not venue:
+                return False
+            self._propose(
+                outcome,
+                venue,
+                facts,
+                updated=False,
+                intro_note=f"You chose a larger venue — {venue.name} (seats {_capacity(venue)}) is free at that time.",
+            )
+        elif code == "SPLIT_ROOMS":
+            plan = self._plan_split(facts, outcome.outcome_id)
+            if not plan:
+                return False
+            self._propose(
+                outcome,
+                plan[0],
+                facts,
+                updated=False,
+                extra_rooms=plan[1:],
+                intro_note="You chose to split the group — these rooms are free at the same time.",
+            )
+        else:
+            return False
+        self._resolve_no_room_exception(outcome, f"Requester chose {code}; proposal held")
+        self.admin_ops.action_requester_choice(
+            outcome,
+            choice_label=str(choice.get("label") or code),
+            facts=dict(outcome.facts or facts),
+        )
+        return True
+
+    def _resolve_no_room_exception(self, outcome: Outcome, resolution: str) -> None:
+        from app.models.outcome import ExceptionRecord
+
+        for row in self.session.exec(
+            select(ExceptionRecord).where(
+                ExceptionRecord.outcome_id == outcome.outcome_id,
+                ExceptionRecord.exception_type == "NO_MEETING_ROOM",
+                ExceptionRecord.status.in_(["OPEN", "IN_PROGRESS"]),  # type: ignore[attr-defined]
+            )
+        ).all():
+            row.status = "RESOLVED"
+            row.resolution = resolution
+            row.resolved_at = utcnow()
+            self.session.add(row)
+
     def _annotate_open_no_room_exception(
         self,
         outcome: Outcome,
@@ -735,11 +921,27 @@ class ClientMeetingOrchestrator:
             room_scores=zero_scores,
             policy=policy,
         )
+        offsite = self._pick_offsite(merged, outcome.outcome_id)
+        split = self._plan_split(merged, outcome.outcome_id)
+        merged["offsite_option"] = (
+            {"resource_id": offsite.resource_id, "name": offsite.name, "capacity": _capacity(offsite)}
+            if offsite
+            else None
+        )
+        merged["split_option"] = [
+            {"resource_id": r.resource_id, "name": r.name, "capacity": _capacity(r)} for r in split
+        ] or None
+        for alt in alternatives:
+            if alt.get("code") == "LARGER_VENUE" and offsite:
+                alt["label"] = f"{alt['label']} — {offsite.name} (seats {_capacity(offsite)}) is free"
+            elif alt.get("code") == "SPLIT_ROOMS" and split:
+                alt["label"] = f"{alt['label']} — {' + '.join(r.name for r in split)} are free"
         fp = requirement_fingerprint(merged)
         diagnosis = diagnose_no_resource(
             attendees=merged.get("attendees"),
             max_capacity=max_cap,
             zero_scores=zero_scores,
+            busy_fits=merged.get("busy_fit_rooms"),
         )
         already_mailed = (
             (prior.get("orchestration_stage") or "").upper() == MeetingStage.NO_RESOURCE.value
@@ -842,6 +1044,9 @@ class ClientMeetingOrchestrator:
         prior: Optional[dict] = None,
     ) -> None:
         prior = prior or {}
+        if prior.get("booked_room") and search_relevant_changed(prior, merged):
+            self._rebook_after_change(outcome, merged, prior)
+            return
         watch = (
             "catering",
             "hybrid_av",
@@ -889,16 +1094,194 @@ class ClientMeetingOrchestrator:
                     recipients=[outcome.requester_email],
                     action_label="UPDATE NOTED",
                 )
+            if "catering" in deltas and catering_needed(merged) and not catering_needed(prior):
+                self._requote_catering(outcome)
+            if deltas.get("open_requests"):
+                self.admin_ops.notify(
+                    outcome,
+                    kind="decision",
+                    headline="New asks after booking",
+                    detail="; ".join(
+                        (x.get("text") if isinstance(x, dict) else str(x)) for x in deltas["open_requests"]
+                    ),
+                    fingerprint=f"post_asks:{outcome.outcome_id}:{len(merged.get('open_requests') or [])}",
+                    facts=dict(outcome.facts or merged),
+                )
         else:
             merged["last_action"] = "monitoring"
             merged["outbound_required"] = "suppressed"
             self._save_facts(outcome, merged)
             self.comms.record_suppressed(outcome=outcome, reason="no_new_facts_post_booking")
 
+    def _rebook_after_change(self, outcome: Outcome, merged: dict, prior: dict) -> None:
+        """Headcount / date / time / equipment changed after booking: keep, move, or escalate."""
+        merged = apply_meeting_room_defaults(merged)
+        merged = apply_internal_vc_policy(merged)
+        merged.update(compute_hold_window(merged))
+        booked = dict(merged.get("booked_room") or {})
+        window = meeting_window(merged)
+        needed = _int(merged.get("attendees"))
+        parts = booked.get("rooms") or ([booked] if booked.get("resource_id") else [])
+        current = [self.session.get(Resource, p.get("resource_id")) for p in parts if p.get("resource_id")]
+        current = [r for r in current if r is not None]
+
+        still_fits = bool(current) and all(
+            self.bookings.is_free(r, window, exclude_outcome_id=outcome.outcome_id) for r in current
+        )
+        if still_fits:
+            if len(current) == 1:
+                still_fits = score_meeting_room(current[0], merged)[0] > 0
+            else:
+                still_fits = sum(_capacity(r) for r in current) >= needed
+        if not current and booked.get("external_venue"):
+            still_fits = None  # off-site outside inventory — ops must re-confirm
+
+        changed = {
+            k: merged.get(k)
+            for k in ("attendees", "date", "preferred_time", "end_time", "duration_hours", "hybrid_av",
+                      "presentation_display", "location_preference")
+            if merged.get(k) != prior.get(k)
+        }
+        change_lines = [f"- {k.replace('_', ' ')}: {v}" for k, v in changed.items()]
+        history = list(merged.get("post_booking_requests") or [])
+        history.append({"changed": changed, "at": utcnow().isoformat()})
+        merged["post_booking_requests"] = history
+        name = resolve_requester_name(self.session, outcome=outcome)
+        greet = format_outbound_greeting(name)
+
+        if still_fits:
+            keep: set[str] = set()
+            for r in current:
+                row = self.bookings.confirm(
+                    outcome_id=outcome.outcome_id, room_name=r.name, window=window,
+                    resource_id=r.resource_id, attributes={"updated_after_booking": True}, keep=keep,
+                )
+                keep.add(row.booking_id)
+            booked.update(self._slot_fields(merged))
+            merged["booked_room"] = booked
+            merged["last_action"] = "post_booking_updated_same_room"
+            merged["orchestration_stage"] = MeetingStage.MONITORING.value
+            merged["needs_ops"] = False
+            self._save_facts(outcome, merged)
+            self._send(outcome, "BOOKING UPDATED", "INFORMATION_ONLY", [
+                f"{greet}\n\nDone — {booked.get('name')} still works for the change, so your booking is updated.",
+                "\n".join(change_lines),
+            ])
+        else:
+            room = self._pick_room(merged, outcome.outcome_id) if still_fits is False else None
+            if room:
+                old_name = booked.get("name")
+                row = self.bookings.confirm(
+                    outcome_id=outcome.outcome_id, room_name=room.name, window=window,
+                    resource_id=room.resource_id, attributes={"moved_from": old_name},
+                )
+                booked = {
+                    **booked,
+                    **self._slot_fields(merged),
+                    "resource_id": room.resource_id,
+                    "name": room.name,
+                    "capacity": _capacity(room),
+                    "booking_id": row.booking_id,
+                    "moved_from": old_name,
+                }
+                booked.pop("rooms", None)
+                booked.pop("split", None)
+                merged["booked_room"] = booked
+                merged["last_action"] = "post_booking_moved_room"
+                merged["orchestration_stage"] = MeetingStage.MONITORING.value
+                merged["needs_ops"] = False
+                self._save_facts(outcome, merged)
+                self._send(outcome, "ROOM CHANGED", "INFORMATION_ONLY", [
+                    f"{greet}\n\n{old_name} no longer fits after your change, so we moved you to {room.name} "
+                    f"(seats {_capacity(room)}).",
+                    "\n".join(change_lines),
+                ])
+                self.admin_ops.notify(
+                    outcome, kind="update", headline=f"Booking moved — {old_name} → {room.name}",
+                    fingerprint=f"moved:{outcome.outcome_id}:{row.booking_id}", facts=dict(outcome.facts or merged),
+                )
+            else:
+                merged["needs_ops"] = True
+                merged["last_action"] = "post_booking_change_needs_ops"
+                merged["orchestration_stage"] = MeetingStage.MONITORING.value
+                self._save_facts(outcome, merged)
+                self.engine.create_exception(
+                    outcome=outcome,
+                    exception_type="POST_BOOKING_CHANGE",
+                    title="Change after booking needs a new room",
+                    description=f"{booked.get('name')} no longer fits: " + "; ".join(
+                        f"{k}={v}" for k, v in changed.items()
+                    ),
+                    severity="MEDIUM",
+                    owner_role="OPERATOR",
+                )
+                self._send(outcome, "CHANGE RECEIVED", "INFORMATION_ONLY", [
+                    f"{greet}\n\nWe've got your change. {booked.get('name')} can't take it and no other room "
+                    "is free for that, so our ops team is on it. Your current booking stays in place until then.",
+                    "\n".join(change_lines),
+                ])
+                self.admin_ops.notify(
+                    outcome, kind="decision", headline="Change after booking — no room fits",
+                    detail="Reply with a room/venue to move them, or tell us what to offer the requester.",
+                    fingerprint=f"post_change:{outcome.outcome_id}:{requirement_fingerprint(merged)}",
+                    facts=dict(outcome.facts or merged),
+                )
+
+        if catering_needed(merged) and (
+            merged.get("attendees") != prior.get("attendees") or not catering_needed(prior)
+        ):
+            self._requote_catering(outcome)
+        self._sync_conversation_facts(outcome)
+
+    def _slot_fields(self, facts: dict) -> dict:
+        return {
+            "attendees": facts.get("attendees"),
+            "date": facts.get("date"),
+            "start": facts.get("preferred_time") or facts.get("time_window"),
+            "end": facts.get("end_time"),
+            "duration_hours": facts.get("duration_hours"),
+            "hold_start": facts.get("hold_start"),
+            "hold_end": facts.get("hold_end"),
+            "fingerprint": requirement_fingerprint(facts),
+        }
+
+    def _send(self, outcome: Outcome, label: str, ctype: str, blocks: list[str]) -> None:
+        if not outcome.requester_email:
+            return
+        body = "\n\n".join(b for b in blocks if b) + f"\n\nCase: {outcome.case_reference}"
+        self.comms.send_case_update(
+            outcome=outcome,
+            communication_type=ctype,
+            body=body,
+            recipients=[outcome.requester_email],
+            action_label=label,
+        )
+
+    def _requote_catering(self, outcome: Outcome) -> None:
+        from app.models.outcome import Approval
+
+        for approval in self.session.exec(
+            select(Approval).where(
+                Approval.outcome_id == outcome.outcome_id,
+                Approval.approval_type == "CATERING_SPEND",
+                Approval.decision == "PENDING",
+            )
+        ).all():
+            approval.decision = "SUPERSEDED"
+            approval.decided_at = utcnow()
+            self.session.add(approval)
+        facts = dict(outcome.facts or {})
+        facts.pop("catering_assigned", None)
+        self._save_facts(outcome, facts)
+        self._run_catering(outcome, facts)
+
     def _maybe_auto_book_low_risk(self, outcome: Outcome) -> None:
         facts = dict(outcome.facts or {})
         score = float((facts.get("recommended_room") or {}).get("score") or 0)
         if not facts.get("pending_confirmation") or not facts.get("proposed_room"):
+            return
+        proposal = facts.get("proposed_room") or {}
+        if proposal.get("split") or proposal.get("external_venue"):
             return
         if not is_low_risk_auto_bookable(facts, score):
             return
@@ -909,25 +1292,28 @@ class ClientMeetingOrchestrator:
         self._save_facts(outcome, facts)
         self._finalize_booking(outcome, actor="system_low_risk")
 
-    def _pick_room(self, facts: dict) -> Optional[Resource]:
+    def _pick_room(self, facts: dict, outcome_id: Optional[str] = None) -> Optional[Resource]:
+        """Best-scoring room that is free for this meeting's time window."""
         rooms = self.session.exec(
             select(Resource).where(
                 Resource.tenant_id == self.tenant_id,
                 Resource.type == "MEETING_ROOM",
-                Resource.status == "AVAILABLE",
             )
         ).all()
-        # Include currently held proposed room for this outcome (status RESERVED)
-        held_id = (facts.get("proposed_room") or {}).get("resource_id")
-        if held_id:
-            held = self.session.get(Resource, held_id)
-            if held and held not in rooms:
-                rooms = list(rooms) + [held]
+        window = meeting_window(facts)
         scored = []
+        busy_fits: list[str] = []
         for room in rooms:
             score, reasons = score_meeting_room(room, facts)
-            if score > 0:
-                scored.append((score, room, reasons))
+            if score <= 0:
+                continue
+            if not self.bookings.is_free(room, window, exclude_outcome_id=outcome_id):
+                busy_fits.append(room.name)
+                continue
+            scored.append((score, room, reasons))
+        facts["busy_fit_rooms"] = busy_fits
+        if window:
+            facts["meeting_window"] = {"start": window[0].isoformat(), "end": window[1].isoformat()}
         if not scored:
             return None
         scored.sort(key=lambda x: (-x[0], (x[1].attributes or {}).get("capacity") or 999))
@@ -937,6 +1323,145 @@ class ClientMeetingOrchestrator:
         ]
         facts["recommended_room"] = {"name": best[1].name, "score": best[0], "reasons": best[2]}
         return best[1]
+
+    def _proposed_room_taken(self, outcome: Outcome, facts: dict) -> bool:
+        proposal = facts.get("proposed_room") or {}
+        ids = [r.get("resource_id") for r in proposal.get("rooms") or []] or [proposal.get("resource_id")]
+        window = meeting_window(facts)
+        for rid in ids:
+            room = self.session.get(Resource, rid) if rid else None
+            if room and not self.bookings.is_free(room, window, exclude_outcome_id=outcome.outcome_id):
+                return True
+        return False
+
+    def _free_resources(self, rtype: str, facts: dict, outcome_id: Optional[str]) -> list[Resource]:
+        rows = self.session.exec(
+            select(Resource).where(Resource.tenant_id == self.tenant_id, Resource.type == rtype)
+        ).all()
+        return self.bookings.free_rooms(rows, meeting_window(facts), exclude_outcome_id=outcome_id)
+
+    def _pick_offsite(self, facts: dict, outcome_id: Optional[str] = None) -> Optional[Resource]:
+        """Smallest free off-site venue that seats the whole group."""
+        needed = _int(facts.get("attendees"))
+        fits = [r for r in self._free_resources("OFFSITE_VENUE", facts, outcome_id) if _capacity(r) >= needed]
+        return min(fits, key=_capacity) if fits else None
+
+    def _plan_split(self, facts: dict, outcome_id: Optional[str] = None, max_rooms: int = 3) -> list[Resource]:
+        """Fewest free rooms (same floor preferred) whose seats add up to the headcount."""
+        needed = _int(facts.get("attendees"))
+        if needed <= 0:
+            return []
+        usable = [
+            r
+            for r in self._free_resources("MEETING_ROOM", facts, outcome_id)
+            if _capacity(r) > 0 and score_meeting_room(r, {**facts, "attendees": _capacity(r)})[0] > 0
+        ]
+
+        def greedy(pool: list[Resource]) -> list[Resource]:
+            picked: list[Resource] = []
+            for room in sorted(pool, key=_capacity, reverse=True):
+                if sum(_capacity(r) for r in picked) >= needed:
+                    break
+                picked.append(room)
+            ok = len(picked) >= 2 and len(picked) <= max_rooms and sum(_capacity(r) for r in picked) >= needed
+            return picked if ok else []
+
+        floors: dict[str, list[Resource]] = {}
+        for room in usable:
+            floors.setdefault(str((room.attributes or {}).get("floor") or ""), []).append(room)
+        options = [p for p in (greedy(pool) for pool in floors.values()) if p]
+        if options:
+            return min(options, key=len)
+        return greedy(usable)
+
+    def cancel_case(self, outcome: Outcome, *, actor: str, reason: str = "") -> None:
+        """Release the room, stop open work, tell the requester and ops."""
+        from app.audit.service import AuditService
+        from app.core.enums import AuditAction, OutcomeStatus
+        from app.models.outcome import Approval, ExceptionRecord
+
+        facts = dict(outcome.facts or {})
+        room_name = (facts.get("booked_room") or facts.get("proposed_room") or {}).get("name")
+        released = self.bookings.release_for_outcome(outcome.outcome_id, status="CANCELLED")
+        facts.update(
+            {
+                "orchestration_stage": MeetingStage.CANCELLED.value,
+                "operational_status": "CANCELLED",
+                "pending_confirmation": False,
+                "needs_ops": False,
+                "last_action": f"cancelled_by:{actor}",
+                "cancelled_at": utcnow().isoformat(),
+                "cancel_reason": (reason or "")[:300],
+                "outbound_required": "cancel_ack",
+            }
+        )
+        self._save_facts(outcome, facts)
+        outcome.status = OutcomeStatus.CANCELLED.value
+        self.session.add(outcome)
+
+        for task in self.session.exec(select(Task).where(Task.outcome_id == outcome.outcome_id)).all():
+            if task.status not in {"VERIFIED", "CLOSED", "CANCELLED"}:
+                task.status = "CANCELLED"
+                task.resolution = "Case cancelled"
+                self.session.add(task)
+        for approval in self.session.exec(
+            select(Approval).where(Approval.outcome_id == outcome.outcome_id, Approval.decision == "PENDING")
+        ).all():
+            approval.decision = "CANCELLED"
+            approval.decided_at = utcnow()
+            self.session.add(approval)
+        for exc in self.session.exec(
+            select(ExceptionRecord).where(
+                ExceptionRecord.outcome_id == outcome.outcome_id,
+                ExceptionRecord.status == "OPEN",
+            )
+        ).all():
+            exc.status = "RESOLVED"
+            exc.resolution = f"Case cancelled by {actor}"
+            exc.resolved_at = utcnow()
+            self.session.add(exc)
+
+        AuditService(self.session).record(
+            tenant_id=self.tenant_id,
+            actor=actor,
+            action=AuditAction.OUTCOME_UPDATED,
+            entity_type="Outcome",
+            entity_id=outcome.outcome_id,
+            after={"status": "CANCELLED", "released_bookings": released, "reason": reason[:300]},
+            correlation_id=outcome.outcome_id,
+        )
+
+        if outcome.requester_email:
+            name = resolve_requester_name(self.session, outcome=outcome)
+            by_ops = not actor.startswith("requester")
+            lines = [
+                "Your meeting-room request has been cancelled"
+                + (" by our ops team" if by_ops else "")
+                + "."
+            ]
+            if by_ops and reason:
+                lines.append(f"Reason: {reason}")
+            if room_name:
+                lines.append(f"{room_name} has been released.")
+            lines.append("If you need a room again, just send a new request.")
+            self.comms.send_case_update(
+                outcome=outcome,
+                communication_type="INFORMATION_ONLY",
+                body=f"{format_outbound_greeting(name)}\n\n" + "\n\n".join(lines) + f"\n\nCase: {outcome.case_reference}",
+                recipients=[outcome.requester_email],
+                action_label="CANCELLED",
+                subject_hint=outcome.summary or "Request cancelled",
+                suppress_fingerprint=f"cancel:{outcome.outcome_id}",
+            )
+        self.admin_ops.notify(
+            outcome,
+            kind="update",
+            headline=f"Case cancelled by {'requester' if actor.startswith('requester') else 'ops'}",
+            detail=(f"Released: {room_name}. " if room_name else "") + (f"Reason: {reason}" if reason else ""),
+            fingerprint=f"cancelled:{outcome.outcome_id}",
+            facts=dict(outcome.facts or facts),
+        )
+        self._sync_conversation_facts(outcome)
 
     def _max_room_capacity(self) -> int:
         rooms = self.session.exec(
@@ -981,15 +1506,27 @@ class ClientMeetingOrchestrator:
         self._save_facts(outcome, facts)
         self.admin_ops.action_needs_review(outcome, reason=reason, facts=facts)
 
-    def _propose(self, outcome: Outcome, room: Resource, facts: dict, *, updated: bool) -> None:
+    def _propose(
+        self,
+        outcome: Outcome,
+        room: Resource,
+        facts: dict,
+        *,
+        updated: bool,
+        extra_rooms: Optional[list[Resource]] = None,
+        intro_note: Optional[str] = None,
+    ) -> None:
         try:
             needed = int(facts.get("attendees") or 1)
         except (TypeError, ValueError):
             needed = 1
+        rooms = [room, *(extra_rooms or [])]
+        offsite = room.type == "OFFSITE_VENUE"
+        display_name = " + ".join(r.name for r in rooms)
         proposal = {
-            "resource_id": room.resource_id,
-            "name": room.name,
-            "capacity": (room.attributes or {}).get("capacity"),
+            "resource_id": room.resource_id if len(rooms) == 1 else None,
+            "name": display_name,
+            "capacity": sum(_capacity(r) for r in rooms) if len(rooms) > 1 else (room.attributes or {}).get("capacity"),
             "score": (facts.get("recommended_room") or {}).get("score"),
             "attendees": needed,
             "date": facts.get("date"),
@@ -1011,16 +1548,39 @@ class ClientMeetingOrchestrator:
             "assigned_to_email": outcome.requester_email,
             "fingerprint": requirement_fingerprint(facts),
         }
-        room.status = "RESERVED"
-        room.attributes = {**(room.attributes or {}), "booking": {**proposal, "pending_confirmation": True}}
-        self.session.add(room)
+        window = meeting_window(facts)
+        holds = [
+            self.bookings.hold(
+                outcome_id=outcome.outcome_id,
+                room_name=r.name,
+                window=window,
+                resource_id=r.resource_id,
+                is_offsite=r.type == "OFFSITE_VENUE",
+                release_prior=i == 0,
+            )
+            for i, r in enumerate(rooms)
+        ]
+        hold = holds[0]
+        if len(rooms) > 1:
+            proposal["split"] = True
+            proposal["rooms"] = [
+                {"resource_id": r.resource_id, "name": r.name, "capacity": _capacity(r), "booking_id": h.booking_id}
+                for r, h in zip(rooms, holds)
+            ]
+        if offsite:
+            proposal["external_venue"] = True
+        proposal["booking_id"] = hold.booking_id
+        proposal["hold_expires_at"] = hold.hold_expires_at.isoformat() if hold.hold_expires_at else None
+        if hold.starts_at:
+            proposal["slot_start"] = hold.starts_at.isoformat()
+            proposal["slot_end"] = hold.ends_at.isoformat() if hold.ends_at else None
         facts = {
             **facts,
             "proposed_room": proposal,
             "pending_confirmation": True,
             "needs_ops": False,
             "checklist_missing": [],
-            "execution_plan": self._execution_plan(facts, room.name),
+            "execution_plan": self._execution_plan(facts, display_name),
             "orchestration_stage": MeetingStage.PROPOSED.value,
             "last_action": "proposed",
             "outbound_required": "confirm_booking",
@@ -1032,6 +1592,20 @@ class ClientMeetingOrchestrator:
             if updated
             else "Good news — a room is available for your request.\n\n"
         )
+        replaced = facts.pop("replaced_room_note", None)
+        if replaced:
+            intro = f"{replaced} Here’s another room that fits.\n\n"
+            self._save_facts(outcome, facts)
+        if intro_note:
+            intro = f"{intro_note}\n\n"
+        if len(rooms) > 1:
+            room_line = "Proposed rooms (group split across them): " + ", ".join(
+                f"{r.name} (seats {_capacity(r)})" for r in rooms
+            )
+        elif offsite:
+            room_line = f"Proposed venue (off-site): {room.name}"
+        else:
+            room_line = f"Proposed room: {room.name}"
         confirmed, unconfirmed = requirement_email_sections(facts)
         req_block = "\n".join(f"- {line}" for line in confirmed) or "- (none confirmed yet)"
         unc_block = ""
@@ -1039,17 +1613,19 @@ class ClientMeetingOrchestrator:
             unc_block = "\n\nNot confirmed yet:\n" + "\n".join(f"- {line}" for line in unconfirmed)
         score = float((facts.get("recommended_room") or {}).get("score") or 0)
         # Low-risk path auto-books immediately — skip the confirm ask email
-        if outcome.requester_email and not is_low_risk_auto_bookable(facts, score):
+        special = len(rooms) > 1 or offsite
+        if outcome.requester_email and (special or not is_low_risk_auto_bookable(facts, score)):
             name = resolve_requester_name(self.session, outcome=outcome)
             body = (
                 f"{format_outbound_greeting(name)}\n\n"
                 f"{intro}"
-                f"Proposed room: {room.name}\n"
+                f"{room_line}\n"
                 f"Case: {outcome.case_reference}\n\n"
                 f"Here’s what we have as confirmed / extracted:\n{req_block}"
                 f"{unc_block}\n\n"
                 "Should we confirm this booking?\n"
                 'Reply "confirm" (or "yes") to lock it in.\n'
+                f"We're holding the room for you for {_hold_hours_label()}; after that it's released for others.\n"
                 "If you need any other facilities — AV, catering, visitors, parking, a different floor — "
                 "mention them in your reply and we’ll update before confirming."
             )
@@ -1060,9 +1636,9 @@ class ClientMeetingOrchestrator:
                 recipients=[outcome.requester_email],
                 action_label="CONFIRM BOOKING",
             )
-        self.admin_ops.fyi_proposed(outcome, room_name=room.name, facts=dict(outcome.facts or facts))
+        self.admin_ops.fyi_proposed(outcome, room_name=display_name, facts=dict(outcome.facts or facts))
         self._sync_conversation_facts(outcome)
-        logger.info("meeting_room_proposed", outcome_id=outcome.outcome_id, room=room.name, updated=updated)
+        logger.info("meeting_room_proposed", outcome_id=outcome.outcome_id, room=display_name, updated=updated)
 
     def _execution_plan(self, facts: dict, room_name: str) -> list[str]:
         plan = [f"Reserve {room_name} with setup/cleanup buffers"]
@@ -1090,10 +1666,35 @@ class ClientMeetingOrchestrator:
         if proposal.get("resource_id"):
             room = self.session.get(Resource, proposal["resource_id"])
         booking = {**proposal, "pending_confirmation": False, "confirmed_by": actor, "auto": actor == "requester"}
-        if room:
-            room.status = "RESERVED"
-            room.attributes = {**(room.attributes or {}), "booking": booking}
-            self.session.add(room)
+        window = meeting_window(facts)
+        parts = proposal.get("rooms") or []
+        if parts:
+            kept: set[str] = set()
+            for part in parts:
+                row = self.bookings.confirm(
+                    outcome_id=outcome.outcome_id,
+                    room_name=str(part.get("name")),
+                    window=window,
+                    resource_id=part.get("resource_id"),
+                    attributes={"confirmed_by": actor, "split": True},
+                    keep=kept,
+                )
+                kept.add(row.booking_id)
+                part["booking_id"] = row.booking_id
+            booking["rooms"] = parts
+            booking["booking_ids"] = sorted(kept)
+        else:
+            row = self.bookings.confirm(
+                outcome_id=outcome.outcome_id,
+                room_name=str(booking.get("name") or "room"),
+                window=window,
+                resource_id=room.resource_id if room else None,
+                is_offsite=bool(proposal.get("external_venue")) or room is None,
+                attributes={"confirmed_by": actor},
+            )
+        booking["booking_id"] = row.booking_id
+        self._resolve_no_room_exception(outcome, f"Booked {booking.get('name')} ({actor})")
+        booking.pop("hold_expires_at", None)
         facts["booked_room"] = booking
         facts["pending_confirmation"] = False
         facts["needs_ops"] = False
@@ -1297,31 +1898,13 @@ class ClientMeetingOrchestrator:
         if not (hybrid_needed(facts) or presentation_needed(facts)):
             self._na_task(outcome, "AV_TEST")
             return
-        # Demo SLA stub: mark backup activation path available
         facts["av_plan"] = {
             "platform": "Microsoft Teams" if "team" in str(facts.get("hybrid_av") or "").lower() else "Video conference",
             "test_required": True,
-            "backup_available": True,
         }
-        # Simulate recovery from equipment issue without failing outcome
-        if (facts.get("booked_room") or {}).get("name", "").endswith("10B"):
-            facts["av_incident"] = {
-                "issue": "Camera fault",
-                "resolution": "Temporary replacement installed",
-                "sla_breach_primary": True,
-                "backup_activated": True,
-            }
-            self.engine.create_exception(
-                outcome=outcome,
-                exception_type="AV_EQUIPMENT_FAULT",
-                title="AV camera failure detected",
-                description="Primary camera failed; backup/replacement used. Breach preserved for analytics.",
-                severity="MEDIUM",
-                owner_role="IT",
-            )
         outcome.facts = {**(outcome.facts or {}), **facts}
         self.session.add(outcome)
-        self._complete_task(outcome, "AV_TEST", "system", "AV plan ready (prototype)")
+        self._complete_task(outcome, "AV_TEST", "system", "AV plan ready")
 
     def _run_catering(self, outcome: Outcome, facts: dict) -> None:
         if not catering_needed(facts):
@@ -1335,27 +1918,22 @@ class ClientMeetingOrchestrator:
             headcount = int(facts.get("attendees") or 1)
         except (TypeError, ValueError):
             headcount = 1
-        rate = 450.0
-        vendor = self.session.exec(
-            select(Vendor).where(
-                Vendor.tenant_id == self.tenant_id,
-                Vendor.name == "FreshServe Catering Pvt. Ltd.",
-            )
-        ).first()
-        amount = round(rate * headcount, 2)
-        facts["catering_quote"] = {
-            "vendor": vendor.name if vendor else "FreshServe Catering Pvt. Ltd.",
-            "vendor_id": vendor.vendor_id if vendor else None,
-            "rate": rate,
-            "headcount": headcount,
-            "amount_ex_tax": amount,
-            "currency": "INR",
-            "contract": "CAT-GGN-2026-04",
-        }
+        from app.core.config import get_settings
+        from app.services.catering import catering_quote
+
+        quote = catering_quote(self.session, self.tenant_id, headcount)
+        facts["catering_quote"] = quote
         outcome.facts = {**(outcome.facts or {}), **facts}
         self.session.add(outcome)
 
-        # Request manager approval
+        limit = float(get_settings().catering_auto_approve_limit or 0)
+        amount = quote.get("amount_ex_tax")
+        if limit > 0 and amount is not None and amount <= limit and quote.get("vendor"):
+            facts["catering_auto_approved"] = True
+            self._save_facts(outcome, {**(outcome.facts or {}), **facts})
+            self.on_catering_approved(outcome)
+            return
+
         task = self.session.exec(
             select(Task).where(Task.outcome_id == outcome.outcome_id, Task.code == "CATERING_APPROVAL")
         ).first()
@@ -1370,12 +1948,7 @@ class ClientMeetingOrchestrator:
             task.status = "APPROVAL_PENDING"
             self.session.add(task)
         facts["catering_approval_id"] = approval.approval_id
-        # Prototype: auto-note vendor assignment pending approval
-        facts["vendor_sla"] = {
-            "acceptance_minutes": 30,
-            "status": "PENDING_ASSIGNMENT",
-            "acceptance_breach_demo": False,
-        }
+        facts["vendor_sla"] = {"acceptance_minutes": 30, "status": "PENDING_ASSIGNMENT"}
         outcome.facts = {**(outcome.facts or {}), **facts}
         self.session.add(outcome)
         self.admin_ops.action_approval(outcome, approval_type="CATERING_SPEND", facts=facts)
@@ -1388,9 +1961,6 @@ class ClientMeetingOrchestrator:
             "status": "ASSIGNED",
             "assigned_at": utcnow().isoformat(),
             "acceptance_due_minutes": 30,
-            # Demo learning: acceptance late but service recovered
-            "acceptance_breach_demo": True,
-            "accepted_late_minutes": 18,
         }
         facts["catering_assigned"] = True
         self._save_facts(outcome, facts)
@@ -1399,7 +1969,8 @@ class ClientMeetingOrchestrator:
             outcome,
             "VENDOR_CATERING",
             "system",
-            f"Assigned {quote.get('vendor')} for INR {quote.get('amount_ex_tax')}",
+            f"Assigned {quote.get('vendor') or 'caterer (ops to confirm)'}"
+            + (f" for {quote.get('currency') or 'INR'} {quote['amount_ex_tax']}" if quote.get("amount_ex_tax") else ""),
         )
         # Enable invoice path
         for code in ("INVOICE_VALIDATE", "INVOICE_POST", "INVOICE_PAY"):
@@ -1488,7 +2059,7 @@ def confirm_meeting_room_booking(
     if not facts.get("proposed_room"):
         facts = apply_meeting_room_defaults(facts)
         facts.update(compute_hold_window(facts))
-        room = orch._pick_room(facts)
+        room = orch._pick_room(facts, outcome.outcome_id)
         if not room and room_name:
             # Synthetic proposal
             facts["proposed_room"] = {

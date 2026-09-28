@@ -55,6 +55,7 @@ class ScenarioOrchestrator:
         facts["issues"] = [i.model_dump() for i in extraction.issues]
 
         force_new = False
+        prior_facts: Optional[dict] = None
         if template == "MEETING_ROOM" and conversation_id:
             existing = self.session.exec(
                 select(Outcome).where(
@@ -63,6 +64,7 @@ class ScenarioOrchestrator:
                 )
             ).first()
             if existing:
+                prior_facts = dict(existing.facts or {})
                 decision = is_new_meeting_request(
                     text=f"{extraction.summary or ''} {extraction.reason or ''}",
                     new_facts=facts,
@@ -71,6 +73,7 @@ class ScenarioOrchestrator:
                 )
                 if decision == "new":
                     force_new = True
+                    prior_facts = None
                     facts["spawned_from_outcome_id"] = existing.outcome_id
                 elif decision == "ambiguous":
                     facts["thread_intent_ambiguous"] = True
@@ -114,7 +117,7 @@ class ScenarioOrchestrator:
         elif template == "INVOICE":
             self._scenario_d(outcome, facts, context, extraction)
         elif template == "MEETING_ROOM":
-            self._scenario_meeting_room(outcome, facts, extraction)
+            self._scenario_meeting_room(outcome, facts, extraction, prior_facts=prior_facts)
 
         self.session.commit()
         self.session.refresh(outcome)
@@ -125,10 +128,11 @@ class ScenarioOrchestrator:
         outcome: Outcome,
         facts: dict,
         extraction: Optional[ExtractionResult] = None,
+        prior_facts: Optional[dict] = None,
     ) -> None:
         ClientMeetingOrchestrator(
             self.session, self.tenant_id, self.engine, self.comms
-        ).run(outcome, facts, extraction)
+        ).run(outcome, facts, extraction, prior_facts=prior_facts)
 
     def confirm_meeting_room_booking(
         self,

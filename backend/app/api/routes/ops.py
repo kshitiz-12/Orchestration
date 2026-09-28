@@ -219,6 +219,13 @@ def sla_tick(session: SessionDep, tenant_id: TenantDep, _user: UserDep):
     return tick_sla(session, tenant_id)
 
 
+@router.post("/holds/sweep")
+def holds_sweep(session: SessionDep, tenant_id: TenantDep, _user: UserDep):
+    from app.services.hold_sweeper import sweep_proposal_holds
+
+    return sweep_proposal_holds(session, tenant_id)
+
+
 @router.post("/evals/meeting-room")
 def run_meeting_evals(_user: UserDep, heuristic: bool = True):
     """Score golden meeting-room emails (heuristic by default for CI stability)."""

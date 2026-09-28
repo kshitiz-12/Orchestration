@@ -496,7 +496,13 @@ def test_meeting_room_proposes_then_confirms(session: Session):
     assert outcome2.status in {"CLOSED", "VERIFIED", "ACTIVE"}
     room = session.get(Resource, outcome2.facts["booked_room"]["resource_id"])
     assert room is not None
-    assert room.status == "RESERVED"
+    assert room.status == "AVAILABLE"
+    from app.models.org import RoomBooking
+
+    bookings = session.exec(
+        select(RoomBooking).where(RoomBooking.outcome_id == outcome2.outcome_id)
+    ).all()
+    assert [b.status for b in bookings if b.resource_id == room.resource_id] == ["CONFIRMED"]
 
 
 def test_meeting_room_addon_before_confirm_updates_proposal(session: Session):

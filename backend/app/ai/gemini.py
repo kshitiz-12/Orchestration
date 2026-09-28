@@ -105,6 +105,10 @@ EXTRACTION_SCHEMA_HINT = {
                         "enum": ["provide_facts", "confirm", "cancel", "satisfied"],
                     },
                 },
+                "alternative_choice": {
+                    "type": "string",
+                    "enum": ["NONE", "LARGER_VENUE", "SPLIT_ROOMS", "DIFFERENT_TIME", "REDUCE_HEADCOUNT"],
+                },
             },
         },
     },
@@ -245,7 +249,26 @@ class GeminiProvider(LLMProvider):
         result.reason = (result.reason or "") + f" | gemini:{label}"
         return result
 
-    def _generate_with_failover(self, user_payload: dict):
+    def generate_json(
+        self,
+        *,
+        system_instruction: str,
+        payload: dict,
+        temperature: float = 0.2,
+    ) -> tuple[dict, dict]:
+        """Any structured task (not just extraction) with the same key/model failover."""
+        response, (label, model) = self._generate_with_failover(
+            payload,
+            system_instruction=system_instruction,
+            response_schema=None,
+            temperature=temperature,
+        )
+        data = json.loads(response.text or "{}")
+        if not isinstance(data, dict):
+            data = {}
+        return data, {"label": label, "model": model}
+
+    def _generate_with_failover(self, user_payload: dict, **gen_kwargs):
         endpoints = self._endpoints()
         if not endpoints:
             raise RuntimeError("GEMINI_API_KEY is not configured")
@@ -253,7 +276,9 @@ class GeminiProvider(LLMProvider):
         failures: list[str] = []
         for label, api_key, model in endpoints:
             try:
-                response = self._generate_once(api_key=api_key, model=model, user_payload=user_payload)
+                response = self._generate_once(
+                    api_key=api_key, model=model, user_payload=user_payload, **gen_kwargs
+                )
                 logger.info("gemini_extract_ok", endpoint=label, model=model)
                 return response, (label, model)
             except Exception as exc:  # noqa: BLE001
@@ -272,19 +297,33 @@ class GeminiProvider(LLMProvider):
             f"gemini extract failed on all endpoints [{detail}]"
         ) from last_exc
 
-    def _generate_once(self, *, api_key: str, model: str, user_payload: dict):
+    _DEFAULT_SCHEMA = object()
+
+    def _generate_once(
+        self,
+        *,
+        api_key: str,
+        model: str,
+        user_payload: dict,
+        system_instruction: Optional[str] = None,
+        response_schema=_DEFAULT_SCHEMA,
+        temperature: float = 0.2,
+    ):
         from google.genai import types
 
         client = self._get_client(api_key)
+        config_kwargs = {
+            "system_instruction": system_instruction or SYSTEM_INSTRUCTION,
+            "response_mime_type": "application/json",
+            "temperature": temperature,
+        }
+        schema = EXTRACTION_SCHEMA_HINT if response_schema is self._DEFAULT_SCHEMA else response_schema
+        if schema is not None:
+            config_kwargs["response_schema"] = schema
         return client.models.generate_content(
             model=model,
-            contents=json.dumps(user_payload),
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_INSTRUCTION,
-                response_mime_type="application/json",
-                response_schema=EXTRACTION_SCHEMA_HINT,
-                temperature=0.2,
-            ),
+            contents=json.dumps(user_payload, default=str),
+            config=types.GenerateContentConfig(**config_kwargs),
         )
 
 

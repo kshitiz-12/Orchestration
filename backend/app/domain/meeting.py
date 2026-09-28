@@ -50,6 +50,7 @@ class MeetingStage(str, Enum):
     NO_RESOURCE = "NO_RESOURCE"
     MONITORING = "MONITORING"
     CLOSED = "CLOSED"
+    CANCELLED = "CANCELLED"
 
 
 REQUIREMENT_FIELDS = (
@@ -116,6 +117,9 @@ PLATFORM_KEYS = (
     "outbound_suppressions",
     "admin_ops_notices",
     "admin_ops_last",
+    "admin_commands",
+    "admin_decision",
+    "catering_rejected",
     "decision_trace",
     "last_decision",
     "policy_version",

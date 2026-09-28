@@ -70,6 +70,26 @@ class Resource(TimestampMixin, table=True):
     attributes: dict = Field(default_factory=dict, sa_column=Column(JSON))
 
 
+class RoomBooking(TimestampMixin, table=True):
+    """One hold or confirmed booking of a room (or off-site venue) for a time window."""
+
+    __tablename__ = "room_bookings"
+
+    booking_id: str = Field(default_factory=lambda: new_id("bkg_"), primary_key=True)
+    tenant_id: str = Field(foreign_key="tenants.tenant_id", index=True)
+    resource_id: Optional[str] = Field(default=None, foreign_key="resources.resource_id", index=True)
+    outcome_id: Optional[str] = Field(default=None, index=True)
+    room_name: str
+    # HELD (proposed, awaiting confirm) | CONFIRMED | RELEASED | CANCELLED | EXPIRED
+    status: str = Field(default="HELD", index=True)
+    starts_at: Optional[datetime] = Field(default=None, index=True)
+    ends_at: Optional[datetime] = Field(default=None, index=True)
+    hold_expires_at: Optional[datetime] = Field(default=None, index=True)
+    reminder_sent_at: Optional[datetime] = None
+    is_offsite: bool = False
+    attributes: dict = Field(default_factory=dict, sa_column=Column(JSON))
+
+
 class Asset(TimestampMixin, table=True):
     __tablename__ = "assets"
 

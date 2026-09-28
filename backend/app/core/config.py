@@ -56,6 +56,26 @@ class Settings(BaseSettings):
     admin_password: str = "admin123"
     # Dedicated ops mailbox for FYI + ACTION REQUIRED case mail (empty = disabled)
     admin_ops_email: str = ""
+    # Extra ops mailboxes copied on OPS DECISION mail and allowed to reply (comma-separated)
+    admin_backup_emails: str = ""
+    # Who decides which approval type (empty → falls back to ADMIN_OPS_EMAIL)
+    approval_manager_email: str = ""
+    approval_finance_email: str = ""
+    # strict = admin replies must pass SPF for the admin domain or thread onto our ops mail
+    admin_sender_verification: str = "strict"
+    # Proposed-room holds: release after N hours, remind requester after M hours
+    proposal_hold_hours: float = 24.0
+    proposal_reminder_hours: float = 12.0
+    # Background sweep inside the web process (Render has no separate worker); 0 = off
+    inprocess_sweeper_seconds: int = 300
+    # Catering spend at or below this (INR, ex-tax) needs no approval; 0 = always approve
+    catering_auto_approve_limit: float = 0.0
+    # Used only when no active catering contract/vendor price is on file; 0 = ops must quote
+    catering_default_rate: float = 0.0
+    # Preferred catering vendor name (else the first active catering contract)
+    catering_vendor_name: str = ""
+    # Off-site venues seeded as bookable inventory: "Name:capacity; Name:capacity"
+    offsite_venues: str = ""
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 480
 

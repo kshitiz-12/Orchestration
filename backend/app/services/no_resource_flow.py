@@ -106,8 +106,25 @@ def diagnose_no_resource(
     attendees: Any,
     max_capacity: int | None,
     zero_scores: list[dict[str, Any]] | None,
+    busy_fits: list[str] | None = None,
 ) -> dict[str, Any]:
     """Honest why-no-room summary for requester + ops."""
+    try:
+        needed_early = int(attendees or 0)
+    except (TypeError, ValueError):
+        needed_early = 0
+    if busy_fits:
+        names = ", ".join(busy_fits[:3])
+        return {
+            "primary": "slot_taken",
+            "line": (
+                f"Rooms that fit {needed_early or 'your group'} ({names}) are already booked at that time."
+            ),
+            "top_reasons": ["booked at that time"],
+            "max_capacity": max_capacity,
+            "requested_attendees": needed_early or None,
+            "busy_fits": busy_fits,
+        }
     reason_counts: Counter[str] = Counter()
     for row in zero_scores or []:
         for r in row.get("reasons") or []:

@@ -19,7 +19,14 @@ from app.models.org import utcnow
 from app.connectors.factory import get_email_provider
 from app.schemas.ai import ExtractionResult, MissingInformation
 from app.services.communication import CommunicationService, resolve_requester_name
-from app.services.admin_ops import AdminOpsNotifier
+from app.services.admin_commands import (
+    AdminCommandHandler,
+    case_reference_from_subject,
+    is_admin_sender,
+    sender_address,
+    verify_ops_sender,
+)
+from app.services.admin_ops import AdminOpsNotifier, admin_ops_email
 from app.services.context import ContextRetrievalService
 from app.services.intake import JobQueueService
 from app.services.meeting_room import (
@@ -77,6 +84,10 @@ class ProcessingPipeline:
                 "event_id": event.event_id,
                 "outcome_id": outcome_id,
             }
+
+        admin_result = self._maybe_handle_admin_reply(event)
+        if admin_result is not None:
+            return admin_result
 
         event.processing_stage = ProcessingStage.AI_INTERPRETATION.value
         self.session.add(event)
@@ -223,6 +234,11 @@ class ProcessingPipeline:
                 business_event_id=event.event_id,
                 context=relevant_ctx,
             )
+            if (outcome.facts or {}).get("orchestration_stage") == "CANCELLED":
+                event.processing_stage = ProcessingStage.COMPLETED.value
+                self.session.add(event)
+                self.session.commit()
+                return {"status": "cancelled", "outcome_id": outcome.outcome_id, "decision_id": decision.decision_id}
             questions = [
                 q
                 for q in (
@@ -303,6 +319,11 @@ class ProcessingPipeline:
         )
         facts = dict(outcome.facts or {})
         stage = (facts.get("orchestration_stage") or "").upper()
+        if stage == "CANCELLED":
+            event.processing_stage = ProcessingStage.COMPLETED.value
+            self.session.add(event)
+            self.session.commit()
+            return {"status": "cancelled", "outcome_id": outcome.outcome_id, "decision_id": decision.decision_id}
         blocking = meeting_room_gaps(facts) if (outcome.category or "").upper() == "MEETING_ROOM" else []
         # Never mark COMPLETE while requirements are blocking or inventory failed
         if stage == "AWAITING_REQUIREMENTS" or blocking:
@@ -402,6 +423,99 @@ class ProcessingPipeline:
             "outcome_id": outcome.outcome_id,
             "case_reference": outcome.case_reference,
             "decision_id": decision.decision_id,
+        }
+
+    def _maybe_handle_admin_reply(self, event: RawEmailEvent) -> Optional[dict]:
+        """Ops mailbox replies are commands on an existing case, not requester mail."""
+        if not is_admin_sender(event.sender):
+            return None
+        from app.models.outcome import Outcome
+
+        outcome = None
+        case_ref = case_reference_from_subject(event.subject)
+        if case_ref:
+            outcome = self.session.exec(
+                select(Outcome).where(
+                    Outcome.tenant_id == self.tenant_id,
+                    Outcome.case_reference == case_ref,
+                )
+            ).first()
+        if outcome is None:
+            thread_id = event.provider_conversation_id or event.gmail_thread_id
+            if thread_id:
+                conv = self.session.exec(
+                    select(Conversation).where(
+                        Conversation.tenant_id == self.tenant_id,
+                        Conversation.thread_id == thread_id,
+                    )
+                ).first()
+                if conv and conv.current_outcome_id:
+                    outcome = self.session.get(Outcome, conv.current_outcome_id)
+        sender = sender_address(event.sender)
+        # No case, or the ops person filed their own request: treat as a normal requester mail
+        if outcome is None or (outcome.requester_email or "").strip().lower() == sender:
+            return None
+
+        event.conversation_id = outcome.conversation_id
+        verified, how = verify_ops_sender(self.session, self.tenant_id, event.headers, sender)
+        if not verified:
+            return self._reject_unverified_ops_mail(event, outcome, sender)
+
+        result = AdminCommandHandler(self.session, self.tenant_id, self.comms).handle(
+            outcome=outcome,
+            body=event.body_text or event.body_for_ai or "",
+            event_id=event.event_id,
+            admin_email=sender,
+        )
+        result["sender_verification"] = how
+        event.processing_stage = ProcessingStage.COMPLETED.value
+        self.session.add(event)
+        self.session.commit()
+        return {
+            "status": "admin_command",
+            "outcome_id": outcome.outcome_id,
+            "case_reference": outcome.case_reference,
+            **result,
+        }
+
+    def _reject_unverified_ops_mail(self, event: RawEmailEvent, outcome, sender: str) -> dict:
+        """Looks like ops but can't be authenticated: change nothing, tell the real ops mailbox."""
+        from app.core.enums import AuditAction
+
+        self.audit.record(
+            tenant_id=self.tenant_id,
+            actor=f"unverified:{sender}",
+            action=AuditAction.HUMAN_OVERRIDE,
+            entity_type="Outcome",
+            entity_id=outcome.outcome_id,
+            after={"rejected": "ops_sender_unverified", "event_id": event.event_id, "subject": event.subject},
+            correlation_id=outcome.outcome_id,
+        )
+        admin = admin_ops_email()
+        if admin:
+            self.comms.send_case_update(
+                outcome=outcome,
+                communication_type="INFORMATION_ONLY",
+                body=(
+                    f"A reply claiming to be from {sender} on this case could not be verified "
+                    "(no SPF/DKIM pass for that domain and it wasn't a reply to our mail), so nothing was changed.\n\n"
+                    "If it was you, reply directly to the case briefing mail instead.\n\n"
+                    f"Subject: {event.subject}\nCase: {outcome.case_reference}"
+                ),
+                recipients=[admin],
+                action_label="OPS NOT APPLIED",
+                subject_hint="Unverified ops reply",
+                suppress_fingerprint=f"unverified:{event.event_id}",
+            )
+        event.processing_stage = ProcessingStage.COMPLETED.value
+        self.session.add(event)
+        self.session.commit()
+        logger.warning("ops_sender_unverified", case=outcome.case_reference, sender=sender)
+        return {
+            "status": "admin_unverified",
+            "outcome_id": outcome.outcome_id,
+            "case_reference": outcome.case_reference,
+            "applied": False,
         }
 
     def _get_or_create_conversation(self, event: RawEmailEvent) -> Conversation:

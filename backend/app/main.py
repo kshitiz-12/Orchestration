@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
 import sys
+import threading
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -41,7 +42,30 @@ async def lifespan(_: FastAPI):
     except Exception as exc:  # noqa: BLE001
         logger.error("startup_failed", error=str(exc), traceback=format_startup_error(exc))
         raise
+
+    stop = threading.Event()
+    interval = int(settings.inprocess_sweeper_seconds or 0)
+    if interval > 0 and "pytest" not in sys.modules:
+        threading.Thread(target=_sweeper_loop, args=(stop, interval), name="hold-sweeper", daemon=True).start()
     yield
+    stop.set()
+
+
+def _sweeper_loop(stop: threading.Event, interval: int) -> None:
+    """Render runs mail processing inside the web process, so sweeps must too."""
+    from sqlmodel import Session, select
+
+    from app.models.org import Tenant
+    from app.services.hold_sweeper import run_all_sweeps
+
+    logger = get_logger("sweeper")
+    while not stop.wait(interval):
+        try:
+            with Session(get_engine()) as session:
+                for tenant in session.exec(select(Tenant)).all():
+                    run_all_sweeps(session, tenant.tenant_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("sweeper_loop_failed", error=str(exc))
 
 
 def create_app() -> FastAPI:

@@ -42,6 +42,9 @@ _PRESERVE_KEYS = {
     "outbound_suppressions",
     "admin_ops_notices",
     "admin_ops_last",
+    "admin_commands",
+    "admin_decision",
+    "catering_rejected",
     "no_resource_alternatives",
     "no_resource_fingerprint",
     "no_resource_choice",
@@ -87,9 +90,23 @@ Same facts can look like anything. Illustrations, not an exhaustive list:
     with 1. Names go in visitor_details.
   • "yes" in a requirements list is not confirm. Confirm only if they are accepting
     a proposed room.
+  • "cancel it" / "meeting called off" / "we don't need the room anymore" / "rehne do"
+    → speech_acts ["cancel"] (the whole request). Cancelling ONE item ("cancel the
+    catering", "no parking needed now") is NOT a case cancel — set/unset that field.
+
+  • If already_on_file.no_resource_alternatives exists (we told them no room fits and
+    offered options), set fact_delta.alternative_choice to the option they picked, in
+    any wording: "go off-site / bigger hall" → LARGER_VENUE, "split us / two rooms" →
+    SPLIT_ROOMS, "another day / later slot" → DIFFERENT_TIME, "we'll cut down to 15" →
+    REDUCE_HEADCOUNT (also set attendees). Otherwise "NONE".
+  • After a booking is confirmed, changes ("now 25 people", "shift to 4pm", "add lunch")
+    are ordinary fact updates — put them in fact_delta.set; the platform re-checks.
+  • open_requests must list EVERY non-field ask in THIS message, even if several appear
+    in one sentence ("photographer, name tents and a translator" → three items).
 
 fact_delta: { "set": {}, "unset": [], "assumptions": [],
-  "speech_acts": ["provide_facts"|"confirm"|"cancel"|"satisfied"] }
+  "speech_acts": ["provide_facts"|"confirm"|"cancel"|"satisfied"],
+  "alternative_choice": "NONE"|"LARGER_VENUE"|"SPLIT_ROOMS"|"DIFFERENT_TIME"|"REDUCE_HEADCOUNT" }
 Put newly found fields in fact_delta.set AND entities.
 event_type=MEETING_ROOM for room-booking threads (including INFORMATION REQUIRED).
 Do NOT set human_review_required for ordinary meeting-room replies.
@@ -109,6 +126,7 @@ _INTERPRETER_STATE_KEYS = REQUIREMENT_FIELDS + (
     "orchestration_stage",
     "checklist_missing",
     "field_status",
+    "no_resource_alternatives",
 )
 
 
@@ -128,6 +146,14 @@ def compact_interpreter_state(prior_facts: Optional[dict]) -> dict[str, Any]:
             }
             if slim:
                 out[key] = slim
+            continue
+        if key == "no_resource_alternatives" and isinstance(value, list):
+            if (prior.get("orchestration_stage") or "").upper() == "NO_RESOURCE":
+                out[key] = [
+                    {"code": a.get("code"), "label": a.get("label")}
+                    for a in value
+                    if isinstance(a, dict) and a.get("code") != "REVIEW_NEAR_MISS"
+                ]
             continue
         if key == "field_status" and isinstance(value, dict):
             slim = {k: v for k, v in value.items() if k in REQUIREMENT_FIELDS and v}
@@ -267,8 +293,10 @@ def refine_meeting_room_extraction(
     fd = extraction.fact_delta if isinstance(extraction.fact_delta, dict) else {}
     if fd.get("set"):
         primary.update({k: v for k, v in fd["set"].items() if v is not None and v != ""})
-    if extraction.open_requests and not primary.get("open_requests"):
-        primary["open_requests"] = list(extraction.open_requests)
+    if extraction.open_requests:
+        prior_asks = primary.get("open_requests")
+        prior_asks = prior_asks if isinstance(prior_asks, list) else [prior_asks] if prior_asks else []
+        primary["open_requests"] = prior_asks + list(extraction.open_requests)
     unset = list(fd.get("unset") or [])
     speech = list(fd.get("speech_acts") or [])
 

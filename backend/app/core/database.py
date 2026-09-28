@@ -131,6 +131,11 @@ def ensure_schema_compat() -> None:
                 if "duplicate column" in msg or "already exists" in msg:
                     continue
                 logger.warning("schema_compat_stmt_skipped", error=str(exc), stmt=stmt[:80])
+
+    from app.models.org import RoomBooking
+
+    # Tables added after the initial schema (create_all is checkfirst → idempotent)
+    SQLModel.metadata.create_all(engine, tables=[RoomBooking.__table__])  # type: ignore[attr-defined]
     logger.info("schema_compat_ensured")
 
 
