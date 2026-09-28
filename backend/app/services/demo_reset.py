@@ -14,7 +14,7 @@ from app.models.intake import (
     ProcessingJob,
     RawEmailEvent,
 )
-from app.models.org import Invoice, PurchaseOrder, Receipt, Resource
+from app.models.org import Invoice, PurchaseOrder, Receipt, Resource, RoomBooking
 from app.models.outcome import (
     Approval,
     AuditLog,
@@ -51,6 +51,7 @@ def reset_demo_operational_data(session: Session, tenant_id: str) -> dict[str, A
         return len(rows)
 
     for model in (
+        RoomBooking,
         Communication,
         Evidence,
         Approval,

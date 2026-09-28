@@ -152,6 +152,17 @@ def reset_demo_data(session: SessionDep, tenant_id: TenantDep, user: UserDep):
     return {"status": "ok", "message": "Demo operational data cleared", **result}
 
 
+@router.get("/ai/probe")
+def ai_probe(_user: UserDep):
+    """Per key/model check (primary/secondary × model/fallback) with the exact provider error."""
+    settings = get_settings()
+    return {
+        "model": settings.gemini_model,
+        "fallback_model": settings.gemini_fallback_model,
+        "endpoints": GeminiProvider().probe_endpoints(),
+    }
+
+
 @router.get("/ai/health")
 def ai_health(_user: UserDep):
     """Check whether Gemini is configured and can run a tiny extraction."""

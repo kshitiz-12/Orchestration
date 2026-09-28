@@ -124,6 +124,16 @@ EXTRACTION_SCHEMA_HINT = {
 }
 
 
+def _rejects_sampling_params(model: str) -> bool:
+    """Gemini 3.5+ drops temperature/top_p/top_k; sending them can fail the request."""
+    import re
+
+    m = re.match(r"gemini-(\d+)(?:\.(\d+))?", (model or "").strip().lower())
+    if not m:
+        return False
+    return (int(m.group(1)), int(m.group(2) or 0)) >= (3, 5)
+
+
 def _is_failover_error(exc: Exception) -> bool:
     msg = str(exc).lower()
     return any(
@@ -197,6 +207,29 @@ class GeminiProvider(LLMProvider):
 
             self._clients[api_key] = genai.Client(api_key=api_key)
         return self._clients[api_key]
+
+    def probe_endpoints(self) -> list[dict]:
+        """Try every key/model pair once with a tiny prompt; report the real error per pair."""
+        import time
+
+        out = []
+        for label, api_key, model in self._endpoints():
+            started = time.monotonic()
+            row = {"endpoint": label, "model": model, "key_tail": f"…{api_key[-4:]}" if api_key else None}
+            try:
+                resp = self._generate_once(
+                    api_key=api_key,
+                    model=model,
+                    user_payload={"say": "reply with {\"ok\": true}"},
+                    system_instruction="Return JSON only.",
+                    response_schema=None,
+                )
+                row.update(ok=True, sample=(resp.text or "")[:80])
+            except Exception as exc:  # noqa: BLE001
+                row.update(ok=False, error=str(exc)[:400])
+            row["seconds"] = round(time.monotonic() - started, 2)
+            out.append(row)
+        return out
 
     def healthcheck(self) -> bool:
         try:
@@ -315,8 +348,9 @@ class GeminiProvider(LLMProvider):
         config_kwargs = {
             "system_instruction": system_instruction or SYSTEM_INSTRUCTION,
             "response_mime_type": "application/json",
-            "temperature": temperature,
         }
+        if not _rejects_sampling_params(model):
+            config_kwargs["temperature"] = temperature
         schema = EXTRACTION_SCHEMA_HINT if response_schema is self._DEFAULT_SCHEMA else response_schema
         if schema is not None:
             config_kwargs["response_schema"] = schema
