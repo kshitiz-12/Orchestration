@@ -31,6 +31,48 @@ EVENT_TO_TEMPLATE = {
 }
 
 
+# Belong to the thread's existing case; a spawned case must start its own lifecycle.
+_CASE_STATE_KEYS = (
+    "pending_confirmation",
+    "proposed_room",
+    "booked_room",
+    "booking_confirmed",
+    "employee_satisfied",
+    "orchestration_stage",
+    "last_action",
+    "outbound_required",
+    "last_outbound",
+    "checklist_missing",
+    "execution_plan",
+    "decision_trace",
+    "last_decision",
+    "admin_ops_notices",
+    "admin_ops_last",
+    "admin_commands",
+    "admin_decision",
+    "registration_ack_sent",
+    "registration_ack_deferred",
+    "clarification_sent",
+    "busy_fit_rooms",
+    "meeting_window",
+    "room_scores",
+    "recommended_room",
+    "replaced_room_note",
+    "catering_rejected",
+    "no_resource_alternatives",
+    "no_resource_fingerprint",
+    "no_resource_choice",
+    "no_resource_diagnosis",
+    "open_requests",
+    "post_booking_requests",
+    "operational_status",
+    "financial_status",
+    "operational_readiness_pct",
+    "field_contract",
+    "field_status",
+)
+
+
 class ScenarioOrchestrator:
     """Applies scenario-specific deterministic rules after AI extraction."""
 
@@ -74,6 +116,13 @@ class ScenarioOrchestrator:
                 if decision == "new":
                     force_new = True
                     prior_facts = None
+                    for key in _CASE_STATE_KEYS:
+                        facts.pop(key, None)
+                    own_asks = [str(a) for a in (extraction.open_requests or []) if a]
+                    if own_asks:
+                        facts["open_requests"] = [
+                            {"text": a, "status": "noted", "source": "extracted"} for a in own_asks
+                        ]
                     facts["spawned_from_outcome_id"] = existing.outcome_id
                 elif decision == "ambiguous":
                     facts["thread_intent_ambiguous"] = True

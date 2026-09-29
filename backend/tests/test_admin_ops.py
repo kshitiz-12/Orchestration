@@ -131,18 +131,37 @@ def test_complete_fit_sends_structured_ops_update(session: Session, monkeypatch)
         business_event_id="evt_admin_fyi",
         context={},
     )
-    mails = session.exec(
-        select(Communication).where(Communication.outcome_id == outcome.outcome_id)
-    ).all()
-    admin_mails = [m for m in mails if "ops-desk@example.com" in (m.recipients or [])]
-    assert admin_mails
-    assert any("[OPS UPDATE]" in (m.subject or "") for m in admin_mails)
-    assert not any("[FYI]" in (m.subject or "") for m in admin_mails)
-    assert len(admin_mails) == 1
-    assert "Room offered to requester" in (admin_mails[0].subject or "")
-    body = admin_mails[0].body or ""
-    assert "Also asked: extra whiteboard markers" in body
-    assert "No action needed" in body
+    def admin_mails():
+        mails = session.exec(
+            select(Communication).where(Communication.outcome_id == outcome.outcome_id)
+        ).all()
+        return [m for m in mails if "ops-desk@example.com" in (m.recipients or [])]
+
+    assert admin_mails() == [], "admin hears nothing until the requester confirms"
+
+    orch.orchestrate(
+        extraction=ExtractionResult(
+            event_type="MEETING_ROOM",
+            summary="confirm",
+            entities={**outcome.facts, "booking_confirmed": True},
+            missing_information=[],
+            confidence=0.95,
+            reason="confirm",
+        ),
+        requester_email="employee1@acme.demo",
+        conversation_id=conv.conversation_id,
+        business_event_id="evt_admin_fyi_confirm",
+        context={},
+    )
+    sent = admin_mails()
+    assert len(sent) == 1
+    assert "[OPS UPDATE]" in (sent[0].subject or "")
+    assert "Booking confirmed" in (sent[0].subject or "")
+    body = sent[0].body or ""
+    assert "To arrange:" in body
+    assert "- Display / screen" in body
+    assert "- Extra whiteboard markers" in body
+    assert "Room: " in body and "booked" not in body.split("Room: ")[1].split("\n")[0]
     get_settings.cache_clear()
 
 

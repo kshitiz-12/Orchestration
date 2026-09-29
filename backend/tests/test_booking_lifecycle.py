@@ -363,7 +363,7 @@ def test_spoofed_ops_mail_is_not_applied(session: Session, env):
 
 
 def test_reply_to_our_briefing_is_trusted(session: Session, env):
-    _set(env, ADMIN_SENDER_VERIFICATION="strict")
+    _set(env, ADMIN_SENDER_VERIFICATION="strict", ADMIN_FYI_LEVEL="all")
     tid = _tenant(session)
     case = Case(session, tid, "t-verified-thread", _facts())
     briefing = case.mails(ADMIN)[-1]

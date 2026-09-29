@@ -52,6 +52,10 @@ _PRESERVE_KEYS = {
 }
 
 
+# Describe THIS message only; carrying them over from prior facts would re-trigger them on every reply.
+_PER_MESSAGE_FLAGS = ("new_request", "update_existing", "force_new_outcome")
+
+
 MEETING_ROOM_AI_INSTRUCTIONS = """
 You are reading a workplace email the way ChatGPT / Gemini would in chat.
 
@@ -90,6 +94,14 @@ Same facts can look like anything. Illustrations, not an exhaustive list:
     with 1. Names go in visitor_details.
   • "yes" in a requirements list is not confirm. Confirm only if they are accepting
     a proposed room.
+  • Replying to our room offer with extra needs or changes ("need parking for 2 cars,
+    veg for 4, also a bouquet") is provide_facts, NOT confirm — we re-check and send an
+    updated offer. Only add "confirm" when they also clearly accept ("confirm", "ok book
+    it", "go ahead", "looks good, book it").
+  • new_request = true ONLY when already_on_file holds a case and THIS message asks for a
+    separate, additional meeting (a different date/time/purpose: "also need a room on
+    Friday for another team"). Adding details to, or changing, the current meeting is
+    never new_request. Set update_existing = true for those.
   • "cancel it" / "meeting called off" / "we don't need the room anymore" / "rehne do"
     → speech_acts ["cancel"] (the whole request). Cancelling ONE item ("cancel the
     catering", "no parking needed now") is NOT a case cancel — set/unset that field.
@@ -122,8 +134,10 @@ Value formats (the platform reads these):
     must be the next upcoming occurrence relative to today, as YYYY-MM-DD.
   • preferred_time / end_time: "10:00 AM", "1:00 PM".
   • hybrid_av: "yes — <what they need>" or "no". presentation_display: "yes" or "no".
-  • catering: "none", or a short description of what they want ("tea/coffee"). When
+  • catering: "none", or a short description of what they want ("tea/coffee"). Keep
+    counts and timing they give ("coffee for 6, tea for the rest, mid-meeting"). When
     catering already describes it, do not repeat it in open_requests.
+  • dietary: keep the full split ("4 veg, rest non-veg"), never just one half of it.
   • guest_vehicles: integer (0 when they say no parking / no vehicle).
 
 Requester name:
@@ -370,6 +384,12 @@ def refine_meeting_room_extraction(
         unset=unset,
         speech_acts=speech or None,
     )
+
+    for flag in _PER_MESSAGE_FLAGS:
+        if primary.get(flag) is True or candidates.get(flag) is True:
+            merged[flag] = True
+        else:
+            merged.pop(flag, None)
 
     merged["raw_reply"] = body[:4000]
     extraction.entities = merged

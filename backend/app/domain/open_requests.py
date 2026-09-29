@@ -40,6 +40,15 @@ _SKIP_ENTITY_KEYS = frozenset(REQUIREMENT_FIELDS) | frozenset(PLATFORM_KEYS) | {
     "invoice_number",
     "amount",
     "location",
+    "busy_fit_rooms",
+    "meeting_window",
+    "spawned_from_outcome_id",
+    "replaced_room_note",
+    "thread_intent_ambiguous",
+    "ambiguous_existing_case",
+    "thread_intent_asked",
+    "force_new_outcome",
+    "external_visitors_indicated",
 }
 
 def _norm(text: str) -> str:
@@ -91,9 +100,8 @@ def merge_open_requests(
     for key, value in incoming.items():
         if key in _SKIP_ENTITY_KEYS or not _answered(value):
             continue
-        if isinstance(value, (dict, list)) and key not in {"open_requests", "additional_requests"}:
-            # structured extras: keep a readable line
-            add(f"{key.replace('_', ' ')}: {value}", source="entity")
+        # Structured values are platform bookkeeping, never something the requester typed.
+        if isinstance(value, (dict, list, bool)):
             continue
         add(f"{key.replace('_', ' ')}: {value}", source="entity")
 

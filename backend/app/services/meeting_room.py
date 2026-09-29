@@ -132,6 +132,30 @@ def _norm_date(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip().lower())
 
 
+def _norm_time(value: Any) -> str:
+    return re.sub(r"[\s.]|:00", "", str(value or "").lower())
+
+
+def _norm_day(value: Any) -> str:
+    from app.services.room_booking import parse_meeting_date
+
+    day = parse_meeting_date(value) if value else None
+    return day.isoformat() if day else _norm_date(value)
+
+
+def _slot_differs(new_facts: dict[str, Any], existing_facts: dict[str, Any]) -> bool:
+    for key, norm in (("date", _norm_day), ("preferred_time", _norm_time)):
+        old = norm(
+            existing_facts.get(key)
+            or (existing_facts.get("booked_room") or {}).get("date" if key == "date" else "start")
+            or (existing_facts.get("proposed_room") or {}).get("date" if key == "date" else "start")
+        )
+        new = norm(new_facts.get(key))
+        if old and new and old != new:
+            return True
+    return False
+
+
 def catering_needed(facts: dict[str, Any]) -> bool:
     val = str(facts.get("catering") or "").strip().lower()
     if not val or val in _NONE_LIKE:
@@ -391,12 +415,17 @@ def is_new_meeting_request(
     if existing_status in {"CLOSED", "CANCELLED", "VERIFIED"}:
         return "new"
 
-    if new_facts.get("new_request") is True or new_facts.get("force_new_outcome"):
+    body = text or ""
+    if new_facts.get("force_new_outcome"):
         return "new"
-    if new_facts.get("update_existing") is True:
+    # The same meeting at the same slot is the existing case, whatever the model flagged.
+    if new_facts.get("new_request") is True and (
+        _slot_differs(new_facts, existing_facts) or _NEW_REQUEST_RE.search(body)
+    ):
+        return "new"
+    if new_facts.get("update_existing") is True or new_facts.get("new_request") is True:
         return "update"
 
-    body = text or ""
     if _NEW_REQUEST_RE.search(body):
         return "new"
     if _UPDATE_CASE_RE.search(body):

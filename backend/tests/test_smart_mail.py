@@ -143,3 +143,130 @@ def test_mail_writer_rejects_rewrite_that_drops_room():
         provider=_FakeProvider(bad),
     )
     assert out is None
+
+
+_HELD = {
+    "date": "2026-10-25",
+    "preferred_time": "10am",
+    "pending_confirmation": True,
+    "proposed_room": {"name": "Auditorium A", "date": "2026-10-25", "start": "10am"},
+}
+
+
+def test_addon_reply_with_stale_new_request_flag_updates_same_case():
+    from app.services.meeting_room import is_new_meeting_request
+
+    decision = is_new_meeting_request(
+        text="Requester needs parking for 2 guest vehicles and a bouquet",
+        new_facts={"date": "25th Oct", "preferred_time": "10:00 AM", "new_request": True},
+        existing_facts=_HELD,
+        existing_status="ACTIVE",
+    )
+    assert decision == "update"
+
+
+def test_new_request_flag_on_different_day_spawns_case():
+    from app.services.meeting_room import is_new_meeting_request
+
+    decision = is_new_meeting_request(
+        text="Also a room on Friday",
+        new_facts={"date": "2026-10-30", "new_request": True},
+        existing_facts=_HELD,
+        existing_status="ACTIVE",
+    )
+    assert decision == "new"
+
+
+def test_per_message_flags_do_not_carry_over_from_prior_facts():
+    from app.ai.meeting_extract import refine_meeting_room_extraction
+    from app.schemas.ai import ExtractionResult
+
+    prior = {**_HELD, "attendees": 12, "new_request": True}
+    extraction = ExtractionResult(
+        event_type="MEETING_ROOM",
+        summary="needs parking",
+        entities={"guest_vehicles": 2},
+        missing_information=[],
+        confidence=0.9,
+        reason="addon",
+    )
+    out = refine_meeting_room_extraction(
+        extraction, subject="Re: [ROOM-2026-0001]", body="need parking for 2 cars", prior_facts=prior
+    )
+    assert "new_request" not in out.entities
+
+
+_BOOKED_FACTS = {
+    "requester_name": "Aditya Test",
+    "attendees": 12,
+    "external_visitors": 2,
+    "visitor_details": "Rahul Sharma and Aman Verma",
+    "date": "2026-10-25",
+    "preferred_time": "10am",
+    "end_time": "1pm",
+    "location_preference": "Gurugram office",
+    "hybrid_av": "yes — for 2 remote participants",
+    "presentation_display": "yes",
+    "catering": "coffee for 6, tea for the rest, mid-meeting",
+    "dietary": "4 veg, rest non-veg",
+    "guest_vehicles": 2,
+    "vehicle_numbers": "KA53EB8527, JH06AB3031",
+    "special_access": "none",
+    "confidentiality": "standard",
+    "setup_buffer_minutes": 30,
+    "open_requests": [{"text": "bouquet at start of meeting", "status": "noted"}],
+    "booked_room": {"name": "Auditorium A", "capacity": 40},
+}
+
+
+def test_booked_briefing_is_a_short_work_order():
+    outcome = Outcome(
+        tenant_id="t", case_reference="ROOM-2026-0001", requester_email="anonymousxo1204@gmail.com", facts={}
+    )
+    _, body = build_admin_briefing(
+        outcome, event_title="Booking confirmed — Auditorium A", facts=_BOOKED_FACTS
+    )
+    assert "Room: Auditorium A (40 seats), setup 30 min before" in body
+    assert "People: 12 + 2 visitors (Rahul Sharma and Aman Verma) → 14 seats" in body
+    for item in (
+        "- Video call (for 2 remote participants) + display",
+        "- Coffee for 6, tea for the rest, mid-meeting — 4 veg, rest non-veg",
+        "- Visitor passes for 2: Rahul Sharma and Aman Verma",
+        "- Parking for 2: KA53EB8527, JH06AB3031",
+        "- Bouquet at start of meeting",
+    ):
+        assert item in body
+    assert "Also asked" not in body and "Needs:" not in body
+
+
+def test_room_fit_note_explains_oversized_room_and_missing_vc():
+    from app.engine.meeting_scenario import _room_fit_note
+
+    facts = {
+        "attendees": 12,
+        "external_visitors": 2,
+        "hybrid_av": "yes — 2 remote",
+        "room_scores": [
+            {"name": "Auditorium A", "capacity": 40, "reasons": ["VC available"]},
+            {"name": "Meeting Room F2-R3", "capacity": 16, "reasons": ["VC missing"]},
+        ],
+    }
+    big = SimpleNamespace(name="Auditorium A", attributes={"capacity": 40, "video_conferencing": True, "display": True})
+    small = SimpleNamespace(name="Meeting Room F2-R3", attributes={"capacity": 16, "display": True})
+    assert "smaller free rooms don't have video-call" in _room_fit_note(big, facts)
+    assert "no built-in video-call setup" in _room_fit_note(small, facts)
+
+
+def test_platform_bookkeeping_never_becomes_an_open_request():
+    from app.domain.open_requests import merge_open_requests
+
+    asks = merge_open_requests(
+        {},
+        {
+            "open_requests": ["bouquet at start of meeting"],
+            "busy_fit_rooms": ["Auditorium A"],
+            "meeting_window": {"start": "2026-10-25T09:30:00"},
+            "spawned_from_outcome_id": "out_x",
+        },
+    )
+    assert [a["text"] for a in asks] == ["bouquet at start of meeting"]

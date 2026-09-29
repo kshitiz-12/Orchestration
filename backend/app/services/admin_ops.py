@@ -156,6 +156,90 @@ def _room_line(bag: dict[str, Any]) -> str:
     return ""
 
 
+def _pending_catering_approval(bag: dict[str, Any]) -> str:
+    if not bag.get("catering_approval_id") or bag.get("catering_auto_approved"):
+        return ""
+    if (bag.get("vendor_sla") or {}).get("status") not in (None, "PENDING_ASSIGNMENT"):
+        return ""
+    quote = bag.get("catering_quote") or {}
+    amount = quote.get("amount_ex_tax")
+    cost = f"{quote.get('currency') or 'INR'} {amount:,.0f} + tax" if isinstance(amount, (int, float)) else "cost not quoted"
+    vendor = f" via {quote['vendor']}" if quote.get("vendor") else ""
+    return f"Catering needs your approval: {cost} for {quote.get('headcount') or seats_needed(bag)} people{vendor}."
+
+
+def _after_dash(value: Any) -> str:
+    text = str(value or "").strip()
+    parts = re.split(r"\s+[—–-]\s+", text, maxsplit=1)
+    return parts[1].strip() if len(parts) == 2 else ""
+
+
+def _arrange_items(bag: dict[str, Any]) -> list[str]:
+    items: list[str] = []
+    if hybrid_needed(bag):
+        how = _after_dash(bag.get("hybrid_av"))
+        items.append("Video call" + (f" ({how})" if how else "") + (" + display" if presentation_needed(bag) else ""))
+    elif presentation_needed(bag):
+        items.append("Display / screen")
+    if catering_needed(bag):
+        food = str(bag.get("catering"))
+        food = "Catering" if food.lower() in {"yes", "requested"} else food[:1].upper() + food[1:]
+        items.append(f"{food}" + (f" — {bag['dietary']}" if bag.get("dietary") else ""))
+    visitors = external_visitor_count(bag)
+    if visitors:
+        names = bag.get("visitor_details")
+        items.append(f"Visitor passes for {visitors}" + (f": {names}" if names else ""))
+    cars = guest_vehicle_count(bag)
+    if cars:
+        items.append(f"Parking for {cars}" + (f": {bag['vehicle_numbers']}" if bag.get("vehicle_numbers") else ""))
+    access = str(bag.get("special_access") or "").strip()
+    if access and access.lower() not in {"none", "n/a", "no", "required"}:
+        items.append(f"Access: {access}")
+    conf = str(bag.get("confidentiality") or "").lower()
+    if conf and conf not in {"standard", "none", "no", "normal"}:
+        items.append(f"Confidential ({bag['confidentiality']})")
+    for ask in _open_request_texts(bag):
+        items.append(ask[:1].upper() + ask[1:])
+    return items
+
+
+def _booked_briefing(outcome: Outcome, bag: dict[str, Any], *, event_title: str, detail: str, kind: NotifyKind) -> str:
+    case = outcome.case_reference or outcome.outcome_id
+    booked = bag.get("booked_room") or {}
+    room = str(booked.get("name") or "")
+    if booked.get("capacity"):
+        room += f" ({booked['capacity']} seats)"
+    setup = bag.get("setup_buffer_minutes")
+    if setup:
+        room += f", setup {setup} min before"
+    lines = [f"{case} — {event_title}", ""]
+    lines += [f"{label}: {value}" for label, value in (
+        ("Requester", _requester_label(outcome, bag)),
+        ("When", _when_line(bag)),
+        ("Room", room),
+        ("People", _people_line(bag)),
+    ) if value]
+    items = _arrange_items(bag)
+    if items:
+        lines += ["", "To arrange:"] + [f"- {i}" for i in items]
+    if detail.strip():
+        lines += ["", detail.strip()]
+    lines.append("")
+    if kind == "decision":
+        lines.append('Reply "approve" or "reject, <reason>". To change the booking, just say so — e.g. "move to 3pm".')
+    else:
+        lines.append('To change anything, just reply — e.g. "move to 3pm", "make it 20 people" or "cancel".')
+    return "\n".join(lines) + "\n"
+
+
+def _requester_label(outcome: Outcome, bag: dict[str, Any]) -> str:
+    email = outcome.requester_email or "unknown"
+    name = str(bag.get("requester_name") or bag.get("requester_display_name") or "").strip()
+    if name.lower() in {"there", "team", "anonymous"}:
+        name = ""
+    return f"{name} <{email}>" if name else email
+
+
 def build_admin_briefing(
     outcome: Outcome,
     *,
@@ -166,14 +250,14 @@ def build_admin_briefing(
 ) -> tuple[str, str]:
     """Return (subject_hint, body) — a short case summary ops can read in seconds."""
     bag = dict(facts or outcome.facts or {})
-    case = outcome.case_reference or outcome.outcome_id
-    email = outcome.requester_email or "unknown"
-    name = str(bag.get("requester_name") or bag.get("requester_display_name") or "").strip()
-    if name.lower() in {"there", "team", "anonymous"}:
-        name = ""
+    prefix = "OPS DECISION" if kind == "decision" else "OPS UPDATE"
+    hint = f"{prefix}: {event_title}"[:90]
+    if isinstance(bag.get("booked_room"), dict) and bag["booked_room"].get("name"):
+        return hint, _booked_briefing(outcome, bag, event_title=event_title, detail=detail, kind=kind)
 
+    case = outcome.case_reference or outcome.outcome_id
     rows = [
-        ("Requester", f"{name} <{email}>" if name else email),
+        ("Requester", _requester_label(outcome, bag)),
         ("When", _when_line(bag)),
         ("People", _people_line(bag)),
         ("Needs", _needs_line(bag)),
@@ -203,10 +287,7 @@ def build_admin_briefing(
             'No action needed. To change anything, just reply — e.g. "move them to F2-R3", '
             '"make it 20 people" or "cancel".'
         )
-    body = "\n".join(lines) + "\n"
-    prefix = "OPS DECISION" if kind == "decision" else "OPS UPDATE"
-    hint = f"{prefix}: {event_title}"[:90]
-    return hint, body
+    return hint, "\n".join(lines) + "\n"
 
 
 class AdminOpsNotifier:
@@ -318,6 +399,8 @@ class AdminOpsNotifier:
         )
 
     def fyi_proposed(self, outcome: Outcome, *, room_name: str, facts: Optional[dict] = None) -> bool:
+        if not self._all_fyi():
+            return False
         return self.notify(
             outcome,
             kind="update",
@@ -327,12 +410,15 @@ class AdminOpsNotifier:
         )
 
     def fyi_booked(self, outcome: Outcome, *, room_name: str, facts: Optional[dict] = None) -> bool:
+        bag = dict(facts or outcome.facts or {})
+        approval = _pending_catering_approval(bag)
         return self.notify(
             outcome,
-            kind="update",
+            kind="decision" if approval else "update",
             headline=f"Booking confirmed — {room_name}",
+            detail=approval,
             fingerprint=f"booked:{outcome.outcome_id}:{room_name}",
-            facts=facts,
+            facts=bag,
         )
 
     def action_no_resource(self, outcome: Outcome, *, diagnosis: str = "", facts: Optional[dict] = None) -> bool:
@@ -372,12 +458,27 @@ class AdminOpsNotifier:
             facts=facts,
         )
 
-    def action_approval(self, outcome: Outcome, *, approval_type: str, facts: Optional[dict] = None) -> bool:
+    def action_approval(
+        self,
+        outcome: Outcome,
+        *,
+        approval_type: str,
+        facts: Optional[dict] = None,
+        include_admin: bool = True,
+    ) -> bool:
+        admin = admin_ops_email()
+        recipients = approver_emails(approval_type)
+        if include_admin:
+            recipients += [admin] if admin else []
+        else:
+            recipients = [r for r in recipients if r != admin]
+            if not recipients:
+                return False
         return self.notify(
             outcome,
             kind="decision",
             headline=f"Approval needed — {approval_type.replace('_', ' ')}",
             fingerprint=f"approval:{outcome.outcome_id}:{approval_type}:{(facts or {}).get('catering_approval_id') or ''}",
             facts=facts,
-            recipients=approver_emails(approval_type) + ([admin_ops_email()] if admin_ops_email() else []),
+            recipients=recipients,
         )

@@ -50,7 +50,10 @@ Write the email body:
   • Write the date from request.date_exact (e.g. "Sunday 25 October"). Never work out a
     weekday yourself.
   • Never invent anything: no rooms, times, prices, people, promises or policies that are
-    not in the draft or request. If the draft asks questions, ask all of them, clearly.
+    not in the draft or request.
+  • What they asked for is not what the room has. If the draft says the room lacks
+    something (e.g. "no built-in video-call setup") or explains why it's bigger than
+    needed, keep that point in one plain sentence and never claim the missing feature. If the draft asks questions, ask all of them, clearly.
   • Plain text only (no markdown headings, no bold, no tables). Under ~170 words unless the
     draft carries more questions than that allows.
   • Sign off with the signature given.

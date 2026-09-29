@@ -105,6 +105,28 @@ def _capacity(room: Resource) -> int:
     return _int((room.attributes or {}).get("capacity"))
 
 
+def _room_fit_note(room: Resource, facts: dict) -> str:
+    """One honest line when the offered room lacks something asked for or is much bigger than needed."""
+    _, reasons = score_meeting_room(room, facts)
+    if "VC missing" in reasons:
+        return (
+            "Heads-up: this room has no built-in video-call setup, so remote participants would join "
+            "from a laptop. Reply if you'd like me to look for another option."
+        )
+    cap, needed = _capacity(room), seats_needed(facts)
+    if not needed or cap - needed <= 4:
+        return ""
+    smaller = [
+        s for s in facts.get("room_scores") or []
+        if s.get("name") != room.name and 0 < _int(s.get("capacity")) < cap
+    ]
+    if smaller and hybrid_needed(facts) and all("VC missing" in (s.get("reasons") or []) for s in smaller):
+        return "It's bigger than you need, but the smaller free rooms don't have video-call setup."
+    if facts.get("busy_fit_rooms") and not smaller:
+        return "It's bigger than you need — the smaller rooms are already taken at that time."
+    return "It's bigger than you need, but it's the best free fit for that time."
+
+
 def ensure_offsite_venues(session: Session, tenant_id: str) -> None:
     """Upsert OFFSITE_VENUE resources from OFFSITE_VENUES ("Name:capacity; Name:capacity")."""
     from app.core.config import get_settings
@@ -1320,7 +1342,7 @@ class ClientMeetingOrchestrator:
         scored.sort(key=lambda x: (-x[0], (x[1].attributes or {}).get("capacity") or 999))
         best = scored[0]
         facts["room_scores"] = [
-            {"name": r.name, "score": s, "reasons": rs} for s, r, rs in scored[:5]
+            {"name": r.name, "score": s, "reasons": rs, "capacity": _capacity(r)} for s, r, rs in scored[:5]
         ]
         facts["recommended_room"] = {"name": best[1].name, "score": best[0], "reasons": best[2]}
         return best[1]
@@ -1455,14 +1477,16 @@ class ClientMeetingOrchestrator:
                 subject_hint=outcome.summary or "Request cancelled",
                 suppress_fingerprint=f"cancel:{outcome.outcome_id}",
             )
-        self.admin_ops.notify(
-            outcome,
-            kind="update",
-            headline=f"Case cancelled by {'requester' if actor.startswith('requester') else 'ops'}",
-            detail=(f"Released: {room_name}. " if room_name else "") + (f"Reason: {reason}" if reason else ""),
-            fingerprint=f"cancelled:{outcome.outcome_id}",
-            facts=dict(outcome.facts or facts),
-        )
+        admin_knew = bool((outcome.facts or facts).get("admin_ops_notices")) or not actor.startswith("requester")
+        if admin_knew:
+            self.admin_ops.notify(
+                outcome,
+                kind="update",
+                headline=f"Case cancelled by {'requester' if actor.startswith('requester') else 'ops'}",
+                detail=(f"Released: {room_name}. " if room_name else "") + (f"Reason: {reason}" if reason else ""),
+                fingerprint=f"cancelled:{outcome.outcome_id}",
+                facts=dict(outcome.facts or facts),
+            )
         self._sync_conversation_facts(outcome)
 
     def _max_room_capacity(self) -> int:
@@ -1605,6 +1629,9 @@ class ClientMeetingOrchestrator:
             room_line = f"Venue (off-site): {room.name} (seats {_capacity(room)})"
         else:
             room_line = f"Room: {room.name} (seats {_capacity(room)})"
+            note = _room_fit_note(room, facts)
+            if note:
+                room_line += f"\n{note}"
         confirmed, unconfirmed = requirement_email_sections(facts)
         req_block = "\n".join(f"- {line}" for line in confirmed)
         open_items = [line.replace(" (not confirmed)", "") for line in unconfirmed if not line.endswith("(assumed)")]
@@ -1714,7 +1741,7 @@ class ClientMeetingOrchestrator:
         self._run_visitors(outcome, facts)
         self._run_parking(outcome, facts)
         self._run_av(outcome, facts)
-        self._run_catering(outcome, facts)
+        self._run_catering(outcome, facts, notify_admin=False)
         self._mark_readiness_progress(outcome)
 
         low_risk = bool(facts.get("auto_booked_low_risk") or actor == "system_low_risk")
@@ -1909,7 +1936,7 @@ class ClientMeetingOrchestrator:
         self.session.add(outcome)
         self._complete_task(outcome, "AV_TEST", "system", "AV plan ready")
 
-    def _run_catering(self, outcome: Outcome, facts: dict) -> None:
+    def _run_catering(self, outcome: Outcome, facts: dict, *, notify_admin: bool = True) -> None:
         if not catering_needed(facts):
             self._na_task(outcome, "CATERING_APPROVAL")
             self._na_task(outcome, "VENDOR_CATERING")
@@ -1951,7 +1978,10 @@ class ClientMeetingOrchestrator:
         facts["vendor_sla"] = {"acceptance_minutes": 30, "status": "PENDING_ASSIGNMENT"}
         outcome.facts = {**(outcome.facts or {}), **facts}
         self.session.add(outcome)
-        self.admin_ops.action_approval(outcome, approval_type="CATERING_SPEND", facts=facts)
+        # On first booking the admin sees this approval inside the booking-confirmed mail.
+        self.admin_ops.action_approval(
+            outcome, approval_type="CATERING_SPEND", facts=facts, include_admin=notify_admin
+        )
 
     def on_catering_approved(self, outcome: Outcome) -> None:
         facts = dict(outcome.facts or {})
