@@ -59,6 +59,7 @@ _CASE_STATE_KEYS = (
     "recommended_room",
     "replaced_room_note",
     "catering_rejected",
+    "catering_notes",
     "no_resource_alternatives",
     "no_resource_fingerprint",
     "no_resource_choice",
@@ -118,6 +119,11 @@ class ScenarioOrchestrator:
                     prior_facts = None
                     for key in _CASE_STATE_KEYS:
                         facts.pop(key, None)
+                    from app.ai.messy_meeting_parse import catering_phrases
+
+                    said = catering_phrases(str(facts.get("raw_reply") or ""))
+                    if said:
+                        facts["catering_notes"] = [said]
                     own_asks = [str(a) for a in (extraction.open_requests or []) if a]
                     if own_asks:
                         facts["open_requests"] = [

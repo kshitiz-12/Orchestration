@@ -29,6 +29,46 @@ _SYSTEM_FIELD_LINE = re.compile(
     r")\s*:"
 )
 
+_NUMBER_WORDS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5}
+
+_NOT_A_NAME = re.compile(
+    r"(?i)^(?:us|you|them|me|him|her|everyone|all|the\s+(?:team|meeting|call)|"
+    r"(?:will|shall|would|to|who|is|are|also|join|joining|attend|attending|in\s+person|online)\b)"
+)
+
+
+def _looks_like_names(text: str) -> bool:
+    """Visitor-name capture must be a name, not "us" from "will join us"."""
+    t = (text or "").strip(" ,.-")
+    return len(t) > 2 and not _NOT_A_NAME.match(t)
+
+
+_FOOD_WORD = re.compile(
+    r"(?i)\b(?:tea|chai|cof+e+|kof+e+|beverages?|drinks?|water|juice|soft\s*drinks?|snacks?|cookies|biscuits?|"
+    r"sandwich\w*|samosa\w*|cake|lunch|breakfast|dinner|meals?|food|refreshments?|catering|"
+    r"(?:non[\s-]?)?veg(?:etarian)?|vegan|jain|halal|gluten|dietary|buffet|high\s*tea)\b"
+)
+_FOOD_START = re.compile(r"(?i)\d+\s|\b(?:a|rest|all|tea|chai|cof+e+|non|veg|vegan|jain|snack|lunch|water|juice)\b")
+
+
+def catering_phrases(text: str) -> str:
+    """The requester's own words about food/drinks in this message, e.g. "6 non veg, rest veg, 2 tea rest coffee"."""
+    flat = re.sub(r"[ \t]*\r?\n(?![ \t]*\r?\n)[ \t]*", " ", text or "")
+    kept: list[str] = []
+    for sentence in re.split(r"[.!?]+\s|\n\s*\n", flat):
+        if _SYSTEM_FIELD_LINE.match(sentence.strip()):
+            continue
+        for chunk in re.split(r",|;|\band\b|\balso\b", sentence, flags=re.I):
+            chunk = chunk.strip(" -:")
+            if not chunk or not _FOOD_WORD.search(chunk):
+                continue
+            if not kept:
+                start = _FOOD_START.search(chunk)
+                chunk = chunk[start.start():] if start else chunk
+            kept.append(re.sub(r"\s+", " ", chunk))
+    return ", ".join(kept)[:300]
+
+
 _HEADCOUNT_ON_ACCESS = re.compile(
     r"(?i)(?:special access|security)[^\n]{0,60}\d{1,3}\s*emp"
 )
@@ -199,13 +239,14 @@ def parse_messy_meeting_signals(text: str) -> dict[str, Any]:
 
     # Additive: "1 more visitor: Priya Nair, Infosys" — do not treat as absolute count=1
     m_more = re.search(
-        r"(\d+)\s+more\s+(?:external\s+)?visitors?\s*[:\-–]?\s*"
+        rf"(\d+|{'|'.join(_NUMBER_WORDS)})\s+more\s+(?:external\s+)?(?:visitors?|guests?)\s*[:\-–]?\s*"
         r"([A-Za-z][A-Za-z0-9\s,.'&()-]{1,80})?",
         raw,
         re.I,
     )
     if m_more:
-        out["external_visitors_add"] = int(m_more.group(1))
+        count = m_more.group(1).lower()
+        out["external_visitors_add"] = int(count) if count.isdigit() else _NUMBER_WORDS[count]
         extra_name = (m_more.group(2) or "").strip(" ,.")
         extra_name = re.split(
             r"\n|catering\b|parking\b|tea\b|coffee\b|display\b|rest stays\b|confirm\b",
@@ -213,7 +254,7 @@ def parse_messy_meeting_signals(text: str) -> dict[str, Any]:
             maxsplit=1,
             flags=re.I,
         )[0].strip(" ,.-")
-        if extra_name and len(extra_name) > 1:
+        if _looks_like_names(extra_name):
             out["visitor_details_append"] = extra_name[:200]
 
     # "2 extrnal visitors" / typo-tolerant external (absolute, not "N more")
@@ -258,7 +299,7 @@ def parse_messy_meeting_signals(text: str) -> dict[str, Any]:
             )[0].strip(" ,.")
             # Drop trailing junk like "and" alone
             names = re.sub(r"\s+and\s*$", "", names, flags=re.I).strip(" ,.")
-            if names and len(names) > 2 and not re.fullmatch(r"\d+", names):
+            if _looks_like_names(names) and not re.fullmatch(r"\d+", names):
                 out["visitor_details"] = names[:500]
 
     # Explicit special access / badge / security only — not bare "required" from visitors

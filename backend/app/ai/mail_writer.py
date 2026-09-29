@@ -47,6 +47,9 @@ Write the email body:
     tell me if you need either."). Skip trivial ones (no parking, no special access).
   • End with exactly what they should do next, keeping the reply word(s) from the draft
     (e.g. reply "confirm"), and any deadline in the draft (e.g. room held 24 hours).
+  • request.catering_in_their_words holds the employee's own food/drink asks, oldest first
+    (a later one overrides an earlier one on the same item). Recap catering from these and
+    keep every count and split ("2 tea, rest coffee; 6 non-veg, rest veg").
   • Write the date from request.date_exact (e.g. "Sunday 25 October"). Never work out a
     weekday yourself.
   • Never invent anything: no rooms, times, prices, people, promises or policies that are
@@ -105,6 +108,9 @@ def request_view(facts: dict[str, Any]) -> dict[str, Any]:
     seats = seats_needed(facts)
     if seats:
         out["seats_needed_in_room"] = seats
+    notes = [n for n in facts.get("catering_notes") or [] if n]
+    if notes:
+        out["catering_in_their_words"] = notes
     asks = [
         (r.get("text") if isinstance(r, dict) else str(r))
         for r in (facts.get("open_requests") or [])

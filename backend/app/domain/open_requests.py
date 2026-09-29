@@ -40,6 +40,7 @@ _SKIP_ENTITY_KEYS = frozenset(REQUIREMENT_FIELDS) | frozenset(PLATFORM_KEYS) | {
     "invoice_number",
     "amount",
     "location",
+    "catering_notes",
     "busy_fit_rooms",
     "meeting_window",
     "spawned_from_outcome_id",

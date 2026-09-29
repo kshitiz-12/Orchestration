@@ -329,6 +329,10 @@ def is_booking_confirmation(text: str) -> bool:
         return False
     from app.services.email_utils import strip_for_ai
 
+    # Our own subject tags ("Re: [CONFIRM BOOKING] [ROOM-…]") come back on every reply;
+    # they say what we asked, not what the requester answered.
+    text = re.sub(r"\[[A-Z0-9][A-Z0-9 _\-]*\]", " ", text)
+    text = re.sub(r"^\s*(?:re|fwd?)\s*:\s*", "", text, flags=re.I | re.M)
     # Never treat legal disclaimer "sender confirms that…" as a booking confirm
     cleaned = strip_for_ai(text)
     lowered = cleaned.lower().strip()

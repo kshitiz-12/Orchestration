@@ -1797,7 +1797,7 @@ class ClientMeetingOrchestrator:
                 f"{module_line}"
                 + (f"Assumptions:\n{assumption_lines}\n\n" if assumption_lines else "")
                 + follow_block
-                + 'After the meeting, reply "satisfied" to close the operational outcome.'
+                + 'After the meeting, just reply "satisfied" and we\'ll close it off.'
             )
         if outcome.requester_email:
             self.comms.send_case_update(

@@ -13,6 +13,17 @@ os.environ["SECRET_KEY"] = "test-secret"
 os.environ["APP_ENV"] = "prototype"
 os.environ["EMAIL_PROVIDER"] = "cloudmailin"
 os.environ["CLOUDMAILIN_WEBHOOK_SECRET"] = ""
+# Tests must never reach a real mailbox, whatever backend/.env holds.
+for _key in (
+    "CLOUDMAILIN_SMTP_URL",
+    "CLOUDMAILIN_SMTP_HOST",
+    "CLOUDMAILIN_SMTP_USERNAME",
+    "CLOUDMAILIN_SMTP_PASSWORD",
+    "OUTBOUND_SMTP_USERNAME",
+    "OUTBOUND_SMTP_PASSWORD",
+    "OUTBOUND_SMTP_FROM",
+):
+    os.environ[_key] = ""
 
 
 from app.core.database import get_session  # noqa: E402

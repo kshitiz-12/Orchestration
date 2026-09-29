@@ -94,6 +94,8 @@ Same facts can look like anything. Illustrations, not an exhaustive list:
     with 1. Names go in visitor_details.
   • "yes" in a requirements list is not confirm. Confirm only if they are accepting
     a proposed room.
+  • The subject echoes OUR tags ("Re: [CONFIRM BOOKING] [ROOM-…]"). That is what we asked,
+    never their answer — judge confirm only from what they typed.
   • Replying to our room offer with extra needs or changes ("need parking for 2 cars,
     veg for 4, also a bouquet") is provide_facts, NOT confirm — we re-check and send an
     updated offer. Only add "confirm" when they also clearly accept ("confirm", "ok book
@@ -160,6 +162,7 @@ location_preference to that office (do not invent a different site).
 _INTERPRETER_STATE_KEYS = REQUIREMENT_FIELDS + (
     "visitors_counted_in_attendees",
     "requester_name",
+    "catering_notes",
     "open_requests",
     "primary_office",
     "pending_confirmation",
@@ -329,7 +332,11 @@ def refine_meeting_room_extraction(
     primary_is_heuristic: bool = False,
 ) -> ExtractionResult:
     """Reducer-backed merge: Gemini (or primary) delta + grounded messy + heuristic fill."""
-    from app.ai.messy_meeting_parse import looks_like_headcount_as_access, parse_messy_meeting_signals
+    from app.ai.messy_meeting_parse import (
+        _looks_like_names,
+        looks_like_headcount_as_access,
+        parse_messy_meeting_signals,
+    )
     from app.domain.meeting import Provenance
     from app.engine.outcome_reducer import reduce_meeting_facts
 
@@ -349,6 +356,17 @@ def refine_meeting_room_extraction(
         primary["open_requests"] = prior_asks + list(extraction.open_requests)
     unset = list(fd.get("unset") or [])
     speech = list(fd.get("speech_acts") or [])
+    if "confirm" in speech and not is_booking_confirmation(body):
+        changed = [
+            k for k in REQUIREMENT_FIELDS
+            if _answered(primary.get(k)) and str(primary.get(k)) != str((prior_facts or {}).get(k))
+        ]
+        # Changing what they need means the held offer is stale — re-offer, don't book.
+        if changed:
+            speech = [s for s in speech if s != "confirm"]
+
+    if "visitor_details" in primary and not _looks_like_names(str(primary.get("visitor_details") or "")):
+        primary.pop("visitor_details")
 
     # Grounded fill for fields Gemini left blank. Reducer only writes unknowns —
     # it will not overwrite an answered Gemini value.
@@ -390,6 +408,16 @@ def refine_meeting_room_extraction(
             merged[flag] = True
         else:
             merged.pop(flag, None)
+
+    from app.ai.messy_meeting_parse import catering_phrases
+
+    # The model may summarise away counts ("2 tea, rest coffee"); ops needs the exact ask.
+    notes = [n for n in (prior_facts or {}).get("catering_notes") or [] if n]
+    said = catering_phrases(body)
+    if said and said not in notes:
+        notes.append(said)
+    if notes:
+        merged["catering_notes"] = notes[-5:]
 
     merged["raw_reply"] = body[:4000]
     extraction.entities = merged

@@ -125,6 +125,9 @@ def _needs_line(bag: dict[str, Any]) -> str:
     if catering_needed(bag):
         food = str(bag.get("catering"))
         food = "catering" if food.lower() in {"yes", "requested"} else food
+        notes = [n for n in bag.get("catering_notes") or [] if n]
+        if notes:
+            food += f' (as asked: "{notes[-1]}")'
         needs.append(f"{food} ({bag['dietary']})" if bag.get("dietary") else food)
     access = str(bag.get("special_access") or "").strip()
     if access and access.lower() not in {"none", "n/a", "no"}:
@@ -164,8 +167,17 @@ def _pending_catering_approval(bag: dict[str, Any]) -> str:
     quote = bag.get("catering_quote") or {}
     amount = quote.get("amount_ex_tax")
     cost = f"{quote.get('currency') or 'INR'} {amount:,.0f} + tax" if isinstance(amount, (int, float)) else "cost not quoted"
-    vendor = f" via {quote['vendor']}" if quote.get("vendor") else ""
+    vendor = f" via {str(quote['vendor']).rstrip('.')}" if quote.get("vendor") else ""
     return f"Catering needs your approval: {cost} for {quote.get('headcount') or seats_needed(bag)} people{vendor}."
+
+
+def _catering_said(bag: dict[str, Any]) -> str:
+    notes = [str(n).strip() for n in bag.get("catering_notes") or [] if str(n).strip()]
+    if not notes:
+        return ""
+    if len(notes) == 1:
+        return f'Requester\'s words: "{notes[0]}"'
+    return "Requester's words, latest last: " + " → ".join(f'"{n}"' for n in notes)
 
 
 def _after_dash(value: Any) -> str:
@@ -185,10 +197,17 @@ def _arrange_items(bag: dict[str, Any]) -> list[str]:
         food = str(bag.get("catering"))
         food = "Catering" if food.lower() in {"yes", "requested"} else food[:1].upper() + food[1:]
         items.append(f"{food}" + (f" — {bag['dietary']}" if bag.get("dietary") else ""))
+        said = _catering_said(bag)
+        if said:
+            items[-1] += f"\n  {said}"
     visitors = external_visitor_count(bag)
     if visitors:
-        names = bag.get("visitor_details")
-        items.append(f"Visitor passes for {visitors}" + (f": {names}" if names else ""))
+        names = str(bag.get("visitor_details") or "").strip()
+        named = len([n for n in re.split(r",|;|&|\band\b", names) if n.strip()]) if names else 0
+        line = f"Visitor passes for {visitors}" + (f": {names}" if names else "")
+        if names and named < visitors:
+            line += f" + {visitors - named} name{'s' if visitors - named > 1 else ''} to come"
+        items.append(line)
     cars = guest_vehicle_count(bag)
     if cars:
         items.append(f"Parking for {cars}" + (f": {bag['vehicle_numbers']}" if bag.get("vehicle_numbers") else ""))

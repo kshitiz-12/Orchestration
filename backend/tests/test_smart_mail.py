@@ -257,6 +257,74 @@ def test_room_fit_note_explains_oversized_room_and_missing_vc():
     assert "no built-in video-call setup" in _room_fit_note(small, facts)
 
 
+_ADDON_REPLY = (
+    "Few more requests I want 6 non veg and rest veg and 2 tea rest coffee and\r\n"
+    "one more visitor will join us"
+)
+_OFFER_SUBJECT = "Re: [CONFIRM BOOKING] [ROOM-2026-0001] Meeting for 12 on 25th oct at 10am–1pm (3.0h)"
+
+
+def test_catering_counts_survive_in_requesters_words():
+    from app.ai.meeting_extract import refine_meeting_room_extraction
+    from app.ai.messy_meeting_parse import catering_phrases
+    from app.schemas.ai import ExtractionResult
+
+    assert catering_phrases(_ADDON_REPLY) == "6 non veg, rest veg, 2 tea rest coffee"
+    assert catering_phrases("coffe for 6 and rest tea mid meeting") == "coffe for 6, rest tea mid meeting"
+    assert catering_phrases("confirm") == ""
+
+    prior = {**_HELD, "attendees": 12, "catering": "tea/coffee", "catering_notes": ["tea coffee, non veg is fine"]}
+    extraction = ExtractionResult(
+        event_type="MEETING_ROOM",
+        summary="more requests",
+        entities={"catering": "tea, coffee, non-veg and veg meals"},
+        missing_information=[],
+        confidence=0.9,
+        reason="addon",
+    )
+    out = refine_meeting_room_extraction(extraction, subject=_OFFER_SUBJECT, body=_ADDON_REPLY, prior_facts=prior)
+    assert out.entities["catering_notes"] == ["tea coffee, non veg is fine", "6 non veg, rest veg, 2 tea rest coffee"]
+
+    booked = {**_BOOKED_FACTS, "catering_notes": out.entities["catering_notes"]}
+    outcome = Outcome(tenant_id="t", case_reference="ROOM-2026-0001", requester_email="a@b.com", facts={})
+    _, body = build_admin_briefing(outcome, event_title="Booking confirmed — Auditorium A", facts=booked)
+    assert '"6 non veg, rest veg, 2 tea rest coffee"' in body
+
+
+def test_our_subject_tag_is_not_the_requesters_confirm():
+    from app.services.meeting_room import is_booking_confirmation
+
+    assert not is_booking_confirmation(f"{_OFFER_SUBJECT}\n{_ADDON_REPLY}")
+    assert is_booking_confirmation(f"{_OFFER_SUBJECT}\nconfirm")
+    assert is_booking_confirmation(f"{_OFFER_SUBJECT}\nlooks good, go ahead")
+
+
+def test_addon_reply_to_offer_is_not_booked_even_if_model_says_confirm():
+    from app.ai.meeting_extract import refine_meeting_room_extraction
+    from app.schemas.ai import ExtractionResult
+
+    prior = {
+        **_HELD,
+        "attendees": 12,
+        "external_visitors": 2,
+        "visitor_details": "Rahul Sharma and Aman Verma",
+        "dietary": "non-vegetarian",
+    }
+    extraction = ExtractionResult(
+        event_type="MEETING_ROOM",
+        summary="more requests",
+        entities={"dietary": "6 non-veg, rest veg", "external_visitors": 3, "visitor_details": "us"},
+        fact_delta={"set": {}, "speech_acts": ["confirm"]},
+        missing_information=[],
+        confidence=0.9,
+        reason="addon",
+    )
+    out = refine_meeting_room_extraction(extraction, subject=_OFFER_SUBJECT, body=_ADDON_REPLY, prior_facts=prior)
+    assert not out.entities.get("booking_confirmed")
+    assert out.entities["external_visitors"] == 3
+    assert out.entities["visitor_details"] == "Rahul Sharma and Aman Verma"
+
+
 def test_platform_bookkeeping_never_becomes_an_open_request():
     from app.domain.open_requests import merge_open_requests
 

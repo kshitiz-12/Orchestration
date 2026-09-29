@@ -9,9 +9,11 @@ Note: some PaaS hosts (e.g. Render free) block outbound SMTP :587.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import smtplib
 import ssl
+import sys
 from email.message import EmailMessage
 from email.utils import formataddr, make_msgid, parseaddr
 from typing import Any, Optional
@@ -209,6 +211,10 @@ class CloudMailinProvider(EmailProvider):
         return None
 
     def _send_config(self) -> Optional[dict[str, Any]]:
+        # A test run must never send real mail: bounces from fake addresses burn the
+        # CloudMailin outbound rate limit and domain reputation.
+        if os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in sys.modules:
+            return None
         # Prefer CloudMailin (HTTPS API works on Render). Gmail SMTP is local fallback.
         return self._cloudmailin_smtp_config() or self._outbound_gmail_config()
 
