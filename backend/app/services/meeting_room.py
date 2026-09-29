@@ -141,9 +141,11 @@ def catering_needed(facts: dict[str, Any]) -> bool:
 
 def hybrid_needed(facts: dict[str, Any]) -> bool:
     val = str(facts.get("hybrid_av") or "").strip().lower()
-    if not val or val in _NONE_LIKE:
+    if not val or val in _NONE_LIKE or re.match(r"(no|not|none|without)\b", val):
         return False
-    return "yes" in val or "zoom" in val or "teams" in val or "video" in val or "av" in val
+    return bool(
+        re.search(r"\b(yes|zoom|teams|webex|meet|video|vc|av|hybrid|remote|conferenc\w*|call)\b", val)
+    )
 
 
 def presentation_needed(facts: dict[str, Any]) -> bool:
@@ -614,6 +616,8 @@ def unconfirmed_meeting_requirements(
         if _field_is_confirmed(facts, key):
             continue
         if key not in _OPTIONAL_UNCONFIRMED and key not in {"attendees", "date", "meeting_type", "location_preference"}:
+            continue
+        if key == "vehicle_numbers" and not guest_vehicle_count(facts):
             continue
         if key in {"external_visitors", "guest_vehicles", "vehicle_numbers", "visitor_details"}:
             if not facts.get("external_visitors_indicated") and not guest_vehicle_count(facts) and not external_visitor_count(facts):

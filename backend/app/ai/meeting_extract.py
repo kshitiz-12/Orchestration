@@ -104,9 +104,9 @@ Same facts can look like anything. Illustrations, not an exhaustive list:
   • open_requests must list EVERY non-field ask in THIS message, even if several appear
     in one sentence ("photographer, name tents and a translator" → three items).
     But an ask you already mapped onto a field is NOT an open request: "non veg is fine"
-    → dietary, "display + VC" → presentation_display / hybrid_av, "2 clients visiting" →
-    external_visitors, "no parking" → guest_vehicles. Only what no field captures goes in
-    open_requests ("tea coffee" stays — it says WHAT catering; so do "extra chairs", etc.).
+    → dietary, "display + VC" → presentation_display / hybrid_av, "tea coffee" → catering,
+    "2 clients visiting" → external_visitors, "no parking" → guest_vehicles. Only what no
+    field captures goes in open_requests ("extra chairs", "photographer", …).
 
 Seating — the room must seat everyone physically present:
   • attendees = the headcount they state. external_visitors = in-person guests from outside.
@@ -115,6 +115,16 @@ Seating — the room must seat everyone physically present:
     Set it false when visitors come on top ("12 of us + 2 clients", "12 employees; 2
     external visitors will join"). Remote / VC participants never need a seat and are
     not external_visitors.
+
+Value formats (the platform reads these):
+  • date: use today (given in the payload) to resolve "tomorrow", "friday", "25th Oct".
+    Write it as the requester did when it has no year ("25th Oct"); if you add a year it
+    must be the next upcoming occurrence relative to today, as YYYY-MM-DD.
+  • preferred_time / end_time: "10:00 AM", "1:00 PM".
+  • hybrid_av: "yes — <what they need>" or "no". presentation_display: "yes" or "no".
+  • catering: "none", or a short description of what they want ("tea/coffee"). When
+    catering already describes it, do not repeat it in open_requests.
+  • guest_vehicles: integer (0 when they say no parking / no vehicle).
 
 Requester name:
   • If the sender signs off with their name ("Regards, Aditya Test", "- Priya"), set
@@ -185,6 +195,13 @@ def compact_interpreter_state(prior_facts: Optional[dict]) -> dict[str, Any]:
     return out
 
 
+def _today_label() -> str:
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+    return now.strftime("%Y-%m-%d (%A)")
+
+
 def build_interpreter_payload(
     *,
     subject: str,
@@ -199,6 +216,7 @@ def build_interpreter_payload(
             "Read this workplace email the way ChatGPT or Gemini would in chat. "
             "Typing will be messy. Understand everything they want."
         ),
+        "today": _today_label(),
         "subject": subject,
         "this_message": interpreter_view.get("this_message") or "",
         "answers_they_typed_on_our_questions": interpreter_view.get(

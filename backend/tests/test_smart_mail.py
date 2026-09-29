@@ -67,6 +67,31 @@ def test_briefing_shows_signed_name_and_no_duplicate_lines():
     assert "Seats needed in room: 14" in body
 
 
+def test_gemini_schema_declares_fact_fields():
+    from app.ai.gemini import EXTRACTION_SCHEMA_HINT
+
+    ents = EXTRACTION_SCHEMA_HINT["properties"]["entities"]["properties"]
+    delta = EXTRACTION_SCHEMA_HINT["properties"]["fact_delta"]["properties"]["set"]["properties"]
+    for key in ("attendees", "date", "guest_vehicles", "requester_name", "visitors_counted_in_attendees"):
+        assert key in ents and key in delta
+
+
+def test_hybrid_reads_free_text():
+    from app.services.meeting_room import hybrid_needed
+
+    assert hybrid_needed({"hybrid_av": "yes — VC for 2 remote participants"})
+    assert hybrid_needed({"hybrid_av": "VC for 2 remote participants"})
+    assert not hybrid_needed({"hybrid_av": "no VC needed"})
+    assert not hybrid_needed({"hybrid_av": "no"})
+
+
+def test_new_fact_keys_are_not_open_requests():
+    from app.domain.open_requests import merge_open_requests
+
+    asks = merge_open_requests({}, {"requester_name": "Aditya Test", "visitors_counted_in_attendees": False})
+    assert asks == []
+
+
 class _FakeProvider:
     def __init__(self, body):
         self.body = body

@@ -29,6 +29,17 @@ _SKIP_ENTITY_KEYS = frozenset(REQUIREMENT_FIELDS) | frozenset(PLATFORM_KEYS) | {
     "new_request",
     "update_existing",
     "post_booking_requests",
+    "visitors_counted_in_attendees",
+    "requester_name",
+    "employee_name",
+    "joining_date",
+    "permanent_seat_available",
+    "bank_details_changed",
+    "vendor_name",
+    "po_number",
+    "invoice_number",
+    "amount",
+    "location",
 }
 
 def _norm(text: str) -> str:

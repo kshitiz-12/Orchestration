@@ -33,6 +33,47 @@ bank details. You do not execute actions; the platform reducer merges your delta
 Return ONLY valid JSON matching the required schema.
 """
 
+# Structured output returns {} for an object schema without properties, so every field the
+# platform reads must be declared here.
+_STR = {"type": "string"}
+_INT = {"type": "integer"}
+_BOOL = {"type": "boolean"}
+FACT_PROPERTIES = {
+    "attendees": _INT,
+    "date": _STR,
+    "preferred_time": _STR,
+    "end_time": _STR,
+    "duration_hours": {"type": "number"},
+    "meeting_type": _STR,
+    "location_preference": _STR,
+    "hybrid_av": _STR,
+    "presentation_display": _STR,
+    "catering": _STR,
+    "dietary": _STR,
+    "special_access": _STR,
+    "confidentiality": _STR,
+    "external_visitors": _INT,
+    "external_visitors_indicated": _BOOL,
+    "visitors_counted_in_attendees": _BOOL,
+    "visitor_details": _STR,
+    "guest_vehicles": _INT,
+    "vehicle_numbers": _STR,
+    "requester_name": _STR,
+    "booking_confirmed": _BOOL,
+    "employee_satisfied": _BOOL,
+    "new_request": _BOOL,
+    "update_existing": _BOOL,
+    "employee_name": _STR,
+    "joining_date": _STR,
+    "permanent_seat_available": _BOOL,
+    "bank_details_changed": _BOOL,
+    "vendor_name": _STR,
+    "po_number": _STR,
+    "invoice_number": _STR,
+    "amount": {"type": "number"},
+    "location": _STR,
+}
+
 EXTRACTION_SCHEMA_HINT = {
     "type": "object",
     "properties": {
@@ -51,7 +92,7 @@ EXTRACTION_SCHEMA_HINT = {
         },
         "category": {"type": "string"},
         "summary": {"type": "string"},
-        "entities": {"type": "object"},
+        "entities": {"type": "object", "properties": FACT_PROPERTIES},
         "open_requests": {"type": "array", "items": {"type": "string"}},
         "issues": {
             "type": "array",
@@ -61,7 +102,7 @@ EXTRACTION_SCHEMA_HINT = {
                     "issue_type": {"type": "string"},
                     "summary": {"type": "string"},
                     "severity": {"type": "string"},
-                    "entities": {"type": "object"},
+                    "entities": {"type": "object", "properties": FACT_PROPERTIES},
                 },
                 "required": ["issue_type", "summary"],
             },
@@ -95,9 +136,15 @@ EXTRACTION_SCHEMA_HINT = {
         "fact_delta": {
             "type": "object",
             "properties": {
-                "set": {"type": "object"},
+                "set": {"type": "object", "properties": FACT_PROPERTIES},
                 "unset": {"type": "array", "items": {"type": "string"}},
-                "assumptions": {"type": "array", "items": {"type": "object"}},
+                "assumptions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"field": _STR, "value": _STR, "message": _STR},
+                    },
+                },
                 "speech_acts": {
                     "type": "array",
                     "items": {
