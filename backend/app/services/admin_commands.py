@@ -892,31 +892,21 @@ class AdminCommandHandler:
 
     def _ack_admin(self, outcome: Outcome, cmd: dict, result: dict) -> None:
         applied = bool(result.get("applied"))
-        facts = dict(outcome.facts or {})
-        lines = [
-            "Hello,",
-            "",
-            f"CASE      {outcome.case_reference}",
-            f"YOU SENT    {(cmd.get('raw') or '').splitlines()[0][:160] if cmd.get('raw') else '(empty)'}",
-            f"UNDERSTOOD  {cmd.get('understood_as') or cmd['action']}",
-            f"RESULT      {'Applied' if applied else 'Not applied'} — {result.get('summary')}",
-            f"STAGE NOW   {facts.get('orchestration_stage') or outcome.status}",
-        ]
-        if cmd.get("fact_updates"):
-            lines.append(
-                "CHANGED     " + ", ".join(f"{k.replace('_', ' ')} → {v}" for k, v in cmd["fact_updates"].items())
-            )
-        if result.get("next"):
-            lines += ["", result["next"]]
-        if not applied:
-            lines += [
-                "",
-                "Just reply in your own words — e.g. \"approve\", \"put them in F2-R2\", "
-                "\"make it 25 people and go ahead\", \"reject, no off-site budget\", "
-                "\"tell them the venue visit is Monday 11am\".",
+        understood = cmd.get("understood_as") or cmd["action"].replace("_", " ").title()
+        if applied:
+            lines = [f"Done — {result.get('summary') or understood}"]
+        else:
+            lines = [
+                f"Not done — {result.get('summary') or 'I could not act on that.'}",
+                f"I read your reply as: {understood}",
             ]
-        lines.append(f"(read by {cmd.get('path') or 'system'})")
-        lines.append("")
+        if cmd.get("fact_updates"):
+            lines.append("Changed: " + ", ".join(f"{k.replace('_', ' ')} → {v}" for k, v in cmd["fact_updates"].items()))
+        if result.get("next"):
+            lines.append(result["next"])
+        if not applied:
+            lines.append('Reply again in plain words, e.g. "approve", "book F2-R3" or "make it 20 people".')
+        lines += ["", f"Case: {outcome.case_reference}", ""]
         self.comms.send_case_update(
             outcome=outcome,
             communication_type="INFORMATION_ONLY",

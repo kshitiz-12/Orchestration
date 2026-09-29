@@ -231,7 +231,7 @@ def test_admin_unknown_reply_changes_nothing(session: Session, admin_env):
     session.refresh(outcome)
     assert outcome.facts.get("last_action") == before
     acks = [m for m in _mails(session, outcome) if ADMIN in (m.recipients or []) and "OPS NOT APPLIED" in (m.subject or "")]
-    assert acks and "own words" in (acks[0].body or "")
+    assert acks and "plain words" in (acks[0].body or "")
 
 
 def test_gemini_reads_free_text_book_plus_message(session: Session, admin_env, monkeypatch):

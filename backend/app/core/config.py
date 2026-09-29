@@ -56,6 +56,9 @@ class Settings(BaseSettings):
     admin_password: str = "admin123"
     # Dedicated ops mailbox for FYI + ACTION REQUIRED case mail (empty = disabled)
     admin_ops_email: str = ""
+    # key = ops hear about proposals, bookings, changes and decisions; all = also "request opened"
+    # and "gathering requirements" notices
+    admin_fyi_level: str = "key"
     # Extra ops mailboxes copied on OPS DECISION mail and allowed to reply (comma-separated)
     admin_backup_emails: str = ""
     # Who decides which approval type (empty → falls back to ADMIN_OPS_EMAIL)

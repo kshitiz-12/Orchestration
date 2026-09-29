@@ -58,21 +58,12 @@ def test_briefing_puts_special_requests_in_own_section():
     )
     assert "FYI" not in hint.upper()
     assert "OPS UPDATE" in hint
-    assert "SPECIAL REQUESTS" in body
-    assert "photographer" in body
-    assert "name tents" in body
-    assert "translator" in body
-    assert "MEETING DETAILS" in body
-    assert "VISITORS / ACCESS / PARKING" in body
-    assert "HR26" in body
-    assert "YOU CAN ACT ANYTIME" in body
-    assert "visibility only" not in body.lower()
-    assert "No action needed" not in body
-    # Specials must not only live under meeting dump as "Also requested"
-    special_idx = body.index("SPECIAL REQUESTS")
-    meeting_idx = body.index("MEETING DETAILS")
-    assert special_idx > meeting_idx
-    assert "photographer" in body[special_idx:]
+    assert "Also asked: photographer for the review; name tents; translator" in body
+    assert "People: 20 + 2 visitors (Rahul Mehta; Priya Nair) → 22 seats" in body
+    assert "parking for 1 (HR26 AB 1234)" in body
+    assert "No action needed" in body
+    assert "══" not in body
+    assert len(body.splitlines()) <= 12
 
 
 def test_decision_briefing_uses_ops_decision_label():
@@ -96,8 +87,9 @@ def test_decision_briefing_uses_ops_decision_label():
     )
     assert "OPS DECISION" in hint
     assert "FYI" not in hint
-    assert "OPS — WHAT YOU CAN DO" in body
-    assert "CASE  ROOM-2026-0080" in body
+    assert body.startswith("ROOM-2026-0080 — No suitable room in inventory")
+    assert "Room: none fits — No room fits 80 people (largest holds 40)." in body
+    assert "Your call." in body
 
 
 def test_complete_fit_sends_structured_ops_update(session: Session, monkeypatch):
@@ -146,10 +138,11 @@ def test_complete_fit_sends_structured_ops_update(session: Session, monkeypatch)
     assert admin_mails
     assert any("[OPS UPDATE]" in (m.subject or "") for m in admin_mails)
     assert not any("[FYI]" in (m.subject or "") for m in admin_mails)
-    body = next(m.body for m in admin_mails if "[OPS UPDATE]" in (m.subject or ""))
-    assert "SPECIAL REQUESTS" in (body or "")
-    assert "whiteboard" in (body or "").lower()
-    assert "YOU CAN ACT ANYTIME" in (body or "")
+    assert len(admin_mails) == 1
+    assert "Room offered to requester" in (admin_mails[0].subject or "")
+    body = admin_mails[0].body or ""
+    assert "Also asked: extra whiteboard markers" in body
+    assert "No action needed" in body
     get_settings.cache_clear()
 
 
@@ -202,7 +195,7 @@ def test_no_resource_sends_ops_decision(session: Session, monkeypatch):
         if "ops-desk@example.com" in (m.recipients or []) and "[OPS DECISION]" in (m.subject or "")
     ]
     assert admin_decision
-    assert "WHAT YOU CAN DO" in (admin_decision[0].body or "")
+    assert "Your call." in (admin_decision[0].body or "")
     get_settings.cache_clear()
 
 

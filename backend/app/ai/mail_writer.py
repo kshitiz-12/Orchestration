@@ -33,7 +33,7 @@ Write the email body:
     scratch. Never write "Label: value" lines ("Meeting type: internal meeting",
     "Location preference: …", "Hybrid / AV: yes").
   • Recap in 2–4 short "- " bullets written as natural phrases, merging related facts:
-      - Sat 25 Oct, 10am–1pm at the Corporate Office
+      - Sunday 25 October, 10am–1pm at the Corporate Office
       - Meeting Room F2-R3 (seats 16) for your 12 + 2 guests, Rahul Sharma and Aman Verma
       - Screen and video-call setup for your remote folks
       - Tea/coffee with non-veg food
@@ -47,6 +47,8 @@ Write the email body:
     tell me if you need either."). Skip trivial ones (no parking, no special access).
   • End with exactly what they should do next, keeping the reply word(s) from the draft
     (e.g. reply "confirm"), and any deadline in the draft (e.g. room held 24 hours).
+  • Write the date from request.date_exact (e.g. "Sunday 25 October"). Never work out a
+    weekday yourself.
   • Never invent anything: no rooms, times, prices, people, promises or policies that are
     not in the draft or request. If the draft asks questions, ask all of them, clearly.
   • Plain text only (no markdown headings, no bold, no tables). Under ~170 words unless the
@@ -91,7 +93,12 @@ def _enabled() -> bool:
 def request_view(facts: dict[str, Any]) -> dict[str, Any]:
     from app.services.meeting_room import seats_needed
 
+    from app.services.room_booking import parse_meeting_date
+
     out: dict[str, Any] = {k: facts.get(k) for k in _REQUEST_KEYS if facts.get(k) not in (None, "")}
+    day = parse_meeting_date(facts.get("date"))
+    if day:
+        out["date_exact"] = day.strftime("%A %d %B %Y")
     seats = seats_needed(facts)
     if seats:
         out["seats_needed_in_room"] = seats

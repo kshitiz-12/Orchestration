@@ -61,10 +61,9 @@ def test_briefing_shows_signed_name_and_no_duplicate_lines():
         },
     )
     _, body = build_admin_briefing(outcome, event_title="Room proposed")
-    assert "Name: Aditya Test" in body
-    assert body.count("Meeting type:") == 1
-    assert body.count("Location") == 1
-    assert "Seats needed in room: 14" in body
+    assert "Requester: Aditya Test <anonymousxo1204@gmail.com>" in body
+    assert "When: Sun 25 Oct 2026 · Corporate Office" in body
+    assert "People: 12 + 2 visitors → 14 seats" in body
 
 
 def test_gemini_schema_declares_fact_fields():
