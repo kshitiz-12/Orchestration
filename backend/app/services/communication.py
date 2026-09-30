@@ -269,7 +269,10 @@ class CommunicationService:
         greeting_name: Optional[str] = None,
     ) -> Communication:
         questions = [q for q in questions if q]
-        if not questions:
+        current = self.session.get(Outcome, conversation.current_outcome_id) if conversation.current_outcome_id else None
+        category = (current.category if current else "") or ""
+        is_room = category.upper() in {"", "MEETING_ROOM"}
+        if not questions and is_room:
             from app.services.meeting_room import default_meeting_room_questions
 
             questions = default_meeting_room_questions()
@@ -282,14 +285,19 @@ class CommunicationService:
         from app.services.no_resource_flow import format_outbound_greeting
 
         parts: list[str] = [f"{format_outbound_greeting(name)}\n"]
+        kind = "meeting-room request" if is_room else "request"
         if first_contact:
-            parts.append(f"Thanks for your meeting-room request — it's registered as {ref}.\n")
+            parts.append(f"Thanks for your {kind} — it's registered as {ref}.\n")
         if understood:
             parts.append("Here's what I have so far:\n")
             parts.extend(f"- {line}" for line in understood if line)
             parts.append("")
         if questions:
-            parts.append("To lock in a room I just need:\n" if understood or not first_contact else "To find you a room, please share:\n")
+            if is_room:
+                ask = "To lock in a room I just need:\n" if understood or not first_contact else "To find you a room, please share:\n"
+            else:
+                ask = "To take this forward I just need:\n"
+            parts.append(ask)
             parts.extend(f"- {q}" for q in questions)
         lines = [line for line in (unconfirmed or []) if line]
         open_items = [line.replace(" (not confirmed)", "") for line in lines if not line.endswith("(assumed)")]
@@ -307,7 +315,7 @@ class CommunicationService:
         else:
             parts.append("\nReply to this email to confirm and I'll go ahead.")
         body = "\n".join(parts)
-        outcome = self.session.get(Outcome, conversation.current_outcome_id) if conversation.current_outcome_id else None
+        outcome = current
         polish = {
             "purpose": "INFORMATION REQUIRED — ask for the missing details",
             "facts": dict((outcome.facts if outcome else None) or {}),
@@ -400,7 +408,8 @@ class CommunicationService:
         key_suffix = suppress_fingerprint or event_id or hash(body)
         polish = None
         requester = (outcome.requester_email or "").strip().lower()
-        if requester and [r.strip().lower() for r in recipients] == [requester]:
+        # Desk (non-room) cases already write human mail; the rewriter is tuned for room bookings.
+        if requester and [r.strip().lower() for r in recipients] == [requester] and outcome.template_code != "SERVICE_REQUEST":
             polish = {
                 "purpose": label,
                 "facts": dict(outcome.facts or {}),

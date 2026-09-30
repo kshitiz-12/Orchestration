@@ -28,6 +28,7 @@ const GROUPS = [
       { href: "/resources", label: "Rooms & seats" },
       { href: "/invoices", label: "Invoices" },
       { href: "/failures", label: "Problems" },
+      { href: "/setup", label: "Company setup" },
       { href: "/config", label: "Settings" },
     ],
   },

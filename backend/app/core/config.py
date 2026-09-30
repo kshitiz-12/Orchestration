@@ -57,8 +57,11 @@ class Settings(BaseSettings):
     # Dedicated ops mailbox for FYI + ACTION REQUIRED case mail (empty = disabled)
     admin_ops_email: str = ""
     # key = ops hear about proposals, bookings, changes and decisions; all = also "request opened"
-    # and "gathering requirements" notices
+    # and "gathering requirements" notices; digest = decisions still immediate, but "work completed"
+    # notes for desk cases arrive as one daily summary instead of one mail per case
     admin_fyi_level: str = "key"
+    # Hour of day (IST, 0-23) after which the daily admin digest is sent when ADMIN_FYI_LEVEL=digest
+    admin_digest_hour_ist: int = 19
     # Extra ops mailboxes copied on OPS DECISION mail and allowed to reply (comma-separated)
     admin_backup_emails: str = ""
     # Who decides which approval type (empty → falls back to ADMIN_OPS_EMAIL)
@@ -92,6 +95,9 @@ class Settings(BaseSettings):
     ai_mail_writer: bool = True
     # Sign-off on requester emails
     mail_signature: str = "Workplace Team"
+    # AI admin desk reads every mail first (greetings, any request type, status, multi-request).
+    # Off = previous behaviour (every mail goes to the meeting-room/legacy flows).
+    agent_mode: bool = True
 
     # Active email channel: cloudmailin (prototype default) | outlook | gmail
     email_provider: str = "cloudmailin"

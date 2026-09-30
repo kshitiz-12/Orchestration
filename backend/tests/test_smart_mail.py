@@ -239,6 +239,69 @@ def test_booked_briefing_is_a_short_work_order():
     assert "Also asked" not in body and "Needs:" not in body
 
 
+def test_booked_briefing_uses_latest_counted_catering_and_real_visitor_names():
+    facts = {
+        **_BOOKED_FACTS,
+        "external_visitors": 12,
+        "visitor_details": "Rahul Sharma and Aman Verma and 10 additional external visitors",
+        "catering": "tea, coffee",
+        "dietary": "12 vegetarian, rest non-vegetarian",
+        "catering_notes": [
+            "tea coffee, non veg is fine",
+            "12 veg, rest non veg, 3 tea, 4 soft drinks rest coffee",
+        ],
+    }
+    outcome = Outcome(tenant_id="t", case_reference="ROOM-2026-0002", requester_email="a@b.com", facts={})
+    _, body = build_admin_briefing(outcome, event_title="Booking confirmed — Auditorium A", facts=facts)
+    assert '- Catering, as the requester asked: "12 veg, rest non veg, 3 tea, 4 soft drinks rest coffee"' in body
+    assert "tea coffee, non veg is fine" not in body
+    assert "- Visitor passes for 12: Rahul Sharma and Aman Verma + 10 names to come" in body
+
+
+def test_visitor_addition_marker_is_short():
+    from app.ai.messy_meeting_parse import parse_messy_meeting_signals
+
+    out = parse_messy_meeting_signals(
+        "10 more external visitors will join, and for the catering 12 veg, rest non veg, 3 tea, 4 soft drinks rest coffee"
+    )
+    assert out["external_visitors_add"] == 10
+    assert out["external_visitors_add_phrase"] == "10 more external visitors"
+
+
+_PASTED_FORM_REPLY = (
+    "Hi,\r\n\r\nPls find the  same\r\n\r\nTo lock in a room I just need:\r\n"
+    "- How many people will attend in person? 20\r\n"
+    "- Which date do you need the room? 7th Oct\r\n"
+    "- How long do you need the room (end time or duration)?10 A.M to 3 P.M\r\n"
+    "- Meeting type: internal, client/vendor, interview, training, confidential, or other? Internal\r\n\r\n"
+    "Also worth a quick check:\r\n"
+    "- Hybrid / AV: not answered - yes required\r\n"
+    "- Presentation display: not answered yes Required\r\n"
+    "- Catering / amenities: not answered - 10 veg and 10 Non Veg , 2 times tea/coffee\r\n"
+    "- Special access / security: not answered -no\r\n"
+    "- Confidentiality: not answered\r\n\r\n"
+    "<Hero-FinCorp-New-Logo.jpg>\u00c2\u00a0<Screenshot 2024-04-02 140213.png>\r\n\r\n"
+    "Kapil Mantri\r\nSr. Associate - Administration & Infrastructure\r\n"
+)
+
+
+def test_pasted_back_form_reads_as_answers_only():
+    from app.ai.gemini import HeuristicProvider
+    from app.ai.messy_meeting_parse import catering_phrases
+    from app.services.email_utils import strip_for_ai
+
+    cleaned = strip_for_ai(_PASTED_FORM_REPLY)
+    assert "confidential" not in cleaned.lower()
+    assert "not answered" not in cleaned.lower()
+    assert "Kapil" not in cleaned and ".jpg" not in cleaned
+    for line in ("Attendees in person: 20", "Date: 7th Oct", "Meeting type: Internal", "Hybrid / AV: yes required"):
+        assert line in cleaned
+    facts = HeuristicProvider().extract(subject="RE: [ROOM-2026-0003]", body=cleaned).entities
+    assert not facts.get("confidentiality")
+    said = catering_phrases(cleaned)
+    assert "10 veg" in said and "tea/coffee" in said and "quick check" not in said
+
+
 def test_room_fit_note_explains_oversized_room_and_missing_vc():
     from app.engine.meeting_scenario import _room_fit_note
 

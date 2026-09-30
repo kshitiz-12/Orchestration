@@ -132,10 +132,20 @@ def ensure_schema_compat() -> None:
                     continue
                 logger.warning("schema_compat_stmt_skipped", error=str(exc), stmt=stmt[:80])
 
+    from app.models.company import Department, KnowledgeEntry, ServiceTicket, VisitorPass
     from app.models.org import RoomBooking
 
     # Tables added after the initial schema (create_all is checkfirst → idempotent)
-    SQLModel.metadata.create_all(engine, tables=[RoomBooking.__table__])  # type: ignore[attr-defined]
+    SQLModel.metadata.create_all(
+        engine,
+        tables=[
+            RoomBooking.__table__,  # type: ignore[attr-defined]
+            Department.__table__,  # type: ignore[attr-defined]
+            KnowledgeEntry.__table__,  # type: ignore[attr-defined]
+            ServiceTicket.__table__,  # type: ignore[attr-defined]
+            VisitorPass.__table__,  # type: ignore[attr-defined]
+        ],
+    )
     logger.info("schema_compat_ensured")
 
 
@@ -175,8 +185,11 @@ def ensure_seeded() -> None:
     with Session(get_engine()) as session:
         existing = session.exec(select(Tenant)).first()
         if existing:
+            from app.agent.company_seed import ensure_company_seed
+
             ensure_meeting_room_template(session, existing.tenant_id)
             ensure_meeting_room_resources(session, existing.tenant_id)
+            ensure_company_seed(session, existing.tenant_id)
             session.commit()
             logger.info("seed_skipped_tenant_exists", tenant_id=existing.tenant_id)
             return

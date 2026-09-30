@@ -70,6 +70,51 @@ def strip_signatures(text: str) -> str:
     return (text or "")[:cut].strip()
 
 
+_IMAGE_TAG = r"[<\[][^<>\[\]\n]*\.(?:jpe?g|png|gif|bmp|webp)[>\]]"
+_IMAGE_ONLY_LINE = re.compile(rf"^\s*(?:{_IMAGE_TAG}[\s\u00a0\u00c2]*)+$", re.M | re.I)
+
+# Our outbound questions, when pasted back unquoted, must not read as the requester's words
+# (e.g. the meeting-type options list contains "confidential").
+_OUR_FORM_HEADINGS = re.compile(
+    r"^\s*(?:to lock in a room i just need|also worth a quick check|to find you a room, please share)\s*:?\s*$",
+    re.I,
+)
+_OUR_QUESTIONS = [
+    (re.compile(r"how many people will attend", re.I), "Attendees in person"),
+    (re.compile(r"which date do you need", re.I), "Date"),
+    (re.compile(r"how long do you need the room|what time slot do you need", re.I), "Time"),
+    (re.compile(r"which office or building", re.I), "Office"),
+    (re.compile(r"^meeting type\s*:", re.I), "Meeting type"),
+]
+_NOT_ANSWERED = re.compile(r"^\s*([^:\n]{2,60}):\s*not answered\b[\s\-–—:]*(.*)$", re.I)
+
+
+def strip_echoed_form(text: str) -> str:
+    """Turn our pasted-back checklist into 'Label: answer' lines; drop unanswered ones and inline logos."""
+    image_cut = _IMAGE_ONLY_LINE.search(text or "")
+    if image_cut:
+        text = text[: image_cut.start()]
+    out: list[str] = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        bullet = line.lstrip("-•* \t")
+        if _OUR_FORM_HEADINGS.match(bullet):
+            continue
+        label = next((lab for pat, lab in _OUR_QUESTIONS if pat.search(bullet)), None)
+        if label and "?" in bullet:
+            answer = bullet.rsplit("?", 1)[-1].strip(" \t-–—")
+            if answer:
+                out.append(f"{label}: {answer}")
+            continue
+        m = _NOT_ANSWERED.match(bullet)
+        if m:
+            if m.group(2).strip():
+                out.append(f"{m.group(1).strip()}: {m.group(2).strip()}")
+            continue
+        out.append(raw)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
+
+
 def strip_for_ai(body: str) -> str:
     """New requester text + answers written onto quoted questions. Drop our outbound copy."""
     return prepare_interpreter_view(body)["combined_for_parsers"]
@@ -87,7 +132,7 @@ def prepare_interpreter_view(body: str) -> dict:
     salvage missed (answers not on the same line as the question).
     """
     new_text, quoted = split_new_and_quoted(body or "")
-    new_text = strip_signatures(new_text)
+    new_text = strip_echoed_form(strip_signatures(new_text))
     salvaged = salvage_inline_answers(quoted)
     excerpt = (quoted or "").strip()
     if len(excerpt) > QUOTED_EXCERPT_MAX:

@@ -34,7 +34,7 @@ from app.services.room_booking import meeting_window
 
 logger = get_logger(__name__)
 
-_CASE_REF = re.compile(r"\[((?:EVT|ROOM|ONB|PARK|FURN|VND|INV)-\d{4}-\d+)\]", re.I)
+_CASE_REF = re.compile(r"\[([A-Z]{2,5}-\d{4}-\d+)\]", re.I)
 
 _MESSAGE = re.compile(
     r"^\s*(?:msg|message|tell(?:\s+(?:the\s+)?(?:requester|user|them))?|"
@@ -120,7 +120,10 @@ def verify_ops_sender(session: Session, tenant_id: str, headers: Any, sender: st
 
     ids = {m.strip().lower() for key in ("in-reply-to", "references") for m in _MSG_ID.findall(str(hdrs.get(key) or ""))}
     if ids:
-        variants = list(ids | {f"<{i}>" for i in ids})
+        # CloudMailin's API returns our id bare ("a0578687-…") while replies reference
+        # "<a0578687-…@cloudmta.net>", so match on the local part too.
+        locals_ = {i.split("@", 1)[0] for i in ids}
+        variants = list(ids | locals_ | {f"<{i}>" for i in ids | locals_})
         rows = session.exec(
             select(Communication).where(
                 Communication.tenant_id == tenant_id,

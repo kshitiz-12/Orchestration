@@ -95,6 +95,8 @@ class OutcomeEngine:
                     Outcome.status.notin_(  # type: ignore[attr-defined]
                         [OutcomeStatus.CLOSED.value, OutcomeStatus.CANCELLED.value]
                     ),
+                    # AI admin desk cases on the same thread keep their own lifecycle
+                    Outcome.template_code != "SERVICE_REQUEST",
                 )
             ).first()
             if existing:

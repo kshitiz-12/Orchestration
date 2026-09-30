@@ -479,6 +479,9 @@ def seed(session: Session) -> str:
     from app.policy.meeting_policy import ensure_meeting_policy_rule
 
     ensure_meeting_policy_rule(session, tid)
+    from app.agent.company_seed import ensure_company_seed
+
+    ensure_company_seed(session, tid)
     session.add(
         NotificationTemplate(
             tenant_id=tid,

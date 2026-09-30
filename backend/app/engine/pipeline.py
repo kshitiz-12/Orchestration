@@ -97,6 +97,19 @@ class ProcessingPipeline:
         event.conversation_id = conversation.conversation_id
         self.session.add(event)
 
+        self._handoff_categories: set[str] = set()
+        if self.settings.agent_mode:
+            from app.agent.desk import AdminDesk
+
+            desk = AdminDesk(self.session, self.tenant_id, self.comms, self.llm.provider)
+            desk_result = desk.handle(event, conversation)
+            self._handoff_categories = desk.handoff_categories
+            if desk_result is not None:
+                event.processing_stage = ProcessingStage.COMPLETED.value
+                self.session.add(event)
+                self.session.commit()
+                return {"event_id": event.event_id, **desk_result}
+
         prior_facts = merge_thread_prior_facts(
             self.session,
             tenant_id=self.tenant_id,
@@ -426,8 +439,12 @@ class ProcessingPipeline:
         }
 
     def _maybe_handle_admin_reply(self, event: RawEmailEvent) -> Optional[dict]:
-        """Ops mailbox replies are commands on an existing case, not requester mail."""
-        if not is_admin_sender(event.sender):
+        """Ops mailbox and department replies are commands on an existing case, not requester mail."""
+        from app.agent.directory import department_emails
+
+        if not is_admin_sender(event.sender) and sender_address(event.sender) not in department_emails(
+            self.session, self.tenant_id
+        ):
             return None
         from app.models.outcome import Outcome
 
@@ -461,12 +478,23 @@ class ProcessingPipeline:
         if not verified:
             return self._reject_unverified_ops_mail(event, outcome, sender)
 
-        result = AdminCommandHandler(self.session, self.tenant_id, self.comms).handle(
-            outcome=outcome,
-            body=event.body_text or event.body_for_ai or "",
-            event_id=event.event_id,
-            admin_email=sender,
-        )
+        from app.agent.desk import AdminDesk, is_service_case
+
+        if is_service_case(outcome):
+            from app.services.admin_commands import admin_reply_text
+
+            result = AdminDesk(self.session, self.tenant_id, self.comms).apply_team_reply(
+                outcome, admin_reply_text(event.body_text or event.body_for_ai or ""), sender
+            )
+            if not result.get("applied"):
+                self._ops_not_understood(outcome, sender)
+        else:
+            result = AdminCommandHandler(self.session, self.tenant_id, self.comms).handle(
+                outcome=outcome,
+                body=event.body_text or event.body_for_ai or "",
+                event_id=event.event_id,
+                admin_email=sender,
+            )
         result["sender_verification"] = how
         event.processing_stage = ProcessingStage.COMPLETED.value
         self.session.add(event)
@@ -477,6 +505,21 @@ class ProcessingPipeline:
             "case_reference": outcome.case_reference,
             **result,
         }
+
+    def _ops_not_understood(self, outcome, sender: str) -> None:
+        self.comms.send_case_update(
+            outcome=outcome,
+            communication_type="INFORMATION_ONLY",
+            body=(
+                f"I couldn't tell what to do with your reply on {outcome.case_reference}.\n\n"
+                'You can reply with: "approve", "reject, <reason>", "done <note>", "assign to <email>", '
+                '"tell requester: <message>" or "cancel".\n'
+            ),
+            recipients=[sender],
+            action_label="OPS NOT APPLIED",
+            subject_hint="Reply not understood",
+            suppress_fingerprint=f"not-understood:{outcome.updated_at}",
+        )
 
     def _reject_unverified_ops_mail(self, event: RawEmailEvent, outcome, sender: str) -> dict:
         """Looks like ops but can't be authenticated: change nothing, tell the real ops mailbox."""
@@ -538,11 +581,7 @@ class ProcessingPipeline:
 
         # Fallback: subject contains [EVT-2026-0006] / [ROOM-2026-0001] from clarification replies
         subject = event.subject or ""
-        m = re.search(
-            r"\[((?:EVT|ROOM|ONB|PARK|FURN|VND|INV)-\d{4}-\d+)\]",
-            subject,
-            re.I,
-        )
+        m = re.search(r"\[([A-Z]{2,5}-\d{4}-\d+)\]", subject, re.I)
         if m:
             from app.models.outcome import Outcome
 
@@ -613,14 +652,16 @@ class ProcessingPipeline:
         body = event.body_text or event.body_for_ai or ""
         merged = {**(prior_facts or {}), **(extraction.entities or {})}
 
-        # Always run heuristic over current mail with prior facts for meeting-room threads
-        looks_meeting = (
-            extraction.event_type == "MEETING_ROOM"
-            or "information required" in subject.lower()
-            or "meeting" in subject.lower()
-            or "room" in (subject + body).lower()
-            or any(k in merged for k in ("attendees", "preferred_time", "duration_hours"))
-        )
+        if self.settings.agent_mode:
+            looks_meeting = self._is_meeting_thread(extraction, merged, event)
+        else:
+            looks_meeting = (
+                extraction.event_type == "MEETING_ROOM"
+                or "information required" in subject.lower()
+                or "meeting" in subject.lower()
+                or "room" in (subject + body).lower()
+                or any(k in merged for k in ("attendees", "preferred_time", "duration_hours"))
+            )
         if looks_meeting:
             # LLMService already reduced; re-derive gaps from snapshot without heuristic overwrite
             snapshot = dict(extraction.entities or merged)
@@ -647,6 +688,22 @@ class ProcessingPipeline:
         else:
             extraction.entities = merged
         return extraction
+
+    def _is_meeting_thread(self, extraction: ExtractionResult, merged: dict, event: RawEmailEvent) -> bool:
+        """Meeting-room flow only when the admin agent said so or the thread already is a room case."""
+        from app.models.intake import Conversation
+        from app.models.outcome import Outcome
+
+        in_room_case = any(k in merged for k in ("booked_room", "proposed_room", "attendees", "preferred_time", "duration_hours"))
+        conv = self.session.get(Conversation, event.conversation_id) if event.conversation_id else None
+        if conv and conv.current_outcome_id:
+            current = self.session.get(Outcome, conv.current_outcome_id)
+            if current and current.template_code != "SERVICE_REQUEST":
+                in_room_case = in_room_case or (current.category or "").upper() == "MEETING_ROOM"
+        handoff = getattr(self, "_handoff_categories", set())
+        if handoff:
+            return "meeting_room" in handoff or (in_room_case and "invoice" not in handoff)
+        return extraction.event_type == "MEETING_ROOM" or in_room_case
 
 
 def process_claimed_job(session: Session, job: ProcessingJob, tenant_id: str) -> None:

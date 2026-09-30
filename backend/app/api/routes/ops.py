@@ -230,6 +230,13 @@ def sla_tick(session: SessionDep, tenant_id: TenantDep, _user: UserDep):
     return tick_sla(session, tenant_id)
 
 
+@router.post("/agent/digest")
+def admin_digest(session: SessionDep, tenant_id: TenantDep, _user: UserDep):
+    from app.agent.digest import send_admin_digest
+
+    return send_admin_digest(session, tenant_id, force=True)
+
+
 @router.post("/holds/sweep")
 def holds_sweep(session: SessionDep, tenant_id: TenantDep, _user: UserDep):
     from app.services.hold_sweeper import sweep_proposal_holds

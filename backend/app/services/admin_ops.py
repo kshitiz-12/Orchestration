@@ -171,13 +171,24 @@ def _pending_catering_approval(bag: dict[str, Any]) -> str:
     return f"Catering needs your approval: {cost} for {quote.get('headcount') or seats_needed(bag)} people{vendor}."
 
 
-def _catering_said(bag: dict[str, Any]) -> str:
+_DIET_WORD = re.compile(r"\b(?:non[\s-]?veg\w*|veg\w*|vegan|jain|halal|gluten|dairy)\b", re.I)
+_COUNTED_ASK = re.compile(r"\d|\brest\b|\bfor\s+(?:one|two|three|four|five|six|seven|eight|nine|ten)\b", re.I)
+_VISITOR_PLACEHOLDER = re.compile(r"\d|\b(?:visitors?|guests?|people|persons?|more|additional|others?|external)\b", re.I)
+
+
+def _latest_catering_ask(bag: dict[str, Any]) -> str:
+    """The requester's most recent catering sentence, when it carries counts the structured field loses."""
     notes = [str(n).strip() for n in bag.get("catering_notes") or [] if str(n).strip()]
-    if not notes:
-        return ""
-    if len(notes) == 1:
-        return f'Requester\'s words: "{notes[0]}"'
-    return "Requester's words, latest last: " + " → ".join(f'"{n}"' for n in notes)
+    counted = [n for n in notes if _COUNTED_ASK.search(n)]
+    return counted[-1] if counted else ""
+
+
+def _visitor_names_raw(value: Any) -> list[str]:
+    return [p.strip() for p in re.split(r",|;|&|\band\b", str(value or "")) if p.strip()]
+
+
+def _visitor_names(value: Any) -> list[str]:
+    return [p for p in _visitor_names_raw(value) if not _VISITOR_PLACEHOLDER.search(p)]
 
 
 def _after_dash(value: Any) -> str:
@@ -194,16 +205,20 @@ def _arrange_items(bag: dict[str, Any]) -> list[str]:
     elif presentation_needed(bag):
         items.append("Display / screen")
     if catering_needed(bag):
-        food = str(bag.get("catering"))
-        food = "Catering" if food.lower() in {"yes", "requested"} else food[:1].upper() + food[1:]
-        items.append(f"{food}" + (f" — {bag['dietary']}" if bag.get("dietary") else ""))
-        said = _catering_said(bag)
-        if said:
-            items[-1] += f"\n  {said}"
+        latest = _latest_catering_ask(bag)
+        if latest:
+            dietary = bag.get("dietary") if bag.get("dietary") and not _DIET_WORD.search(latest) else ""
+            items.append(f'Catering, as the requester asked: "{latest}"' + (f" — {dietary}" if dietary else ""))
+        else:
+            food = str(bag.get("catering"))
+            food = "Catering" if food.lower() in {"yes", "requested"} else food[:1].upper() + food[1:]
+            items.append(f"{food}" + (f" — {bag['dietary']}" if bag.get("dietary") else ""))
     visitors = external_visitor_count(bag)
     if visitors:
-        names = str(bag.get("visitor_details") or "").strip()
-        named = len([n for n in re.split(r",|;|&|\band\b", names) if n.strip()]) if names else 0
+        raw_names = str(bag.get("visitor_details") or "").strip()
+        name_list = _visitor_names(raw_names)
+        named = len(name_list)
+        names = raw_names if named == len(_visitor_names_raw(raw_names)) else " and ".join(name_list)
         line = f"Visitor passes for {visitors}" + (f": {names}" if names else "")
         if names and named < visitors:
             line += f" + {visitors - named} name{'s' if visitors - named > 1 else ''} to come"

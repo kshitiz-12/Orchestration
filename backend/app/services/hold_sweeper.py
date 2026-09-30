@@ -153,4 +153,11 @@ def run_all_sweeps(session: Session, tenant_id: str) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         session.rollback()
         logger.warning("sla_tick_failed", error=str(exc))
+    try:
+        from app.agent.digest import send_admin_digest
+
+        out["digest"] = send_admin_digest(session, tenant_id)
+    except Exception as exc:  # noqa: BLE001
+        session.rollback()
+        logger.warning("admin_digest_failed", error=str(exc))
     return out

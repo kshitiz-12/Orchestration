@@ -377,6 +377,22 @@ def test_reply_to_our_briefing_is_trusted(session: Session, env):
     assert case.outcome.facts["booked_room"]["name"] == "Auditorium A"
 
 
+def test_reply_to_cloudmailin_bare_message_id_is_trusted(session: Session, env):
+    _set(env, ADMIN_SENDER_VERIFICATION="strict", ADMIN_FYI_LEVEL="all")
+    tid = _tenant(session)
+    case = Case(session, tid, "t-verified-bare", _facts())
+    briefing = case.mails(ADMIN)[-1]
+    briefing.provider_message_id = "a0578687-2071-4f31-817b-973f97b3f2e3"
+    session.add(briefing)
+    session.commit()
+    ev = _admin_event(
+        session, tid, case.outcome, "book Auditorium A",
+        headers={"In-Reply-To": "<a0578687-2071-4f31-817b-973f97b3f2e3@cloudmta.net>"},
+    )
+    result = ProcessingPipeline(session, tid).process_event(ev.event_id)
+    assert result["status"] == "admin_command" and result["sender_verification"] == "reply_to_our_mail"
+
+
 def test_spf_pass_for_sender_domain_is_trusted(session: Session, env):
     _set(env, ADMIN_SENDER_VERIFICATION="strict")
     tid = _tenant(session)

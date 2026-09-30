@@ -53,10 +53,17 @@ _FOOD_START = re.compile(r"(?i)\d+\s|\b(?:a|rest|all|tea|chai|cof+e+|non|veg|veg
 
 def catering_phrases(text: str) -> str:
     """The requester's own words about food/drinks in this message, e.g. "6 non veg, rest veg, 2 tea rest coffee"."""
-    flat = re.sub(r"[ \t]*\r?\n(?![ \t]*\r?\n)[ \t]*", " ", text or "")
+    # Re-join mail-client wrapping, but keep "Label: value" / bullet lines separate.
+    flat = re.sub(
+        r"[ \t]*\r?\n(?![ \t]*\r?\n)(?![ \t]*(?:[-•*]|[A-Za-z][A-Za-z /&]{1,40}:))[ \t]*", " ", text or ""
+    )
+    flat = re.sub(r"\r?\n", "\n\n", flat)
     kept: list[str] = []
     for sentence in re.split(r"[.!?]+\s|\n\s*\n", flat):
-        if _SYSTEM_FIELD_LINE.match(sentence.strip()):
+        food_label = re.match(r"(?i)^\s*(?:[-*]\s*)?(?:catering(?:\s*/\s*amenities)?|dietary)\s*:", sentence)
+        if food_label:
+            sentence = sentence[food_label.end():]
+        elif _SYSTEM_FIELD_LINE.match(sentence.strip()):
             continue
         for chunk in re.split(r",|;|\band\b|\balso\b", sentence, flags=re.I):
             chunk = chunk.strip(" -:")
@@ -247,7 +254,6 @@ def parse_messy_meeting_signals(text: str) -> dict[str, Any]:
     if m_more:
         count = m_more.group(1).lower()
         out["external_visitors_add"] = int(count) if count.isdigit() else _NUMBER_WORDS[count]
-        out["external_visitors_add_phrase"] = re.sub(r"\s+", " ", m_more.group(0)).strip().lower()[:120]
         extra_name = (m_more.group(2) or "").strip(" ,.")
         extra_name = re.split(
             r"\n|catering\b|parking\b|tea\b|coffee\b|display\b|rest stays\b|confirm\b",
@@ -255,6 +261,9 @@ def parse_messy_meeting_signals(text: str) -> dict[str, Any]:
             maxsplit=1,
             flags=re.I,
         )[0].strip(" ,.-")
+        core = raw[m_more.start(1):m_more.start(2) if m_more.group(2) else m_more.end()]
+        marker = core + (f" {extra_name}" if _looks_like_names(extra_name) else "")
+        out["external_visitors_add_phrase"] = re.sub(r"\s+", " ", marker).strip(" :-–").lower()[:80]
         if _looks_like_names(extra_name):
             out["visitor_details_append"] = extra_name[:200]
 
