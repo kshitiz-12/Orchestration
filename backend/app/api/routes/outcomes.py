@@ -534,43 +534,30 @@ def decide_approval(
     tenant_id: TenantDep,
     user: UserDep,
 ):
-    from app.audit.service import AuditService
-    from app.core.enums import AuditAction
+    from app.services.approval_actions import apply_decision
 
     approval = session.get(Approval, approval_id)
     if not approval or approval.tenant_id != tenant_id:
         raise HTTPException(404, "Approval not found")
-    approval.decision = payload.decision
-    approval.reason = payload.reason
-    approval.decided_at = utcnow()
-    approval.approver_person_id = user.person_id
-    session.add(approval)
-    action = AuditAction.APPROVAL_GRANTED if payload.decision == "APPROVED" else AuditAction.APPROVAL_REJECTED
-    AuditService(session).record(
-        tenant_id=tenant_id,
+    if payload.decision not in {"APPROVED", "REJECTED"}:
+        approval.decision = payload.decision
+        approval.reason = payload.reason
+        approval.decided_at = utcnow()
+        session.add(approval)
+        session.commit()
+        return approval
+    if approval.decision != "PENDING":
+        raise HTTPException(409, f"Approval already {approval.decision.lower()}")
+    apply_decision(
+        session,
+        tenant_id,
+        approval,
+        approved=payload.decision == "APPROVED",
         actor=user.email,
-        action=action,
-        entity_type="Approval",
-        entity_id=approval.approval_id,
-        after=payload.model_dump(),
-        correlation_id=approval.outcome_id,
+        note=payload.reason or "",
+        via="dashboard",
+        approver_person_id=user.person_id,
     )
-    if payload.decision == "APPROVED" and approval.approval_type == "CATERING_SPEND":
-        from app.connectors.factory import get_email_provider
-        from app.engine.meeting_scenario import ClientMeetingOrchestrator
-        from app.engine.outcome_engine import OutcomeEngine
-        from app.services.communication import CommunicationService
-
-        outcome = session.get(Outcome, approval.outcome_id)
-        if outcome:
-            email = get_email_provider(session, tenant_id)
-            sender = email if email.is_connected() else None
-            ClientMeetingOrchestrator(
-                session,
-                tenant_id,
-                OutcomeEngine(session, tenant_id),
-                CommunicationService(session, tenant_id, email_sender=sender),
-            ).on_catering_approved(outcome)
     session.commit()
     return approval
 

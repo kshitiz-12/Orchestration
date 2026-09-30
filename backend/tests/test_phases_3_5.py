@@ -28,10 +28,11 @@ def test_versioned_policy_buffers_and_auto_book():
     setup, release = buffer_minutes(facts, policy=pol)
     assert setup == pol.setup_buffer_internal_minutes
     assert release == pol.release_buffer_internal_minutes
-    complex_facts = {**facts, "catering": "requested", "external_visitors": 2}
-    s2, r2 = buffer_minutes(complex_facts, policy=pol)
-    assert s2 == pol.setup_buffer_complex_minutes
-    assert r2 == pol.release_buffer_complex_minutes
+    external_facts = {**facts, "catering": "requested", "external_visitors": 2}
+    s2, r2 = buffer_minutes(external_facts, policy=pol)
+    assert (s2, r2) == (pol.setup_buffer_external_minutes, pol.release_buffer_external_minutes) == (45, 30)
+    training = {**facts, "meeting_type": "sales training"}
+    assert buffer_minutes(training, policy=pol) == (60, 30)
 
 
 def test_no_resource_alternatives_structured():

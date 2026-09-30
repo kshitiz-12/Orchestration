@@ -1,6 +1,17 @@
 from fastapi import APIRouter
 
-from app.api.routes import auth, gmail, intake, ops, outcomes, outlook, reviews, setup, webhooks
+from app.api.routes import (
+    auth,
+    gmail,
+    intake,
+    ops,
+    outcomes,
+    outlook,
+    public_approvals,
+    reviews,
+    setup,
+    webhooks,
+)
 
 api_router = APIRouter()
 api_router.include_router(auth.router)
@@ -12,3 +23,4 @@ api_router.include_router(gmail.router)
 api_router.include_router(outlook.router)
 api_router.include_router(webhooks.router)
 api_router.include_router(setup.router)
+api_router.include_router(public_approvals.router)

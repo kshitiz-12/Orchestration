@@ -13,7 +13,7 @@ from sqlmodel import func, select
 from app.agent.company_seed import is_placeholder
 from app.agent.importer import TEMPLATES, read_rows, run_import, template_csv
 from app.api.deps import SessionDep, TenantDep, UserDep
-from app.models.company import Department, KnowledgeEntry, ServiceTicket, VisitorPass
+from app.models.company import CostCentre, Department, KnowledgeEntry, ServiceTicket, SiteService, VisitorPass
 from app.models.org import Person, Resource, Vendor, utcnow
 
 router = APIRouter(prefix="/setup", tags=["setup"])
@@ -203,6 +203,141 @@ def delete_knowledge(entry_id: str, session: SessionDep, tenant_id: TenantDep, _
     session.delete(entry)
     session.commit()
     return {"ok": True}
+
+
+DELIVERY_MODELS = {"INCLUDED", "CONTRACT", "SUBSIDISED", "CHARGEABLE", "OUTSOURCED"}
+
+
+class SiteServiceIn(BaseModel):
+    code: Optional[str] = None
+    name: Optional[str] = None
+    site: Optional[str] = None
+    delivery_model: Optional[str] = None
+    provider: Optional[str] = None
+    owner_department: Optional[str] = None
+    unit: Optional[str] = None
+    rate: Optional[float] = None
+    included_limit: Optional[float] = None
+    premium_triggers: Optional[list[str]] = None
+    premium_rate: Optional[float] = None
+    is_active: Optional[bool] = None
+    notes: Optional[str] = None
+
+
+class CostCentreIn(BaseModel):
+    code: Optional[str] = None
+    name: Optional[str] = None
+    department: Optional[str] = None
+    approver_name: Optional[str] = None
+    approver_email: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+def _service_out(s: SiteService) -> dict:
+    return {
+        k: getattr(s, k)
+        for k in ("service_id", "site", "code", "name", "delivery_model", "provider", "owner_department", "unit",
+                  "rate", "currency", "included_limit", "premium_triggers", "premium_rate", "is_active", "notes")
+    }
+
+
+@router.get("/site-services")
+def list_site_services(session: SessionDep, tenant_id: TenantDep, _: UserDep):
+    from app.services.site_services import ensure_site_services
+
+    ensure_site_services(session, tenant_id)
+    session.commit()
+    rows = session.exec(
+        select(SiteService).where(SiteService.tenant_id == tenant_id).order_by(SiteService.owner_department, SiteService.code)
+    ).all()
+    return [_service_out(s) for s in rows]
+
+
+@router.put("/site-services")
+def upsert_site_service(body: SiteServiceIn, session: SessionDep, tenant_id: TenantDep, _: UserDep):
+    code = (body.code or "").strip().lower().replace(" ", "_")
+    if not code:
+        raise HTTPException(status_code=422, detail="code is required")
+    site = (body.site or "Corporate Office").strip()
+    row = session.exec(
+        select(SiteService).where(SiteService.tenant_id == tenant_id, SiteService.site == site, SiteService.code == code)
+    ).first()
+    if row is None:
+        if not (body.name or "").strip():
+            raise HTTPException(status_code=422, detail="name is required for a new service")
+        row = SiteService(tenant_id=tenant_id, site=site, code=code, name=body.name.strip())
+    if body.delivery_model is not None:
+        model = body.delivery_model.strip().upper()
+        if model not in DELIVERY_MODELS:
+            raise HTTPException(status_code=422, detail=f"delivery_model must be one of {', '.join(sorted(DELIVERY_MODELS))}")
+        row.delivery_model = model
+    if body.name is not None and body.name.strip():
+        row.name = body.name.strip()
+    if body.unit is not None and body.unit.strip():
+        row.unit = body.unit.strip()
+    if body.provider is not None:
+        row.provider = body.provider.strip() or None
+    if body.notes is not None:
+        row.notes = body.notes.strip() or None
+    if body.owner_department is not None:
+        row.owner_department = body.owner_department.strip().upper() or "ADMIN"
+    for field in ("rate", "included_limit", "premium_rate"):
+        value = getattr(body, field)
+        if value is not None:
+            setattr(row, field, max(0.0, float(value)))
+    if body.premium_triggers is not None:
+        row.premium_triggers = [t.strip().lower() for t in body.premium_triggers if t.strip()]
+    if body.is_active is not None:
+        row.is_active = body.is_active
+    row.updated_at = utcnow()
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+    return _service_out(row)
+
+
+@router.get("/cost-centres")
+def list_cost_centres(session: SessionDep, tenant_id: TenantDep, _: UserDep):
+    from app.services.site_services import ensure_site_services
+
+    ensure_site_services(session, tenant_id)
+    session.commit()
+    rows = session.exec(select(CostCentre).where(CostCentre.tenant_id == tenant_id).order_by(CostCentre.code)).all()
+    return [
+        {
+            "cost_centre_id": c.cost_centre_id, "code": c.code, "name": c.name, "department": c.department,
+            "approver_name": c.approver_name, "approver_email": c.approver_email, "is_active": c.is_active,
+            "needs_setup": not c.approver_email or is_placeholder(c.approver_email),
+        }
+        for c in rows
+    ]
+
+
+@router.put("/cost-centres")
+def upsert_cost_centre(body: CostCentreIn, session: SessionDep, tenant_id: TenantDep, _: UserDep):
+    code = (body.code or "").strip().upper()
+    if not code:
+        raise HTTPException(status_code=422, detail="code is required")
+    row = session.exec(select(CostCentre).where(CostCentre.tenant_id == tenant_id, CostCentre.code == code)).first()
+    if row is None:
+        if not (body.name or "").strip():
+            raise HTTPException(status_code=422, detail="name is required for a new cost centre")
+        row = CostCentre(tenant_id=tenant_id, code=code, name=body.name.strip())
+    if body.name is not None and body.name.strip():
+        row.name = body.name.strip()
+    if body.department is not None:
+        row.department = body.department.strip() or None
+    if body.approver_name is not None:
+        row.approver_name = body.approver_name.strip() or None
+    if body.approver_email is not None:
+        row.approver_email = _clean_email(body.approver_email)
+    if body.is_active is not None:
+        row.is_active = body.is_active
+    row.updated_at = utcnow()
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+    return {"ok": True, "code": row.code}
 
 
 @router.get("/templates/{kind}", response_class=PlainTextResponse)

@@ -149,7 +149,7 @@ def test_minimal_request_date_only_does_not_book(session: Session):
     assert complete.facts.get("hybrid_av") == "no"
     assumptions = complete.facts.get("policy_assumptions") or []
     assert any(a.get("code") == "MP-INT-006" for a in assumptions)
-    assert str(complete.facts.get("setup_buffer_minutes") or "") == "10"
+    assert str(complete.facts.get("setup_buffer_minutes") or "") == "30"
     assert is_low_risk_auto_bookable(complete.facts)
     mails = session.exec(
         select(Communication).where(Communication.outcome_id == complete.outcome_id)

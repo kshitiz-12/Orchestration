@@ -374,6 +374,63 @@ class ScenarioOrchestrator:
                 payload={"recommended": False, "note": "Allegations remain UNVERIFIED"},
             )
 
+    def _match_event_invoice(
+        self,
+        outcome: Outcome,
+        facts: dict,
+        extraction: ExtractionResult,
+        invoice_number: str,
+        amount: float,
+        quantity: float,
+        unit_rate: float,
+    ) -> bool:
+        """A provider invoice quoting a meeting / training case is matched against that event's service entry."""
+        import re
+
+        from app.models.intake import Conversation
+
+        conv = self.session.get(Conversation, outcome.conversation_id) if outcome.conversation_id else None
+        haystack = " ".join(
+            [str(getattr(conv, "subject", "") or ""), extraction.summary or "", extraction.reason or ""]
+            + [str(v) for v in facts.values() if isinstance(v, (str, int, float))]
+        )
+        refs = re.findall(r"\b((?:ROOM|TRG)-\d{4}-\d{3,6})\b", haystack, re.I)
+        event = None
+        for ref in refs:
+            event = self.session.exec(
+                select(Outcome).where(Outcome.tenant_id == self.tenant_id, Outcome.case_reference == ref.upper())
+            ).first()
+            if event:
+                break
+        if event is None or not amount:
+            return False
+        number = invoice_number or f"INV-{outcome.case_reference}"
+        orch = ClientMeetingOrchestrator(self.session, self.tenant_id, self.engine, self.comms)
+        match = orch.match_event_invoice(event, invoice_number=number, amount=amount, actor="invoice_mail")
+        status = match.get("status")
+        self.session.add(
+            Invoice(
+                tenant_id=self.tenant_id,
+                invoice_number=number if status != "ALREADY_CLOSED" else f"{number}#{outcome.case_reference}",
+                amount=amount,
+                quantity=quantity,
+                unit_rate=unit_rate,
+                match_status="MATCHED" if status in {"MATCHED", "ALREADY_CLOSED"} else "EXCEPTION",
+                outcome_id=outcome.outcome_id,
+                attributes={"event_case": event.case_reference, "event_match": match},
+            )
+        )
+        stage = GenericStage.COMPLETE.value if status in {"MATCHED", "ALREADY_CLOSED"} else GenericStage.BLOCKED.value
+        outcome.facts = apply_generic_snapshot(
+            {**(outcome.facts or {}), **facts, "event_case": event.case_reference, "event_invoice_match": match},
+            entities={"invoice_number": number, "match_status": status},
+            stage=stage,
+            modules={"invoice_match": True, "payment": status == "MATCHED"},
+            decision={"kind": "event_invoice", "stage": stage, "match_status": status},
+        )
+        self.session.add(outcome)
+        return True
+
     def _scenario_d(
         self,
         outcome: Outcome,
@@ -438,6 +495,9 @@ class ScenarioOrchestrator:
                     "Duplicate invoice — settlement blocked",
                 )
                 return
+
+        if not bank_changed and self._match_event_invoice(outcome, facts, extraction, invoice_number, amount, quantity, unit_rate):
+            return
 
         po = None
         if po_number:

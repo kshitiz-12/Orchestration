@@ -49,6 +49,8 @@ class MeetingStage(str, Enum):
     AUTO_BOOKED = "AUTO_BOOKED"
     NO_RESOURCE = "NO_RESOURCE"
     MONITORING = "MONITORING"
+    READY = "READY"
+    HOST_VERIFICATION = "HOST_VERIFICATION"
     CLOSED = "CLOSED"
     CANCELLED = "CANCELLED"
 
@@ -133,6 +135,51 @@ PLATFORM_KEYS = (
     "open_requests",
     "post_booking_requests",
     "raw_reply",
+    "cost_plan",
+    "cost_preview",
+    "cost_approval_id",
+    "catering_approval_id",
+    "catering_quote",
+    "cost_approved",
+    "cost_rejected",
+    "cost_auto_approved",
+    "catering_auto_approved",
+    "catering_assigned",
+    "vendor_sla",
+    "task_packages",
+    "followups",
+    "ready_sent_at",
+    "completion_requested_at",
+    "service_issue",
+    "service_entries",
+    "invoice_match",
+    "provisional_hold",
+    "extra_day_booking_ids",
+    "travel_plan",
+    "event_extra_questions",
+    "service_entry_total",
+    "invoice_hold",
+)
+
+# Event facts the requester states that are not slot fields (kept out of the open-request ledger)
+EVENT_FIELDS = (
+    "event_kind",
+    "event_dates",
+    "layout",
+    "layout_assumed",
+    "trainers",
+    "trainer_details",
+    "travel_needed",
+    "travellers",
+    "traveller_details",
+    "travel_from",
+    "travel_hotel",
+    "travel_flight",
+    "travel_transfer",
+    "cost_centre",
+    "cost_approver_name",
+    "recording",
+    "attendance_capture",
 )
 
 

@@ -9,7 +9,7 @@ from typing import Any, Callable
 
 from sqlmodel import Session, select
 
-from app.models.company import Department, KnowledgeEntry
+from app.models.company import CostCentre, Department, KnowledgeEntry, SiteService
 from app.models.org import Person, Resource, Vendor
 
 TEMPLATES: dict[str, list[str]] = {
@@ -18,9 +18,15 @@ TEMPLATES: dict[str, list[str]] = {
     "resources": ["name", "type", "capacity", "floor", "video_conferencing", "display", "near_department"],
     "vendors": ["name", "category", "contact_email", "location"],
     "knowledge": ["key", "section", "title", "content"],
+    "site_services": ["site", "code", "name", "delivery_model", "owner_department", "unit", "rate", "included_limit",
+                      "premium_triggers", "premium_rate", "provider"],
+    "cost_centres": ["code", "name", "department", "approver_name", "approver_email"],
 }
 
 EXAMPLES: dict[str, list[str]] = {
+    "site_services": ["Corporate Office", "high_tea", "High tea / snacks (special menu)", "CHARGEABLE", "CAFETERIA",
+                      "per_person", "350", "0", "", "0", "In-house cafeteria"],
+    "cost_centres": ["SL-1101", "Sales", "Sales", "Rohan Mehta", "rohan.mehta@yourco.com"],
     "employees": ["riya.shah@yourco.com", "Riya Shah", "Engineering", "EMPLOYEE", "priya.manager@yourco.com"],
     "departments": ["FACILITIES", "Facilities & Maintenance", "maintenance; hvac; electrical", "facilities@yourco.com", "", "", "8", "0"],
     "resources": ["Board Room 1", "MEETING_ROOM", "12", "3", "yes", "yes", "Sales"],
@@ -214,3 +220,60 @@ def _import_knowledge(session: Session, tid: str, row: dict, *, apply: bool) -> 
         session.add(entry)
         session.flush()
     return action, row.get("title") or key
+
+
+_DELIVERY_MODELS = {"INCLUDED", "CONTRACT", "SUBSIDISED", "CHARGEABLE", "OUTSOURCED"}
+
+
+def _import_site_services(session: Session, tid: str, row: dict, *, apply: bool) -> tuple[str, str]:
+    code = _key(row.get("code") or row.get("name"))
+    site = (row.get("site") or "Corporate Office").strip()
+    model = (row.get("delivery_model") or "INCLUDED").strip().upper()
+    if not code or not row.get("name"):
+        raise ValueError("code and name are required")
+    if model not in _DELIVERY_MODELS:
+        raise ValueError(f"delivery_model must be one of {', '.join(sorted(_DELIVERY_MODELS))} (got '{model}')")
+    svc = session.exec(
+        select(SiteService).where(SiteService.tenant_id == tid, SiteService.site == site, SiteService.code == code)
+    ).first()
+    action = "update" if svc else "new"
+    if apply:
+        svc = svc or SiteService(tenant_id=tid, site=site, code=code, name=row["name"])
+        svc.name = row["name"]
+        svc.delivery_model = model
+        svc.owner_department = (row.get("owner_department") or svc.owner_department or "ADMIN").upper()
+        svc.unit = row.get("unit") or svc.unit
+        if row.get("rate"):
+            svc.rate = _num(row["rate"])
+        if row.get("included_limit"):
+            svc.included_limit = _num(row["included_limit"])
+        if row.get("premium_triggers"):
+            svc.premium_triggers = [t.lower() for t in _list(row["premium_triggers"])]
+        if row.get("premium_rate"):
+            svc.premium_rate = _num(row["premium_rate"])
+        if row.get("provider"):
+            svc.provider = row["provider"]
+        session.add(svc)
+        session.flush()
+    return action, f"{site}: {code} ({model})"
+
+
+def _import_cost_centres(session: Session, tid: str, row: dict, *, apply: bool) -> tuple[str, str]:
+    code = (row.get("code") or "").strip().upper()
+    if not code or not row.get("name"):
+        raise ValueError("code and name are required")
+    email = (row.get("approver_email") or "").strip().lower()
+    if email and not _EMAIL.match(email):
+        raise ValueError(f"invalid approver_email '{email}'")
+    cc = session.exec(select(CostCentre).where(CostCentre.tenant_id == tid, CostCentre.code == code)).first()
+    action = "update" if cc else "new"
+    if apply:
+        cc = cc or CostCentre(tenant_id=tid, code=code, name=row["name"])
+        cc.name = row["name"]
+        cc.department = row.get("department") or cc.department
+        cc.approver_name = row.get("approver_name") or cc.approver_name
+        if email:
+            cc.approver_email = email
+        session.add(cc)
+        session.flush()
+    return action, f"{code} - {row['name']}"

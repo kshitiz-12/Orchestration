@@ -51,7 +51,7 @@ def approver_emails(approval_type: str) -> list[str]:
     kind = (approval_type or "").upper()
     if any(t in kind for t in ("INVOICE", "PAYMENT", "FINANCE", "PO_")):
         picked = _emails(settings.approval_finance_email)
-    elif "SPEND" in kind or "CATERING" in kind or "MANAGER" in kind:
+    elif any(t in kind for t in ("SPEND", "CATERING", "MANAGER", "COST")):
         picked = _emails(settings.approval_manager_email)
     else:
         picked = []
@@ -160,10 +160,19 @@ def _room_line(bag: dict[str, Any]) -> str:
 
 
 def _pending_catering_approval(bag: dict[str, Any]) -> str:
-    if not bag.get("catering_approval_id") or bag.get("catering_auto_approved"):
+    approval_id = bag.get("cost_approval_id") or bag.get("catering_approval_id")
+    if not approval_id or bag.get("catering_auto_approved") or bag.get("cost_approved") or bag.get("cost_rejected"):
         return ""
     if (bag.get("vendor_sla") or {}).get("status") not in (None, "PENDING_ASSIGNMENT"):
         return ""
+    plan = bag.get("cost_plan")
+    if isinstance(plan, dict) and plan.get("lines"):
+        from app.services.approval_links import approval_links_block
+        from app.services.site_services import cost_plan_text
+
+        text = "Cost approval needed — it covers only the chargeable part:\n" + cost_plan_text(plan)
+        links = approval_links_block(approval_id)
+        return text + (f"\n\n{links}" if links else "")
     quote = bag.get("catering_quote") or {}
     amount = quote.get("amount_ex_tax")
     cost = f"{quote.get('currency') or 'INR'} {amount:,.0f} + tax" if isinstance(amount, (int, float)) else "cost not quoted"
@@ -256,6 +265,7 @@ def _booked_briefing(outcome: Outcome, bag: dict[str, Any], *, event_title: str,
     items = _arrange_items(bag)
     if items:
         lines += ["", "To arrange:"] + [f"- {i}" for i in items]
+    lines += _package_lines(bag)
     if detail.strip():
         lines += ["", detail.strip()]
     lines.append("")
@@ -264,6 +274,28 @@ def _booked_briefing(outcome: Outcome, bag: dict[str, Any], *, event_title: str,
     else:
         lines.append('To change anything, just reply — e.g. "move to 3pm", "make it 20 people" or "cancel".')
     return "\n".join(lines) + "\n"
+
+
+def _package_lines(bag: dict[str, Any]) -> list[str]:
+    """Who owns which part of the event, and where each task list went."""
+    packages = [p for p in bag.get("task_packages") or [] if p.get("status") != "CANCELLED"]
+    if not packages:
+        return []
+    out = ["", "Task lists by owner:"]
+    with_admin = False
+    for pkg in packages:
+        if pkg.get("redirected"):
+            where = f"with you (no {pkg.get('department') or pkg.get('title')} mailbox set yet)"
+            with_admin = with_admin or pkg.get("status") in {"SENT", "ISSUE"}
+        else:
+            where = "sent to " + ", ".join(pkg.get("recipients") or [])
+        status = {"DONE": " — done", "ISSUE": f" — ISSUE: {pkg.get('issue') or ''}".rstrip()}.get(pkg.get("status"), "")
+        out.append(f"- {pkg.get('title')}: {where}{status}")
+        if pkg.get("redirected") and pkg.get("status") in {"SENT", "ISSUE"}:
+            out += [f"    · {item}" for item in pkg.get("items") or []]
+    if with_admin:
+        out.append('When the items with you are ready, reply "done" (or "issue: <what\'s blocking>").')
+    return out
 
 
 def _requester_label(outcome: Outcome, bag: dict[str, Any]) -> str:
@@ -342,8 +374,13 @@ class AdminOpsNotifier:
         fingerprint: str,
         facts: Optional[dict[str, Any]] = None,
         recipients: Optional[list[str]] = None,
+        action_label: Optional[str] = None,
+        body: Optional[str] = None,
     ) -> bool:
-        """Returns True if a mail was sent. Dedupes by fingerprint."""
+        """Returns True if a mail was sent. Dedupes by fingerprint.
+
+        `action_label` / `body` replace the standard ops briefing (e.g. APPROVAL REQUIRED, AT RISK).
+        """
         primary = [e for e in (recipients or [admin_ops_email()]) if e]
         if kind == "decision":
             primary += backup_ops_emails()
@@ -364,14 +401,17 @@ class AdminOpsNotifier:
         if any(h.get("fingerprint") == fingerprint for h in history):
             return False
 
-        subject_hint, body = build_admin_briefing(
-            outcome,
-            event_title=headline,
-            detail=detail,
-            kind=kind,
-            facts=bag,
-        )
-        label = "OPS DECISION" if kind == "decision" else "OPS UPDATE"
+        if body is None:
+            subject_hint, body = build_admin_briefing(
+                outcome,
+                event_title=headline,
+                detail=detail,
+                kind=kind,
+                facts=bag,
+            )
+        else:
+            subject_hint = headline[:90]
+        label = action_label or ("OPS DECISION" if kind == "decision" else "OPS UPDATE")
         sent = self.comms.send_case_update(
             outcome=outcome,
             communication_type="ACTION_REQUIRED" if kind == "decision" else "INFORMATION_ONLY",
@@ -499,20 +539,120 @@ class AdminOpsNotifier:
         approval_type: str,
         facts: Optional[dict] = None,
         include_admin: bool = True,
+        extra_approvers: Optional[list[str]] = None,
+        reminder: bool = False,
     ) -> bool:
         admin = admin_ops_email()
-        recipients = approver_emails(approval_type)
+        recipients = approver_emails(approval_type) + [e for e in extra_approvers or [] if e]
         if include_admin:
             recipients += [admin] if admin else []
         else:
             recipients = [r for r in recipients if r != admin]
             if not recipients:
                 return False
+        bag = dict(facts or outcome.facts or {})
+        approval_id = bag.get("cost_approval_id") or bag.get("catering_approval_id") or ""
+        plan = bag.get("cost_plan")
+        pretty = approval_type.replace("_", " ").lower()
+        if isinstance(plan, dict) and plan.get("lines"):
+            return self.notify(
+                outcome,
+                kind="decision",
+                headline=("Reminder: " if reminder else "") + f"Approval needed — {pretty}",
+                fingerprint=f"approval{':reminder' if reminder else ''}:{outcome.outcome_id}:{approval_type}:{approval_id}",
+                facts=bag,
+                recipients=recipients,
+                action_label="APPROVAL REQUIRED",
+                body=_approval_body(outcome, bag, pretty=pretty, approval_id=approval_id, reminder=reminder),
+            )
         return self.notify(
             outcome,
             kind="decision",
             headline=f"Approval needed — {approval_type.replace('_', ' ')}",
-            fingerprint=f"approval:{outcome.outcome_id}:{approval_type}:{(facts or {}).get('catering_approval_id') or ''}",
+            fingerprint=f"approval:{outcome.outcome_id}:{approval_type}:{approval_id}",
             facts=facts,
             recipients=recipients,
         )
+
+    def at_risk(
+        self,
+        outcome: Outcome,
+        *,
+        blocker: str,
+        deadline: str,
+        impact: str,
+        action: str,
+        fingerprint: str,
+        facts: Optional[dict] = None,
+    ) -> bool:
+        """[AT RISK] to the admin and backups: what is blocked, by when, what it breaks, what to do."""
+        case = outcome.case_reference or outcome.outcome_id
+        body = "\n".join(
+            [
+                f"{case} — {outcome.summary or outcome.title or 'Meeting'}",
+                "",
+                f"Blocker: {blocker}",
+                f"Deadline: {deadline or 'before the meeting'}",
+                f"Impact: {impact}",
+                f"Required action: {action}",
+                "",
+                'Reply with what to do — e.g. "tell requester: <message>", "approve", "cancel" — and I\'ll carry it out.',
+            ]
+        )
+        return self.notify(
+            outcome,
+            kind="decision",
+            headline=f"At risk — {blocker}"[:90],
+            fingerprint=f"at_risk:{fingerprint}",
+            facts=facts,
+            action_label="AT RISK",
+            body=body + "\n",
+        )
+
+    def billing_exception(
+        self,
+        outcome: Outcome,
+        *,
+        headline: str,
+        lines: list[str],
+        fingerprint: str,
+        facts: Optional[dict] = None,
+    ) -> bool:
+        admin = admin_ops_email()
+        recipients = approver_emails("INVOICE") + ([admin] if admin else [])
+        case = outcome.case_reference or outcome.outcome_id
+        body = "\n".join([f"{case} — {outcome.summary or outcome.title or 'Event'}", "", *lines, ""])
+        return self.notify(
+            outcome,
+            kind="decision",
+            headline=headline,
+            fingerprint=f"billing:{fingerprint}",
+            facts=facts,
+            recipients=list(dict.fromkeys(recipients)),
+            action_label="BILLING EXCEPTION",
+            body=body,
+        )
+
+
+def _approval_body(outcome: Outcome, bag: dict[str, Any], *, pretty: str, approval_id: str, reminder: bool) -> str:
+    from app.services.approval_links import approval_links_block
+    from app.services.site_services import cost_plan_text
+
+    case = outcome.case_reference or outcome.outcome_id
+    lines = [f"{case} — {outcome.summary or outcome.title or 'Meeting'}", ""]
+    if reminder:
+        lines += ["Reminder: this approval is still pending and the chargeable items are on hold.", ""]
+    lines.append(f"Approval needed ({pretty}) — only for the chargeable part of this request.")
+    lines.append("")
+    lines += [f"{label}: {value}" for label, value in (
+        ("Requester", _requester_label(outcome, bag)),
+        ("When", _when_line(bag)),
+        ("Room", _room_line(bag)),
+        ("People", _people_line(bag)),
+    ) if value]
+    lines += ["", cost_plan_text(bag.get("cost_plan")), ""]
+    links = approval_links_block(approval_id)
+    if links:
+        lines += [links, ""]
+    lines.append('Reply "approve" or "reject, <reason>". Included site services go ahead without this approval.')
+    return "\n".join(lines) + "\n"

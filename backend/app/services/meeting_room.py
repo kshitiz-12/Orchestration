@@ -100,7 +100,7 @@ _NEW_REQUEST_RE = re.compile(
     re.I,
 )
 
-_UPDATE_CASE_RE = re.compile(r"\bupdate\s+(ROOM|MTG|EVT)-\d{4}-\d+\b", re.I)
+_UPDATE_CASE_RE = re.compile(r"\bupdate\s+(ROOM|MTG|EVT|TRG)-\d{4}-\d+\b", re.I)
 
 _UPDATE_INTENT_RE = re.compile(
     r"\b(update|change|modify|for\s+the\s+same|same\s+booking|regarding\s+(?:the\s+)?(?:room|booking))\b",
@@ -116,7 +116,19 @@ _ADDON_HINT_RE = re.compile(
     re.I,
 )
 
-_SATISFIED_RE = re.compile(r"\b(satisfied|all\s+good|went\s+well|thank\s+you|thanks)\b", re.I)
+_SATISFIED_RE = re.compile(
+    r"\b(satisfied|all\s+good|went\s+well|thank\s+you|thanks|fully\s+delivered|delivered\s+as\s+planned)\b", re.I
+)
+_SERVICE_ISSUE_RE = re.compile(
+    r"\b(partially\s+delivered|issue\s+(?:reported|remains)|not\s+delivered|short\s+deliver\w*|"
+    r"did\s*n[o']?t\s+(?:work|arrive|come|happen)|was\s+missing|were\s+missing|no\s+show|"
+    r"problem\s+with|wrong\s+(?:food|order|room|setup)|reopen\s+request)\b",
+    re.I,
+)
+
+
+def is_service_issue(text: str) -> bool:
+    return bool(text and _SERVICE_ISSUE_RE.search(text))
 
 
 def _answered(value: Any) -> bool:
@@ -198,10 +210,14 @@ def seats_needed(facts: dict[str, Any]) -> int:
     except (TypeError, ValueError):
         attendees = 0
     visitors = external_visitor_count(facts)
+    try:
+        trainers = int(facts.get("trainers") or 0)
+    except (TypeError, ValueError):
+        trainers = 0
     included = str(facts.get("visitors_counted_in_attendees") or "").strip().lower() in {"true", "yes", "1"}
     if included or facts.get("visitors_counted_in_attendees") is True:
-        return max(attendees, visitors)
-    return attendees + visitors
+        return max(attendees, visitors) + trainers
+    return attendees + visitors + trainers
 
 
 def guest_vehicle_count(facts: dict[str, Any]) -> int:
@@ -331,7 +347,7 @@ def is_booking_confirmation(text: str) -> bool:
 
     # Our own subject tags ("Re: [CONFIRM BOOKING] [ROOM-…]") come back on every reply;
     # they say what we asked, not what the requester answered.
-    text = re.sub(r"\[[A-Z0-9][A-Z0-9 _\-]*\]", " ", text)
+    text = re.sub(r"\[[A-Z0-9][A-Z0-9 _+\-]*\]", " ", text)
     text = re.sub(r"^\s*(?:re|fwd?)\s*:\s*", "", text, flags=re.I | re.M)
     # Never treat legal disclaimer "sender confirms that…" as a booking confirm
     cleaned = strip_for_ai(text)
@@ -776,19 +792,28 @@ def requirement_fingerprint(facts: dict[str, Any]) -> str:
         "dietary",
         "confidentiality",
     )
-    return "|".join(str(facts.get(k) or "") for k in keys)
+    base = "|".join(str(facts.get(k) or "") for k in keys)
+    # Event fields only extend the fingerprint when present, so older cases keep their fingerprint
+    event_bits = [
+        f"{k}={','.join(v) if isinstance(v, list) else v}"
+        for k in ("layout", "event_dates", "trainers")
+        if (v := facts.get(k))
+    ]
+    return base + ("|" + "|".join(event_bits) if event_bits else "")
 
 
 def buffer_minutes(facts: dict[str, Any], *, policy: Any = None) -> tuple[int, int]:
-    """Buffers from versioned policy: complex vs internal vs default."""
+    """Setup / reset buffers from the versioned policy by meeting type: training, external, internal."""
     from app.policy.meeting_policy import default_meeting_policy
+    from app.services.event_facts import event_kind
 
     pol = policy or default_meeting_policy()
-    if catering_needed(facts) or external_visitor_count(facts) > 0 or hybrid_needed(facts):
-        return int(pol.setup_buffer_complex_minutes), int(pol.release_buffer_complex_minutes)
-    if is_internal_meeting(facts):
-        return int(pol.setup_buffer_internal_minutes), int(pol.release_buffer_internal_minutes)
-    return 15, 10
+    kind = event_kind(facts)
+    if kind == "training":
+        return int(pol.setup_buffer_training_minutes), int(pol.release_buffer_training_minutes)
+    if kind == "external":
+        return int(pol.setup_buffer_external_minutes), int(pol.release_buffer_external_minutes)
+    return int(pol.setup_buffer_internal_minutes), int(pol.release_buffer_internal_minutes)
 
 
 def compute_hold_window(facts: dict[str, Any], *, policy: Any = None) -> dict[str, str]:
@@ -813,18 +838,50 @@ def compute_hold_window(facts: dict[str, Any], *, policy: Any = None) -> dict[st
     }
 
 
+def room_capacity(room: Any, facts: dict[str, Any]) -> Optional[int]:
+    """Seats for the requested layout. None = the room cannot be set up that way.
+
+    Rooms without a layout table are treated as flexible: their plain capacity applies to any layout.
+    """
+    attrs = getattr(room, "attributes", None) or {}
+    layouts = attrs.get("layouts") if isinstance(attrs.get("layouts"), dict) else {}
+    layout = str(facts.get("layout") or "")
+    if layout and layouts:
+        if layout not in layouts:
+            return None
+        try:
+            return int(layouts[layout])
+        except (TypeError, ValueError):
+            return None
+    try:
+        return int(attrs.get("capacity") or 0) or 999
+    except (TypeError, ValueError):
+        return 999
+
+
 def score_meeting_room(room: Any, facts: dict[str, Any]) -> tuple[float, list[str]]:
     """Return (score 0-100, reasons)."""
+    from app.services.event_facts import LAYOUT_LABELS, event_kind
+
     attrs = getattr(room, "attributes", None) or {}
     reasons: list[str] = []
     score = 60.0
     needed = seats_needed(facts) or 1
-    try:
-        capacity = int(attrs.get("capacity") or 0) or 999
-    except (TypeError, ValueError):
-        capacity = 999
+    capacity = room_capacity(room, facts)
+    layout = str(facts.get("layout") or "")
+    if capacity is None:
+        return 0.0, [f"no {LAYOUT_LABELS.get(layout, layout)} layout"]
     if capacity < needed:
-        return 0.0, ["insufficient capacity"]
+        return 0.0, ["insufficient capacity" + (f" ({LAYOUT_LABELS.get(layout, layout)})" if layout else "")]
+    training_room = str(attrs.get("room_class") or "").lower() == "training"
+    if training_room:
+        if event_kind(facts) == "training":
+            # Trainer PC, mics and classroom furniture outweigh a tighter seat fit elsewhere
+            score += 30
+            reasons.append("training room")
+        else:
+            score -= 30
+            reasons.append("training room (kept for training)")
     overflow = capacity - needed
     if overflow <= 1:
         score += 26

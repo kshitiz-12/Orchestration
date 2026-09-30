@@ -27,6 +27,9 @@ from app.models.org import new_id
 
 logger = get_logger(__name__)
 
+# Closed by financial closure only (service entry accepted, invoice matched), never by the host's "satisfied"
+FINANCIAL_TASK_CODES = ("SERVICE_ENTRY", "INVOICE_VALIDATE", "INVOICE_POST", "INVOICE_PAY")
+
 
 class OutcomeEngine:
     """Core orchestration: Event → Outcome → Requirements → Tasks → Evidence → Closure.
@@ -501,7 +504,7 @@ class OutcomeEngine:
         outcome.facts = facts
         tasks = self.session.exec(select(Task).where(Task.outcome_id == outcome.outcome_id)).all()
         for t in tasks:
-            if t.code in {"INVOICE_VALIDATE", "INVOICE_POST", "INVOICE_PAY"}:
+            if t.code in FINANCIAL_TASK_CODES:
                 continue
             if t.status not in {TaskStatus.VERIFIED.value, TaskStatus.CLOSED.value}:
                 self.update_task_status(
@@ -539,7 +542,7 @@ class OutcomeEngine:
         facts = dict(outcome.facts or {})
         facts["financial_status"] = "CLOSED"
         outcome.facts = facts
-        for code in ("INVOICE_VALIDATE", "INVOICE_POST", "INVOICE_PAY"):
+        for code in FINANCIAL_TASK_CODES:
             task = self.session.exec(
                 select(Task).where(Task.outcome_id == outcome.outcome_id, Task.code == code)
             ).first()

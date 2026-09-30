@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import timedelta
 from typing import Any, Optional
 
 from sqlalchemy.orm.attributes import flag_modified
@@ -10,6 +11,7 @@ from sqlmodel import Session, select
 
 from app.core.logging import get_logger
 from app.domain.meeting import MeetingStage
+from app.engine.event_services import EventServicesMixin, fmt_local
 from app.engine.outcome_engine import OutcomeEngine
 from app.engine.outcome_pattern import append_decision_trace
 from app.engine.outcome_reducer import reduce_meeting_facts
@@ -35,6 +37,7 @@ from app.services.meeting_room import (
     seats_needed,
     is_booking_confirmation,
     is_employee_satisfied,
+    is_service_issue,
     is_low_risk_auto_bookable,
     meeting_room_details_complete,
     meeting_room_gaps,
@@ -50,7 +53,18 @@ from app.services.no_resource_flow import (
     open_request_delta,
     search_relevant_changed,
 )
+from app.services.event_facts import (
+    enrich_event_facts,
+    event_extra_questions,
+    event_kind,
+    extra_day_facts,
+    is_multi_day,
+    layout_label,
+    travel_needed,
+)
+from app.services.email_utils import strip_for_ai
 from app.services.room_booking import RoomBookingService, meeting_window
+from app.services.site_services import build_cost_plan, ensure_site_services, has_charges, included_note
 
 logger = get_logger(__name__)
 
@@ -173,11 +187,12 @@ MEETING_ROOM_TEMPLATE = {
     "case_prefix": "ROOM",
     "requirements": [
         {"code": "BOOKING", "title": "Meeting room reserved", "is_mandatory": True},
-        {"code": "APPROVAL", "title": "Catering / spend approval", "is_mandatory": False},
+        {"code": "APPROVAL", "title": "Cost approval (chargeable items only)", "is_mandatory": False},
         {"code": "VISITORS", "title": "Visitor access prepared", "is_mandatory": False},
         {"code": "PARKING", "title": "Guest parking allocated", "is_mandatory": False},
         {"code": "AV", "title": "AV / VC ready", "is_mandatory": False},
         {"code": "CATERING", "title": "Catering arranged", "is_mandatory": False},
+        {"code": "TRAVEL", "title": "Travel & stay arranged", "is_mandatory": False},
         {"code": "READINESS", "title": "Pre-meeting readiness", "is_mandatory": True},
         {"code": "EMPLOYEE_CONFIRM", "title": "Organiser confirmation", "is_mandatory": True},
         {"code": "INVOICE", "title": "Invoice & payment (financial)", "is_mandatory": False},
@@ -192,7 +207,7 @@ MEETING_ROOM_TEMPLATE = {
         },
         {
             "code": "CATERING_APPROVAL",
-            "title": "Obtain catering spend approval",
+            "title": "Obtain cost approval for chargeable items",
             "owner_role": "MANAGER",
             "task_group": "Approval",
             "requirement_code": "APPROVAL",
@@ -224,7 +239,7 @@ MEETING_ROOM_TEMPLATE = {
         },
         {
             "code": "HOUSEKEEPING",
-            "title": "Room setup & housekeeping",
+            "title": "Room setup, cleaning & final inspection",
             "owner_role": "ADMIN",
             "task_group": "Setup",
             "requirement_code": "READINESS",
@@ -238,6 +253,14 @@ MEETING_ROOM_TEMPLATE = {
             "is_mandatory": False,
         },
         {
+            "code": "TRAVEL_ARRANGE",
+            "title": "Book trainer / participant travel and stay",
+            "owner_role": "TRAVEL",
+            "task_group": "Travel",
+            "requirement_code": "TRAVEL",
+            "is_mandatory": False,
+        },
+        {
             "code": "EMPLOYEE_CONFIRM",
             "title": "Organiser satisfaction confirmation",
             "owner_role": "OPERATOR",
@@ -245,8 +268,16 @@ MEETING_ROOM_TEMPLATE = {
             "requirement_code": "EMPLOYEE_CONFIRM",
         },
         {
+            "code": "SERVICE_ENTRY",
+            "title": "Service entry for chargeable services actually delivered",
+            "owner_role": "ADMIN",
+            "task_group": "Finance",
+            "requirement_code": "INVOICE",
+            "is_mandatory": False,
+        },
+        {
             "code": "INVOICE_VALIDATE",
-            "title": "Validate catering invoice",
+            "title": "Match invoice to approval and service entry",
             "owner_role": "FINANCE",
             "task_group": "Finance",
             "requirement_code": "INVOICE",
@@ -394,6 +425,38 @@ def ensure_meeting_room_resources(session: Session, tenant_id: str) -> None:
         session.add(large)
         session.flush()
 
+    studio = session.exec(
+        select(Resource).where(
+            Resource.tenant_id == tenant_id,
+            Resource.type == "MEETING_ROOM",
+            Resource.name == "Learning Studio A",
+        )
+    ).first()
+    if not studio:
+        session.add(
+            Resource(
+                tenant_id=tenant_id,
+                type="MEETING_ROOM",
+                name="Learning Studio A",
+                status="AVAILABLE",
+                attributes={
+                    "capacity": 30,
+                    "layouts": {"classroom": 30, "u_shape": 20},
+                    "room_class": "training",
+                    "video_conferencing": True,
+                    "presentation_display": True,
+                    "display": True,
+                    "microphones": 2,
+                    "recording": True,
+                    "trainer_pc": True,
+                    "open_complaint": False,
+                    "floor": "3",
+                    "near_department": "",
+                },
+            )
+        )
+        session.flush()
+
     # Ensure enough parking for demos
     parking = session.exec(
         select(Resource).where(
@@ -447,7 +510,7 @@ def ensure_meeting_room_resources(session: Session, tenant_id: str) -> None:
         session.flush()
 
 
-class ClientMeetingOrchestrator:
+class ClientMeetingOrchestrator(EventServicesMixin):
     def __init__(
         self,
         session: Session,
@@ -479,8 +542,9 @@ class ClientMeetingOrchestrator:
         """`prior_facts` = the case before this message; callers that pre-merge facts must pass it."""
         ensure_meeting_room_resources(self.session, self.tenant_id)
         ensure_offsite_venues(self.session, self.tenant_id)
-        policy = load_meeting_policy(self.session, self.tenant_id)
         ensure_meeting_policy_rule(self.session, self.tenant_id)
+        policy = load_meeting_policy(self.session, self.tenant_id)
+        ensure_site_services(self.session, self.tenant_id)
         prior_snapshot = dict(prior_facts if prior_facts is not None else (outcome.facts or {}))
         text_blob = ""
         if extraction:
@@ -498,6 +562,14 @@ class ClientMeetingOrchestrator:
             primary_entities=incoming,
             source_text=text_blob,
         )
+        merged = enrich_event_facts(merged, strip_for_ai(text_blob))
+        if (
+            event_kind(merged) == "training"
+            and (outcome.case_reference or "").startswith("ROOM-")
+            and not (prior_snapshot.get("registration_ack_sent") or prior_snapshot.get("clarification_sent"))
+        ):
+            outcome.case_reference = self.engine.next_case_reference("TRG")
+            self.session.add(outcome)
         merged["policy_version"] = policy.version
         merged["policy_code"] = policy.code
         merged = append_decision_trace(
@@ -549,6 +621,22 @@ class ClientMeetingOrchestrator:
             self.cancel_case(outcome, actor="requester", reason=(extraction.summary if extraction else "") or "")
             return
 
+        new_text = strip_for_ai(text_blob)
+        if merged.get("booked_room") and (merged.get("financial_status") or "") == "SERVICE_ENTRY_PENDING" and new_text:
+            self._save_facts(outcome, merged)
+            if self.apply_service_entry_reply(outcome, new_text):
+                return
+
+        if (
+            merged.get("booked_room")
+            and (merged.get("operational_status") or "") != "CLOSED"
+            and (merged.get("completion_requested_at") or self._event_over(merged))
+            and is_service_issue(new_text)
+        ):
+            self._save_facts(outcome, merged)
+            self.handle_service_issue(outcome, new_text)
+            return
+
         if merged.get("booked_room") and (
             merged.get("employee_satisfied")
             or is_employee_satisfied(text_blob)
@@ -559,7 +647,7 @@ class ClientMeetingOrchestrator:
             self._save_facts(outcome, merged)
             if (merged.get("operational_status") or "") != "CLOSED":
                 self.engine.close_operational(outcome, actor="requester")
-                self._maybe_start_invoice(outcome)
+                self.start_financial_closure(outcome)
             return
 
         if merged.get("booked_room") and (merged.get("operational_status") or "") != "CLOSED":
@@ -601,6 +689,7 @@ class ClientMeetingOrchestrator:
             merged["orchestration_stage"] = MeetingStage.AWAITING_REQUIREMENTS.value
             merged["outbound_required"] = "clarify"
             merged["last_action"] = "await_requirements"
+            self._prepare_clarification_extras(outcome, merged, gaps, policy=policy)
             self._save_facts(outcome, merged)
             return
 
@@ -690,6 +779,44 @@ class ClientMeetingOrchestrator:
         )
         self._propose(outcome, room, merged, updated=False)
         self._maybe_auto_book_low_risk(outcome)
+
+    _CORE_GAPS = {"attendees", "date", "duration", "preferred_time", "end_time", "duration_hours", "time_window"}
+
+    def _prepare_clarification_extras(self, outcome: Outcome, merged: dict, gaps: list, *, policy: Any) -> None:
+        """Non-blocking asks, what's free vs chargeable, and a provisional hold once date/time/headcount are known."""
+        preview_facts = dict(merged)
+        plan = build_cost_plan(self.session, self.tenant_id, preview_facts, requester_email=outcome.requester_email)
+        merged["event_extra_questions"] = event_extra_questions(merged, chargeable=has_charges(plan))
+        merged["cost_preview"] = included_note(plan) if has_charges(plan) or catering_needed(merged) else ""
+
+        if {g["field"] for g in gaps} & self._CORE_GAPS:
+            return
+        window_facts = apply_internal_vc_policy(apply_meeting_room_defaults(dict(merged)))
+        window_facts.update(compute_hold_window(window_facts, policy=policy))
+        if not meeting_window(window_facts):
+            return
+        existing = merged.get("provisional_hold") or {}
+        if existing.get("fingerprint") == requirement_fingerprint(window_facts) and any(
+            b.booking_id == existing.get("booking_id") for b in self.bookings.active_for_outcome(outcome.outcome_id)
+        ):
+            return
+        room = self._pick_room(window_facts, outcome.outcome_id)
+        if not room or is_multi_day(window_facts):
+            merged.pop("provisional_hold", None)
+            return
+        hold = self.bookings.hold(
+            outcome_id=outcome.outcome_id,
+            room_name=room.name,
+            window=meeting_window(window_facts),
+            resource_id=room.resource_id,
+            attributes={"provisional": True},
+        )
+        merged["provisional_hold"] = {
+            "room": room.name,
+            "booking_id": hold.booking_id,
+            "fingerprint": requirement_fingerprint(window_facts),
+            "expires_label": fmt_local(hold.hold_expires_at + timedelta(hours=5, minutes=30)) if hold.hold_expires_at else "",
+        }
 
     def _handle_no_resource_reply(
         self,
@@ -1117,8 +1244,11 @@ class ClientMeetingOrchestrator:
                     recipients=[outcome.requester_email],
                     action_label="UPDATE NOTED",
                 )
-            if "catering" in deltas and catering_needed(merged) and not catering_needed(prior):
-                self._requote_catering(outcome)
+            cost_keys = {"catering", "external_visitors", "guest_vehicles", "hybrid_av", "open_requests"}
+            if cost_keys & set(deltas) and not merged.get("cost_rejected"):
+                self._requote_if_plan_changed(outcome)
+            if (outcome.facts or {}).get("task_packages"):
+                self._dispatch_packages(outcome, reason="changed")
             if deltas.get("open_requests"):
                 self.admin_ops.notify(
                     outcome,
@@ -1158,6 +1288,8 @@ class ClientMeetingOrchestrator:
                 still_fits = sum(_capacity(r) for r in current) >= needed
         if not current and booked.get("external_venue"):
             still_fits = None  # off-site outside inventory — ops must re-confirm
+        if is_multi_day(merged) or is_multi_day(prior):
+            still_fits = None  # every event day has its own booking row — ops re-plans the days
 
         changed = {
             k: merged.get(k)
@@ -1250,10 +1382,10 @@ class ClientMeetingOrchestrator:
                     facts=dict(outcome.facts or merged),
                 )
 
-        if catering_needed(merged) and (
-            seats_needed(merged) != seats_needed(prior) or not catering_needed(prior)
-        ):
-            self._requote_catering(outcome)
+        if not merged.get("cost_rejected"):
+            self._requote_if_plan_changed(outcome)
+        if (outcome.facts or {}).get("task_packages"):
+            self._dispatch_packages(outcome, reason="changed")
         self._sync_conversation_facts(outcome)
 
     def _slot_fields(self, facts: dict) -> dict:
@@ -1265,6 +1397,7 @@ class ClientMeetingOrchestrator:
             "duration_hours": facts.get("duration_hours"),
             "hold_start": facts.get("hold_start"),
             "hold_end": facts.get("hold_end"),
+            "event_dates": list(facts.get("event_dates") or []) or None,
             "fingerprint": requirement_fingerprint(facts),
         }
 
@@ -1281,22 +1414,18 @@ class ClientMeetingOrchestrator:
         )
 
     def _requote_catering(self, outcome: Outcome) -> None:
-        from app.models.outcome import Approval
+        self._requote_costs(outcome)
 
-        for approval in self.session.exec(
-            select(Approval).where(
-                Approval.outcome_id == outcome.outcome_id,
-                Approval.approval_type == "CATERING_SPEND",
-                Approval.decision == "PENDING",
-            )
-        ).all():
-            approval.decision = "SUPERSEDED"
-            approval.decided_at = utcnow()
-            self.session.add(approval)
+    def _requote_if_plan_changed(self, outcome: Outcome) -> None:
+        """Re-run the cost approval only when the chargeable part actually changed."""
         facts = dict(outcome.facts or {})
-        facts.pop("catering_assigned", None)
-        self._save_facts(outcome, facts)
-        self._run_catering(outcome, facts)
+        old = facts.get("cost_plan") or {}
+        new = build_cost_plan(self.session, self.tenant_id, facts, requester_email=outcome.requester_email)
+        if (old.get("chargeable"), old.get("chargeable_total")) == (new.get("chargeable"), new.get("chargeable_total")):
+            facts["cost_plan"] = new
+            self._save_facts(outcome, facts)
+            return
+        self._requote_costs(outcome)
 
     def _maybe_auto_book_low_risk(self, outcome: Outcome) -> None:
         facts = dict(outcome.facts or {})
@@ -1330,7 +1459,7 @@ class ClientMeetingOrchestrator:
             score, reasons = score_meeting_room(room, facts)
             if score <= 0:
                 continue
-            if not self.bookings.is_free(room, window, exclude_outcome_id=outcome_id):
+            if not self._free_all_days(room, facts, outcome_id):
                 busy_fits.append(room.name)
                 continue
             scored.append((score, room, reasons))
@@ -1350,12 +1479,19 @@ class ClientMeetingOrchestrator:
     def _proposed_room_taken(self, outcome: Outcome, facts: dict) -> bool:
         proposal = facts.get("proposed_room") or {}
         ids = [r.get("resource_id") for r in proposal.get("rooms") or []] or [proposal.get("resource_id")]
-        window = meeting_window(facts)
         for rid in ids:
             room = self.session.get(Resource, rid) if rid else None
-            if room and not self.bookings.is_free(room, window, exclude_outcome_id=outcome.outcome_id):
+            if room and not self._free_all_days(room, facts, outcome.outcome_id):
                 return True
         return False
+
+    @staticmethod
+    def _day_windows(facts: dict) -> list:
+        """Occupied window on every event day (one entry for a single-day meeting)."""
+        return [meeting_window(facts)] + [meeting_window(day) for day in extra_day_facts(facts)]
+
+    def _free_all_days(self, room: Resource, facts: dict, outcome_id: Optional[str]) -> bool:
+        return all(self.bookings.is_free(room, w, exclude_outcome_id=outcome_id) for w in self._day_windows(facts))
 
     def _free_resources(self, rtype: str, facts: dict, outcome_id: Optional[str]) -> list[Resource]:
         rows = self.session.exec(
@@ -1584,6 +1720,21 @@ class ClientMeetingOrchestrator:
             for i, r in enumerate(rooms)
         ]
         hold = holds[0]
+        if is_multi_day(facts) and len(rooms) == 1:
+            extra_holds = [
+                self.bookings.hold(
+                    outcome_id=outcome.outcome_id,
+                    room_name=room.name,
+                    window=meeting_window(day),
+                    resource_id=room.resource_id,
+                    is_offsite=offsite,
+                    attributes={"day_index": i},
+                    release_prior=False,
+                )
+                for i, day in enumerate(extra_day_facts(facts), start=1)
+            ]
+            proposal["event_dates"] = list(facts.get("event_dates") or [])
+            proposal["extra_day_booking_ids"] = [h.booking_id for h in extra_holds]
         if len(rooms) > 1:
             proposal["split"] = True
             proposal["rooms"] = [
@@ -1629,6 +1780,10 @@ class ClientMeetingOrchestrator:
             room_line = f"Venue (off-site): {room.name} (seats {_capacity(room)})"
         else:
             room_line = f"Room: {room.name} (seats {_capacity(room)})"
+            if proposal.get("extra_day_booking_ids"):
+                room_line += f"\nHeld on all {len(proposal['event_dates'])} days: " + ", ".join(proposal["event_dates"])
+            if layout_label(facts):
+                room_line += f"\nLayout: {layout_label(facts)}" + (" (assumed — tell me if you'd prefer another)" if facts.get("layout_assumed") else "")
             note = _room_fit_note(room, facts)
             if note:
                 room_line += f"\n{note}"
@@ -1714,6 +1869,7 @@ class ClientMeetingOrchestrator:
             booking["rooms"] = parts
             booking["booking_ids"] = sorted(kept)
         else:
+            extra_holds = set(proposal.get("extra_day_booking_ids") or [])
             row = self.bookings.confirm(
                 outcome_id=outcome.outcome_id,
                 room_name=str(booking.get("name") or "room"),
@@ -1721,7 +1877,26 @@ class ClientMeetingOrchestrator:
                 resource_id=room.resource_id if room else None,
                 is_offsite=bool(proposal.get("external_venue")) or room is None,
                 attributes={"confirmed_by": actor},
+                keep=extra_holds,
             )
+            if is_multi_day(facts):
+                confirmed = {row.booking_id}
+                extra_ids = []
+                for i, day in enumerate(extra_day_facts(facts), start=1):
+                    extra = self.bookings.confirm(
+                        outcome_id=outcome.outcome_id,
+                        room_name=str(booking.get("name") or "room"),
+                        window=meeting_window(day),
+                        resource_id=room.resource_id if room else None,
+                        is_offsite=bool(proposal.get("external_venue")) or room is None,
+                        attributes={"confirmed_by": actor, "day_index": i},
+                        keep=confirmed | extra_holds,
+                        day_index=i,
+                    )
+                    confirmed.add(extra.booking_id)
+                    extra_ids.append(extra.booking_id)
+                booking["extra_day_booking_ids"] = extra_ids
+                booking["event_dates"] = list(facts.get("event_dates") or [])
         booking["booking_id"] = row.booking_id
         self._resolve_no_room_exception(outcome, f"Booked {booking.get('name')} ({actor})")
         booking.pop("hold_expires_at", None)
@@ -1737,12 +1912,16 @@ class ClientMeetingOrchestrator:
         self._save_facts(outcome, facts)
 
         self._complete_task(outcome, "RESERVE_ROOM", actor, f"Confirmed {booking.get('name')}")
+        facts["cost_plan"] = build_cost_plan(self.session, self.tenant_id, facts, requester_email=outcome.requester_email)
         self._apply_applicability(outcome, facts)
         self._run_visitors(outcome, facts)
         self._run_parking(outcome, facts)
         self._run_av(outcome, facts)
-        self._run_catering(outcome, facts, notify_admin=False)
+        self._run_costs(outcome, facts, notify_admin=False)
+        self._run_travel(outcome, facts)
         self._mark_readiness_progress(outcome)
+        self._dispatch_packages(outcome, reason="booked")
+        facts = dict(outcome.facts or facts)
 
         low_risk = bool(facts.get("auto_booked_low_risk") or actor == "system_low_risk")
         assumptions = facts.get("policy_assumptions") or []
@@ -1771,7 +1950,27 @@ class ClientMeetingOrchestrator:
             )
         if catering_needed(facts) and not str(facts.get("dietary") or "").strip():
             followups.append("Please share dietary split (veg / non-veg) for catering.")
+        plan = facts.get("cost_plan") or {}
+        extras = event_extra_questions(facts, chargeable=has_charges(plan))
+        if extras:
+            followups.append("When you have them, please also send:\n" + "\n".join(f"- {q}" for q in extras))
         follow_block = ("\n" + "\n".join(followups) + "\n") if followups else ""
+        event_lines = []
+        if is_multi_day(facts):
+            event_lines.append("Days: " + ", ".join(facts.get("event_dates") or []) + " (same room every day)")
+        if layout_label(facts):
+            event_lines.append(f"Layout: {layout_label(facts)}")
+        if travel_needed(facts):
+            event_lines.append(f"Travel: {facts.get('travellers')} traveller(s) — the travel desk has been asked to arrange it")
+        cost_lines = []
+        if included_note(plan):
+            cost_lines.append(included_note(plan))
+        if facts.get("cost_approval_id") and not (facts.get("cost_approved") or facts.get("cost_auto_approved")):
+            cost_lines.append(
+                "The chargeable items are waiting for cost approval — everything else goes ahead now, "
+                "and I'll confirm once it's approved."
+            )
+        module_line += "".join(f"{line}\n" for line in event_lines + cost_lines)
         if low_risk:
             body = (
                 f"{format_outbound_greeting(name)}\n\n"
@@ -1822,13 +2021,15 @@ class ClientMeetingOrchestrator:
                 select(Requirement).where(Requirement.outcome_id == outcome.outcome_id)
             ).all()
         }
+        charged = has_charges(facts.get("cost_plan"))
         mapping = {
-            "APPROVAL": catering_needed(facts),
+            "APPROVAL": charged,
             "CATERING": catering_needed(facts),
-            "INVOICE": catering_needed(facts),
+            "INVOICE": charged,
             "VISITORS": external_visitor_count(facts) > 0,
             "PARKING": guest_vehicle_count(facts) > 0,
-            "AV": hybrid_needed(facts) or presentation_needed(facts),
+            "AV": hybrid_needed(facts) or presentation_needed(facts) or event_kind(facts) == "training",
+            "TRAVEL": travel_needed(facts),
         }
         for code, needed in mapping.items():
             req = reqs.get(code)
@@ -1924,8 +2125,26 @@ class ClientMeetingOrchestrator:
             f"Allocated {len(allocated)} parking space(s)",
         )
 
+    def _run_travel(self, outcome: Outcome, facts: dict) -> None:
+        if not travel_needed(facts):
+            self._na_task(outcome, "TRAVEL_ARRANGE")
+            return
+        facts["travel_plan"] = {
+            "travellers": facts.get("travellers"),
+            "from": facts.get("travel_from"),
+            "flight": bool(facts.get("travel_flight")),
+            "hotel": bool(facts.get("travel_hotel")),
+            "transfer": bool(facts.get("travel_transfer")),
+            "status": "REQUESTED",
+        }
+        self._save_facts(outcome, {**(outcome.facts or {}), "travel_plan": facts["travel_plan"]})
+        task = self._task(outcome, "TRAVEL_ARRANGE")
+        if task and task.status == "NOT_STARTED":
+            task.status = "ASSIGNED"
+            self.session.add(task)
+
     def _run_av(self, outcome: Outcome, facts: dict) -> None:
-        if not (hybrid_needed(facts) or presentation_needed(facts)):
+        if not (hybrid_needed(facts) or presentation_needed(facts) or event_kind(facts) == "training"):
             self._na_task(outcome, "AV_TEST")
             return
         facts["av_plan"] = {
@@ -1935,103 +2154,6 @@ class ClientMeetingOrchestrator:
         outcome.facts = {**(outcome.facts or {}), **facts}
         self.session.add(outcome)
         self._complete_task(outcome, "AV_TEST", "system", "AV plan ready")
-
-    def _run_catering(self, outcome: Outcome, facts: dict, *, notify_admin: bool = True) -> None:
-        if not catering_needed(facts):
-            self._na_task(outcome, "CATERING_APPROVAL")
-            self._na_task(outcome, "VENDOR_CATERING")
-            self._na_task(outcome, "INVOICE_VALIDATE")
-            self._na_task(outcome, "INVOICE_POST")
-            self._na_task(outcome, "INVOICE_PAY")
-            return
-        headcount = seats_needed(facts) or 1
-        from app.core.config import get_settings
-        from app.services.catering import catering_quote
-
-        quote = catering_quote(self.session, self.tenant_id, headcount)
-        facts["catering_quote"] = quote
-        outcome.facts = {**(outcome.facts or {}), **facts}
-        self.session.add(outcome)
-
-        limit = float(get_settings().catering_auto_approve_limit or 0)
-        amount = quote.get("amount_ex_tax")
-        if limit > 0 and amount is not None and amount <= limit and quote.get("vendor"):
-            facts["catering_auto_approved"] = True
-            self._save_facts(outcome, {**(outcome.facts or {}), **facts})
-            self.on_catering_approved(outcome)
-            return
-
-        task = self.session.exec(
-            select(Task).where(Task.outcome_id == outcome.outcome_id, Task.code == "CATERING_APPROVAL")
-        ).first()
-        approval = self.engine.request_approval(
-            outcome=outcome,
-            approval_type="CATERING_SPEND",
-            approver_role="MANAGER",
-            payload=facts["catering_quote"],
-            task_id=task.task_id if task else None,
-        )
-        if task:
-            task.status = "APPROVAL_PENDING"
-            self.session.add(task)
-        facts["catering_approval_id"] = approval.approval_id
-        facts["vendor_sla"] = {"acceptance_minutes": 30, "status": "PENDING_ASSIGNMENT"}
-        outcome.facts = {**(outcome.facts or {}), **facts}
-        self.session.add(outcome)
-        # On first booking the admin sees this approval inside the booking-confirmed mail.
-        self.admin_ops.action_approval(
-            outcome, approval_type="CATERING_SPEND", facts=facts, include_admin=notify_admin
-        )
-
-    def on_catering_approved(self, outcome: Outcome) -> None:
-        facts = dict(outcome.facts or {})
-        quote = facts.get("catering_quote") or {}
-        facts["vendor_sla"] = {
-            **(facts.get("vendor_sla") or {}),
-            "status": "ASSIGNED",
-            "assigned_at": utcnow().isoformat(),
-            "acceptance_due_minutes": 30,
-        }
-        facts["catering_assigned"] = True
-        self._save_facts(outcome, facts)
-        self._complete_task(outcome, "CATERING_APPROVAL", "system", "Catering spend approved")
-        self._complete_task(
-            outcome,
-            "VENDOR_CATERING",
-            "system",
-            f"Assigned {quote.get('vendor') or 'caterer (ops to confirm)'}"
-            + (f" for {quote.get('currency') or 'INR'} {quote['amount_ex_tax']}" if quote.get("amount_ex_tax") else ""),
-        )
-        # Enable invoice path
-        for code in ("INVOICE_VALIDATE", "INVOICE_POST", "INVOICE_PAY"):
-            t = self.session.exec(
-                select(Task).where(Task.outcome_id == outcome.outcome_id, Task.code == code)
-            ).first()
-            if t and t.status in {"NOT_STARTED", "CANCELLED"}:
-                t.status = "ASSIGNED"
-                self.session.add(t)
-        req = self.session.exec(
-            select(Requirement).where(
-                Requirement.outcome_id == outcome.outcome_id, Requirement.code == "INVOICE"
-            )
-        ).first()
-        if req:
-            req.applicability = "REQUIRED"
-            req.is_mandatory = True
-            req.status = "ACTION_PENDING"
-            self.session.add(req)
-
-    def _maybe_start_invoice(self, outcome: Outcome) -> None:
-        facts = dict(outcome.facts or {})
-        if not catering_needed(facts) and not facts.get("catering_assigned"):
-            self.engine.close_financial(outcome, actor="system")
-            return
-        facts["invoice_stub"] = {
-            "invoice_number": f"FS-{outcome.case_reference}",
-            "amount_ex_tax": (facts.get("catering_quote") or {}).get("amount_ex_tax"),
-            "status": "RECEIVED",
-        }
-        self._save_facts(outcome, facts)
 
     def _mark_readiness_progress(self, outcome: Outcome) -> None:
         self._complete_task(outcome, "HOUSEKEEPING", "system", "Setup checklist queued/complete (prototype)")

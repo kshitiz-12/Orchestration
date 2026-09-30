@@ -52,8 +52,24 @@ def sweep_proposal_holds(
     for booking in held:
         outcome = session.get(Outcome, booking.outcome_id) if booking.outcome_id else None
         facts = dict(outcome.facts or {}) if outcome else {}
+        provisional = facts.get("provisional_hold") or {}
+        if outcome and provisional.get("booking_id") == booking.booking_id:
+            # Held while the requester answers the remaining questions: lapse quietly, no reminders
+            if outcome.status in {"CANCELLED", "CLOSED"} or (booking.hold_expires_at and booking.hold_expires_at <= now):
+                booking.status = "EXPIRED"
+                session.add(booking)
+                facts.pop("provisional_hold", None)
+                outcome.facts = facts
+                session.add(outcome)
+                flag_modified(outcome, "facts")
+                expired += 1
+            continue
         proposal = facts.get("proposed_room") or {}
-        proposal_ids = {proposal.get("booking_id")} | {r.get("booking_id") for r in proposal.get("rooms") or []}
+        proposal_ids = (
+            {proposal.get("booking_id")}
+            | {r.get("booking_id") for r in proposal.get("rooms") or []}
+            | set(proposal.get("extra_day_booking_ids") or [])
+        )
         proposal_ids.discard(None)
         still_proposed = bool(
             outcome
@@ -70,9 +86,13 @@ def sweep_proposal_holds(
         label = proposal.get("name") or booking.room_name
         group = proposal.get("booking_id") or booking.booking_id
 
+        extra_day = booking.booking_id in set(proposal.get("extra_day_booking_ids") or [])
         if booking.hold_expires_at and booking.hold_expires_at <= now:
             booking.status = "EXPIRED"
             session.add(booking)
+            if extra_day:
+                expired += 1
+                continue
             facts["proposed_room"] = {**proposal, "hold_expired": True}
             facts["last_action"] = "proposal_hold_expired"
             outcome.facts = facts
@@ -93,6 +113,8 @@ def sweep_proposal_holds(
             expired += 1
             continue
 
+        if extra_day:
+            continue
         if not booking.reminder_sent_at and booking.created_at + remind_after <= now:
             booking.reminder_sent_at = now
             session.add(booking)
@@ -148,6 +170,13 @@ def run_all_sweeps(session: Session, tenant_id: str) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         session.rollback()
         logger.warning("hold_sweep_failed", error=str(exc))
+    try:
+        from app.engine.event_services import sweep_event_followups
+
+        out["events"] = sweep_event_followups(session, tenant_id)
+    except Exception as exc:  # noqa: BLE001
+        session.rollback()
+        logger.warning("event_followups_failed", error=str(exc))
     try:
         out["sla"] = tick_sla(session, tenant_id)
     except Exception as exc:  # noqa: BLE001

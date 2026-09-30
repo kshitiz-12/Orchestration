@@ -21,6 +21,7 @@ from app.domain.meeting import REQUIREMENT_FIELDS, MeetingStage
 from app.models.org import Resource, utcnow
 from app.models.outcome import Approval, ExceptionRecord, Outcome
 from app.services.admin_ops import admin_ops_email, trusted_ops_senders
+from app.services.approval_actions import approval_pretty
 from app.services.communication import CommunicationService, resolve_requester_name
 from app.services.email_utils import prepare_interpreter_view
 from app.services.meeting_room import (
@@ -243,6 +244,11 @@ class AdminCommandHandler:
 
         view = prepare_interpreter_view(body or "")
         text = admin_reply_text(body)
+        package = self.orch.apply_package_reply(outcome, text, admin_email, is_admin=is_admin_sender(admin_email))
+        if package:
+            cmd = {"action": package["action"], "raw": text[:500], "path": "task_package", "confidence": 1.0}
+            self._record(outcome, cmd, package)
+            return {"action": package["action"], "interpretation_path": "task_package", **package}
         cmd = self._interpret(outcome, text, view.get("quoted_thread_excerpt") or "")
         cmd["raw"] = text[:500]
         action = cmd["action"]
@@ -792,16 +798,13 @@ class AdminCommandHandler:
                 after={"decision": decision, "reason": approval.reason, "via": "admin_mail"},
                 correlation_id=outcome.outcome_id,
             )
-            if approved and approval.approval_type == "CATERING_SPEND":
-                self.orch.on_catering_approved(outcome)
+            self.orch.on_approval_decided(outcome, approval, approved=approved, note=note or "")
 
         facts = dict(outcome.facts or {})
         facts["last_action"] = f"admin_{decision.lower()}:{','.join(types)}"
-        if not approved and "CATERING_SPEND" in types:
-            facts["catering_rejected"] = True
         self._save(outcome, facts)
 
-        pretty = ", ".join(t.replace("_", " ").lower() for t in types)
+        pretty = ", ".join(approval_pretty(t, facts) for t in types)
         if approved:
             lines = [f"Your {pretty} request has been approved by ops."]
         else:

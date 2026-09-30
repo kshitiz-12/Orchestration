@@ -20,11 +20,42 @@ type Dept = {
 
 type Knowledge = { entry_id: string; key: string; section: string; title: string; content: string; is_active: boolean };
 
+type SiteService = {
+  service_id: string;
+  site: string;
+  code: string;
+  name: string;
+  delivery_model: string;
+  provider: string | null;
+  owner_department: string;
+  unit: string;
+  rate: number;
+  included_limit: number;
+  premium_triggers: string[];
+  premium_rate: number;
+  is_active: boolean;
+};
+
+type CostCentre = {
+  cost_centre_id: string;
+  code: string;
+  name: string;
+  department: string | null;
+  approver_name: string | null;
+  approver_email: string | null;
+  is_active: boolean;
+  needs_setup: boolean;
+};
+
 const TABS = [
   { id: "departments", label: "Departments" },
+  { id: "services", label: "Site services & charges" },
+  { id: "cost_centres", label: "Cost centres" },
   { id: "knowledge", label: "Office knowledge" },
   { id: "import", label: "Import data" },
 ] as const;
+
+const DELIVERY_MODELS = ["INCLUDED", "CONTRACT", "SUBSIDISED", "CHARGEABLE", "OUTSOURCED"];
 
 const IMPORT_KINDS = [
   { id: "employees", label: "Employees", hint: "email, name, department, role, manager_email" },
@@ -32,6 +63,8 @@ const IMPORT_KINDS = [
   { id: "resources", label: "Rooms, desks & parking", hint: "name, type (MEETING_ROOM / PARKING_SLOT / DESK / CABIN / LOCKER), capacity, floor, video_conferencing, display, near_department" },
   { id: "vendors", label: "Vendors", hint: "name, category, contact_email, location" },
   { id: "knowledge", label: "Policies & FAQs", hint: "key, section, title, content" },
+  { id: "site_services", label: "Site services & charges", hint: "site, code, name, delivery_model (INCLUDED / CONTRACT / SUBSIDISED / CHARGEABLE / OUTSOURCED), owner_department, unit, rate, included_limit, premium_triggers, premium_rate, provider" },
+  { id: "cost_centres", label: "Cost centres", hint: "code, name, department, approver_name, approver_email" },
 ];
 
 const isPlaceholder = (email?: string | null) => !email || email.endsWith("@example.invalid");
@@ -109,6 +142,8 @@ export default function SetupPage() {
         )}
 
         {tab === "departments" && <Departments onChange={loadStatus} setMsg={setMsg} />}
+        {tab === "services" && <ServicesTab onChange={loadStatus} setMsg={setMsg} />}
+        {tab === "cost_centres" && <CostCentresTab onChange={loadStatus} setMsg={setMsg} />}
         {tab === "knowledge" && <KnowledgeTab onChange={loadStatus} setMsg={setMsg} />}
         {tab === "import" && <ImportTab onChange={loadStatus} setMsg={setMsg} />}
       </div>
@@ -298,6 +333,257 @@ function DeptForm({ dept, onSave, onCancel }: { dept: Dept | null; onSave: (f: R
         </button>
         <button className="btn secondary" onClick={onCancel}>Cancel</button>
       </div>
+    </div>
+  );
+}
+
+function ServicesTab({ onChange, setMsg }: TabProps) {
+  const [rows, setRows] = useState<SiteService[]>([]);
+  const [draft, setDraft] = useState<Record<string, any> | null>(null);
+
+  function load() {
+    api<SiteService[]>("/setup/site-services").then(setRows).catch((e) => setMsg({ text: e.message, tone: "danger" }));
+  }
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  async function save() {
+    if (!draft) return;
+    try {
+      await api("/setup/site-services", {
+        method: "PUT",
+        body: JSON.stringify({
+          ...draft,
+          rate: Number(draft.rate) || 0,
+          included_limit: Number(draft.included_limit) || 0,
+          premium_rate: Number(draft.premium_rate) || 0,
+          premium_triggers: splitList(draft.premium_triggers || ""),
+        }),
+      });
+      setMsg({ text: `Saved ${draft.name || draft.code}`, tone: "ok" });
+      setDraft(null);
+      load();
+      onChange();
+    } catch (e: any) {
+      setMsg({ text: e.message, tone: "danger" });
+    }
+  }
+
+  const edit = (s?: SiteService) =>
+    setDraft(
+      s
+        ? { ...s, premium_triggers: (s.premium_triggers || []).join(", "), existing: true }
+        : { site: "Corporate Office", code: "", name: "", delivery_model: "INCLUDED", owner_department: "ADMIN", unit: "per_event", rate: 0, included_limit: 0, premium_triggers: "", premium_rate: 0, provider: "" },
+    );
+
+  return (
+    <div className="panel">
+      <div className="panel-head">
+        <h2>Site services &amp; charges</h2>
+        <button className="btn accent" onClick={() => edit()}>Add service</button>
+      </div>
+      <p className="muted" style={{ marginTop: 0 }}>
+        How each service is delivered at your site. Included services go ahead with no approval; only subsidised,
+        chargeable or outsourced items (or included items asked for as premium) need cost approval. The sample
+        rows are placeholders — replace them with your real rates.
+      </p>
+      {draft && (
+        <div className="pre" style={{ marginBottom: "1rem", whiteSpace: "normal" }}>
+          <div className="cols-2">
+            {!draft.existing && (
+              <div className="field">
+                <label>Code</label>
+                <input value={draft.code} onChange={(e) => setDraft({ ...draft, code: e.target.value })} placeholder="high_tea" />
+              </div>
+            )}
+            <div className="field">
+              <label>Name</label>
+              <input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
+            </div>
+            <div className="field">
+              <label>Delivery model</label>
+              <select value={draft.delivery_model} onChange={(e) => setDraft({ ...draft, delivery_model: e.target.value })}>
+                {DELIVERY_MODELS.map((m) => <option key={m}>{m}</option>)}
+              </select>
+            </div>
+            <div className="field">
+              <label>Delivered by (department code)</label>
+              <input value={draft.owner_department} onChange={(e) => setDraft({ ...draft, owner_department: e.target.value })} placeholder="CAFETERIA" />
+            </div>
+            <div className="field">
+              <label>Unit</label>
+              <select value={draft.unit} onChange={(e) => setDraft({ ...draft, unit: e.target.value })}>
+                {["per_event", "per_person", "per_trip", "per_night", "per_slot"].map((u) => <option key={u}>{u}</option>)}
+              </select>
+            </div>
+            <div className="field">
+              <label>Rate (INR per unit)</label>
+              <input type="number" min={0} value={draft.rate} onChange={(e) => setDraft({ ...draft, rate: e.target.value })} />
+            </div>
+            <div className="field">
+              <label>Free quantity before charges apply</label>
+              <input type="number" min={0} value={draft.included_limit} onChange={(e) => setDraft({ ...draft, included_limit: e.target.value })} />
+            </div>
+            <div className="field">
+              <label>Premium words (make an included item chargeable)</label>
+              <input value={draft.premium_triggers} onChange={(e) => setDraft({ ...draft, premium_triggers: e.target.value })} placeholder="premium, staffed, branded" />
+            </div>
+            <div className="field">
+              <label>Premium rate (INR)</label>
+              <input type="number" min={0} value={draft.premium_rate} onChange={(e) => setDraft({ ...draft, premium_rate: e.target.value })} />
+            </div>
+            <div className="field">
+              <label>Provider</label>
+              <input value={draft.provider || ""} onChange={(e) => setDraft({ ...draft, provider: e.target.value })} />
+            </div>
+          </div>
+          <div className="row">
+            <button className="btn accent" onClick={save} disabled={!draft.name?.trim() || !draft.code?.trim()}>Save</button>
+            <button className="btn secondary" onClick={() => setDraft(null)}>Cancel</button>
+          </div>
+        </div>
+      )}
+      <table>
+        <thead>
+          <tr>
+            <th>Service</th>
+            <th>Model</th>
+            <th>Delivered by</th>
+            <th>Rate</th>
+            <th />
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((s) => (
+            <tr key={s.service_id} style={{ opacity: s.is_active ? 1 : 0.5 }}>
+              <td>
+                <strong>{s.name}</strong>
+                <div className="muted mono">{s.code} · {s.site}</div>
+              </td>
+              <td>
+                <span className={`badge ${s.delivery_model === "INCLUDED" || s.delivery_model === "CONTRACT" ? "ok" : "warn"}`}>
+                  {s.delivery_model.toLowerCase()}
+                </span>
+              </td>
+              <td className="mono">{s.owner_department}</td>
+              <td className="muted" style={{ fontSize: "0.85rem" }}>
+                {s.rate ? `₹${s.rate} ${s.unit.replace("_", " ")}` : "—"}
+                {s.premium_triggers?.length ? <div>premium ₹{s.premium_rate || "quote"}: {s.premium_triggers.slice(0, 3).join(", ")}</div> : null}
+              </td>
+              <td>
+                <button className="btn secondary" onClick={() => edit(s)}>Edit</button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function CostCentresTab({ onChange, setMsg }: TabProps) {
+  const [rows, setRows] = useState<CostCentre[]>([]);
+  const [draft, setDraft] = useState<Record<string, any> | null>(null);
+
+  function load() {
+    api<CostCentre[]>("/setup/cost-centres").then(setRows).catch((e) => setMsg({ text: e.message, tone: "danger" }));
+  }
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  async function save() {
+    if (!draft) return;
+    try {
+      await api("/setup/cost-centres", { method: "PUT", body: JSON.stringify(draft) });
+      setMsg({ text: `Saved ${draft.code}`, tone: "ok" });
+      setDraft(null);
+      load();
+      onChange();
+    } catch (e: any) {
+      setMsg({ text: e.message, tone: "danger" });
+    }
+  }
+
+  return (
+    <div className="panel">
+      <div className="panel-head">
+        <h2>Cost centres</h2>
+        <button className="btn accent" onClick={() => setDraft({ code: "", name: "", department: "", approver_name: "", approver_email: "" })}>
+          Add cost centre
+        </button>
+      </div>
+      <p className="muted" style={{ marginTop: 0 }}>
+        Chargeable event costs are booked to the requester&apos;s cost centre (matched by their department, or the code
+        they quote). The approver gets the cost approval mail along with the managers; without one, the managers and
+        main admin approve.
+      </p>
+      {draft && (
+        <div className="pre" style={{ marginBottom: "1rem", whiteSpace: "normal" }}>
+          <div className="cols-2">
+            <div className="field">
+              <label>Code</label>
+              <input value={draft.code} onChange={(e) => setDraft({ ...draft, code: e.target.value })} placeholder="SL-1101" disabled={!!draft.existing} />
+            </div>
+            <div className="field">
+              <label>Name</label>
+              <input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
+            </div>
+            <div className="field">
+              <label>Employee department</label>
+              <input value={draft.department || ""} onChange={(e) => setDraft({ ...draft, department: e.target.value })} placeholder="Sales" />
+            </div>
+            <div className="field">
+              <label>Approver name</label>
+              <input value={draft.approver_name || ""} onChange={(e) => setDraft({ ...draft, approver_name: e.target.value })} />
+            </div>
+            <div className="field">
+              <label>Approver email</label>
+              <input value={draft.approver_email || ""} onChange={(e) => setDraft({ ...draft, approver_email: e.target.value })} />
+            </div>
+          </div>
+          <div className="row">
+            <button className="btn accent" onClick={save} disabled={!draft.code?.trim() || !draft.name?.trim()}>Save</button>
+            <button className="btn secondary" onClick={() => setDraft(null)}>Cancel</button>
+          </div>
+        </div>
+      )}
+      <table>
+        <thead>
+          <tr>
+            <th>Cost centre</th>
+            <th>Department</th>
+            <th>Approver</th>
+            <th />
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((c) => (
+            <tr key={c.cost_centre_id} style={{ opacity: c.is_active ? 1 : 0.5 }}>
+              <td>
+                <strong>{c.name}</strong>
+                <div className="muted mono">{c.code}</div>
+              </td>
+              <td>{c.department || <span className="muted">—</span>}</td>
+              <td>
+                {c.approver_name || ""}{" "}
+                {c.needs_setup ? <span className="badge warn">no email yet</span> : <span className="mono muted">{c.approver_email}</span>}
+              </td>
+              <td>
+                <button
+                  className="btn secondary"
+                  onClick={() => setDraft({ ...c, approver_email: c.needs_setup ? "" : c.approver_email, existing: true })}
+                >
+                  Edit
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

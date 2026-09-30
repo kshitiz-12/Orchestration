@@ -82,6 +82,12 @@ class Settings(BaseSettings):
     catering_vendor_name: str = ""
     # Off-site venues seeded as bookable inventory: "Name:capacity; Name:capacity"
     offsite_venues: str = ""
+    # Public URL of this backend for approve/reject links in mail (else RENDER_EXTERNAL_URL; empty = no links)
+    public_base_url: str = ""
+    approval_link_hours: float = 72.0
+    # Pending approvals / department task packages: one reminder after N hours, one escalation after M hours
+    followup_reminder_hours: float = 8.0
+    followup_escalate_hours: float = 24.0
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 480
 

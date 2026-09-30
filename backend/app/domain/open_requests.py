@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from app.domain.meeting import PLATFORM_KEYS, REQUIREMENT_FIELDS
+from app.domain.meeting import EVENT_FIELDS, PLATFORM_KEYS, REQUIREMENT_FIELDS
 
 
 def _answered(value: Any) -> bool:
@@ -17,7 +17,7 @@ def _answered(value: Any) -> bool:
         return True
     return bool(str(value).strip())
 
-_SKIP_ENTITY_KEYS = frozenset(REQUIREMENT_FIELDS) | frozenset(PLATFORM_KEYS) | {
+_SKIP_ENTITY_KEYS = frozenset(REQUIREMENT_FIELDS) | frozenset(PLATFORM_KEYS) | frozenset(EVENT_FIELDS) | {
     "issues",
     "raw_reply",
     "open_requests",

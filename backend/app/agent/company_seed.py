@@ -92,8 +92,9 @@ DEFAULT_KNOWLEDGE: list[dict] = [
         "section": "policy",
         "title": "Catering",
         "content": (
-            "Tea/coffee and snacks for meetings are arranged by the cafeteria vendor. "
-            "Meals for meetings need admin approval above the auto-approve limit."
+            "Tea/coffee and drinking water are included site facilities (no approval). "
+            "Working lunch is subsidised and high tea / special menus are chargeable to the requester's cost centre; "
+            "only the chargeable portion needs cost approval. See the site service catalogue in Company setup."
         ),
     },
     {
@@ -175,3 +176,7 @@ def ensure_company_seed(session: Session, tenant_id: str) -> None:
         if name not in have_vendors:
             session.add(Vendor(tenant_id=tenant_id, name=name, category=category, contact_email=email))
     session.flush()
+
+    from app.services.site_services import ensure_site_services
+
+    ensure_site_services(session, tenant_id)

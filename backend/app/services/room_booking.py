@@ -253,26 +253,39 @@ class RoomBookingService:
         is_offsite: bool = False,
         attributes: Optional[dict] = None,
         keep: Optional[set[str]] = None,
+        day_index: int = 0,
     ) -> RoomBooking:
-        """Confirm one room. Other active rows for the outcome are released unless listed in `keep`."""
+        """Confirm one room. Other active rows for the outcome are released unless listed in `keep`.
+
+        Multi-day events hold one row per day; `day_index` (0 = first day) picks which row to confirm.
+        """
         existing = next(
             (
                 b
                 for b in self.active_for_outcome(outcome_id)
-                if b.resource_id == resource_id and b.room_name == room_name
+                if b.resource_id == resource_id
+                and b.room_name == room_name
+                and int((b.attributes or {}).get("day_index") or 0) == day_index
             ),
             None,
         )
         if existing is None:
             # Revive an expired hold on the same room rather than creating a duplicate row
-            existing = self.session.exec(
-                select(RoomBooking).where(
-                    RoomBooking.tenant_id == self.tenant_id,
-                    RoomBooking.outcome_id == outcome_id,
-                    RoomBooking.room_name == room_name,
-                    RoomBooking.status == "EXPIRED",
-                )
-            ).first()
+            existing = next(
+                (
+                    b
+                    for b in self.session.exec(
+                        select(RoomBooking).where(
+                            RoomBooking.tenant_id == self.tenant_id,
+                            RoomBooking.outcome_id == outcome_id,
+                            RoomBooking.room_name == room_name,
+                            RoomBooking.status == "EXPIRED",
+                        )
+                    ).all()
+                    if int((b.attributes or {}).get("day_index") or 0) == day_index
+                ),
+                None,
+            )
         for other in self.active_for_outcome(outcome_id):
             if other is not existing and other.booking_id not in (keep or set()):
                 other.status = "RELEASED"
@@ -284,6 +297,7 @@ class RoomBookingService:
                 outcome_id=outcome_id,
                 room_name=room_name,
                 is_offsite=is_offsite,
+                attributes={"day_index": day_index} if day_index else {},
             )
         existing.status = "CONFIRMED"
         existing.hold_expires_at = None

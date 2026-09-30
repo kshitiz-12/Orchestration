@@ -8,7 +8,16 @@ from typing import Any, Optional
 from sqlmodel import Session, select
 
 POLICY_CODE = "MEETING_ROOM_POLICY"
-POLICY_VERSION = "2026.09.1"
+POLICY_VERSION = "2026.10.1"
+# Keys whose defaults changed in this version; stored values from older versions are replaced
+_UPGRADED_KEYS = (
+    "setup_buffer_internal_minutes",
+    "release_buffer_internal_minutes",
+    "setup_buffer_external_minutes",
+    "release_buffer_external_minutes",
+    "setup_buffer_training_minutes",
+    "release_buffer_training_minutes",
+)
 
 
 @dataclass
@@ -18,8 +27,13 @@ class MeetingRoomPolicy:
     version: str = POLICY_VERSION
     code: str = POLICY_CODE
     vc_policy_code: str = "MP-INT-006"
-    setup_buffer_internal_minutes: int = 10
-    release_buffer_internal_minutes: int = 10
+    # Setup / reset buffers by meeting type
+    setup_buffer_internal_minutes: int = 30
+    release_buffer_internal_minutes: int = 15
+    setup_buffer_external_minutes: int = 45
+    release_buffer_external_minutes: int = 30
+    setup_buffer_training_minutes: int = 60
+    release_buffer_training_minutes: int = 30
     setup_buffer_complex_minutes: int = 30
     release_buffer_complex_minutes: int = 15
     auto_book_min_score: int = 90
@@ -41,6 +55,7 @@ class MeetingRoomPolicy:
             "av": True,
             "catering": True,
             "invoice": True,
+            "travel": True,
         }
     )
 
@@ -97,9 +112,14 @@ def ensure_meeting_policy_rule(session: Session, tenant_id: str) -> MeetingRoomP
     ).first()
     payload = pol.to_dict()
     if row:
-        # Preserve operator overrides; refresh version metadata if missing
-        merged = {**payload, **(row.config or {})}
-        merged["version"] = (row.config or {}).get("version") or pol.version
+        # Preserve operator overrides; a policy version bump resets the keys whose defaults changed
+        stored = dict(row.config or {})
+        if stored.get("version") != pol.version:
+            for key in _UPGRADED_KEYS:
+                stored.pop(key, None)
+            stored["version"] = pol.version
+        merged = {**payload, **stored}
+        merged["version"] = stored.get("version") or pol.version
         row.config = merged
         row.description = f"Meeting room capacity, buffers, VC, auto-book (v{merged['version']})"
         row.is_active = True
@@ -191,6 +211,8 @@ def active_modules(facts: dict[str, Any], policy: Optional[MeetingRoomPolicy] = 
         presentation_needed,
     )
 
+    from app.services.event_facts import travel_needed
+
     enabled = policy.modules
     return {
         "visitors": bool(enabled.get("visitors")) and external_visitor_count(facts) > 0,
@@ -198,4 +220,5 @@ def active_modules(facts: dict[str, Any], policy: Optional[MeetingRoomPolicy] = 
         "av": bool(enabled.get("av")) and (hybrid_needed(facts) or presentation_needed(facts)),
         "catering": bool(enabled.get("catering")) and catering_needed(facts),
         "invoice": bool(enabled.get("invoice")) and catering_needed(facts),
+        "travel": bool(enabled.get("travel", True)) and travel_needed(facts),
     }

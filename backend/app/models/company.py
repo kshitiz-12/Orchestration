@@ -43,6 +43,55 @@ class KnowledgeEntry(TimestampMixin, table=True):
     is_active: bool = True
 
 
+class SiteService(TimestampMixin, table=True):
+    """Site service catalogue: how a service is delivered at a site and whether it costs the event anything.
+
+    delivery_model: INCLUDED | CONTRACT | SUBSIDISED | CHARGEABLE | OUTSOURCED
+    Only the chargeable portion (quantity above `included_limit`, or any use of a paid model) needs approval.
+    """
+
+    __tablename__ = "site_services"
+    __table_args__ = (UniqueConstraint("tenant_id", "site", "code", name="uq_site_service"),)
+
+    service_id: str = Field(default_factory=lambda: new_id("svc_"), primary_key=True)
+    tenant_id: str = Field(foreign_key="tenants.tenant_id", index=True)
+    site: str = Field(default="Corporate Office", index=True)
+    code: str = Field(index=True)
+    name: str
+    delivery_model: str = "INCLUDED"
+    provider: Optional[str] = None
+    # Department code that delivers it (ADMIN, IT, CAFETERIA, TRAVEL, SECURITY, HOUSEKEEPING)
+    owner_department: str = "ADMIN"
+    unit: str = "per_event"
+    rate: float = 0.0
+    currency: str = "INR"
+    # Free quantity per event before the rate applies (0 = none free for paid models)
+    included_limit: float = 0.0
+    # Words in the request that turn an included service into a chargeable one (premium, staffed ...)
+    premium_triggers: list = Field(default_factory=list, sa_column=Column(JSON))
+    premium_rate: float = 0.0
+    evidence_rule: Optional[str] = None
+    effective_from: Optional[str] = None
+    effective_to: Optional[str] = None
+    is_active: bool = True
+    notes: Optional[str] = Field(default=None, sa_column=Column(Text))
+
+
+class CostCentre(TimestampMixin, table=True):
+    __tablename__ = "cost_centres"
+    __table_args__ = (UniqueConstraint("tenant_id", "code", name="uq_cost_centre_code"),)
+
+    cost_centre_id: str = Field(default_factory=lambda: new_id("cc_"), primary_key=True)
+    tenant_id: str = Field(foreign_key="tenants.tenant_id", index=True)
+    code: str = Field(index=True)
+    name: str
+    # Employee department this cost centre belongs to (matches Person.department)
+    department: Optional[str] = Field(default=None, index=True)
+    approver_name: Optional[str] = None
+    approver_email: Optional[str] = None
+    is_active: bool = True
+
+
 class ServiceTicket(TimestampMixin, table=True):
     __tablename__ = "service_tickets"
 

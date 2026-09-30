@@ -132,7 +132,14 @@ def ensure_schema_compat() -> None:
                     continue
                 logger.warning("schema_compat_stmt_skipped", error=str(exc), stmt=stmt[:80])
 
-    from app.models.company import Department, KnowledgeEntry, ServiceTicket, VisitorPass
+    from app.models.company import (
+        CostCentre,
+        Department,
+        KnowledgeEntry,
+        ServiceTicket,
+        SiteService,
+        VisitorPass,
+    )
     from app.models.org import RoomBooking
 
     # Tables added after the initial schema (create_all is checkfirst → idempotent)
@@ -144,6 +151,8 @@ def ensure_schema_compat() -> None:
             KnowledgeEntry.__table__,  # type: ignore[attr-defined]
             ServiceTicket.__table__,  # type: ignore[attr-defined]
             VisitorPass.__table__,  # type: ignore[attr-defined]
+            SiteService.__table__,  # type: ignore[attr-defined]
+            CostCentre.__table__,  # type: ignore[attr-defined]
         ],
     )
     logger.info("schema_compat_ensured")

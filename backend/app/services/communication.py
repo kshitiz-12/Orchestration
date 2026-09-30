@@ -118,6 +118,29 @@ def resolve_requester_name(
     return "team"
 
 
+def _event_clarification_extras(facts: dict) -> list[str]:
+    """Provisional hold, included-vs-chargeable note and non-blocking asks for the first clarification."""
+    parts: list[str] = []
+    extra = [q for q in facts.get("event_extra_questions") or [] if q]
+    if extra:
+        parts.append("")
+        parts.append("If you have them handy, please also share (these won't hold up the booking):\n")
+        parts.extend(f"- {q}" for q in extra)
+    hold = facts.get("provisional_hold") or {}
+    if hold.get("room"):
+        parts.append("")
+        parts.append(
+            f"Meanwhile I've provisionally held {hold['room']}"
+            + (f" until {hold['expires_label']}" if hold.get("expires_label") else "")
+            + " so it isn't taken while you reply."
+        )
+    note = str(facts.get("cost_preview") or "").strip()
+    if note:
+        parts.append("")
+        parts.append(note)
+    return parts
+
+
 class CommunicationService:
     def __init__(
         self,
@@ -278,11 +301,18 @@ class CommunicationService:
             questions = default_meeting_room_questions()
         ref = case_reference or "PENDING"
         name = greeting_name or resolve_requester_name(self.session, conversation=conversation)
+        from app.services.no_resource_flow import format_outbound_greeting, short_case_subject
+
         if first_contact:
-            subject = f"[INFORMATION REQUIRED] [{ref}] Request registered — details needed"
+            hint = (current.summary if current and (current.summary or "").startswith("Meeting for ") else "") or (
+                "Request registered — details needed"
+            )
+            subject = short_case_subject(
+                case_reference=ref, action_label="RECEIVED + INFORMATION REQUIRED", summary=hint, title=""
+            )
         else:
             subject = f"[INFORMATION REQUIRED] [{ref}] Additional details needed"
-        from app.services.no_resource_flow import format_outbound_greeting
+        case_facts = dict((current.facts if current else None) or {})
 
         parts: list[str] = [f"{format_outbound_greeting(name)}\n"]
         kind = "meeting-room request" if is_room else "request"
@@ -310,6 +340,8 @@ class CommunicationService:
             parts.append("")
             parts.append("I've set these for you — reply if any should change:\n")
             parts.extend(f"- {line}" for line in defaults)
+        if is_room and questions:
+            parts.extend(_event_clarification_extras(case_facts))
         if questions:
             parts.append("\nJust reply to this email with the details.")
         else:

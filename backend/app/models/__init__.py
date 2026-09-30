@@ -6,7 +6,14 @@ from app.models.intake import (
     ProcessingJob,
     RawEmailEvent,
 )
-from app.models.company import Department, KnowledgeEntry, ServiceTicket, VisitorPass
+from app.models.company import (
+    CostCentre,
+    Department,
+    KnowledgeEntry,
+    ServiceTicket,
+    SiteService,
+    VisitorPass,
+)
 from app.models.integrations import IntegrationCredential
 from app.models.org import (
     Asset,
@@ -75,4 +82,6 @@ __all__ = [
     "KnowledgeEntry",
     "ServiceTicket",
     "VisitorPass",
+    "SiteService",
+    "CostCentre",
 ]

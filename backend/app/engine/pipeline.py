@@ -441,9 +441,13 @@ class ProcessingPipeline:
     def _maybe_handle_admin_reply(self, event: RawEmailEvent) -> Optional[dict]:
         """Ops mailbox and department replies are commands on an existing case, not requester mail."""
         from app.agent.directory import department_emails
+        from app.services.site_services import cost_centre_approver_emails
 
-        if not is_admin_sender(event.sender) and sender_address(event.sender) not in department_emails(
-            self.session, self.tenant_id
+        addr = sender_address(event.sender)
+        if (
+            not is_admin_sender(event.sender)
+            and addr not in department_emails(self.session, self.tenant_id)
+            and addr not in cost_centre_approver_emails(self.session, self.tenant_id)
         ):
             return None
         from app.models.outcome import Outcome
