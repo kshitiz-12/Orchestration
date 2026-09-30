@@ -291,6 +291,47 @@ def test_catering_counts_survive_in_requesters_words():
     assert '"6 non veg, rest veg, 2 tea rest coffee"' in body
 
 
+def test_live_reply_six_more_visitors_and_diet_split():
+    from app.ai.gemini import HeuristicProvider
+    from app.ai.meeting_extract import refine_meeting_room_extraction
+    from app.engine.outcome_reducer import reduce_meeting_facts
+    from app.schemas.ai import ExtractionResult
+
+    body = (
+        "few more requests i need veg for two and non veg for rest and tea for 6 and\r\n"
+        "coffee for rest ,also 6 more external visitors will join us ,"
+    )
+    subject = "Re: [CONFIRM BOOKING] [ROOM-2026-0001] Meeting for 12 on 2025-10-25 at 10am–1pm (3.0h)"
+    prior = {
+        **_HELD,
+        "date": "2025-10-25",
+        "attendees": 12,
+        "external_visitors": 2,
+        "visitor_details": "Rahul Sharma and Aman Verma",
+        "catering": "tea coffee",
+        "dietary": "non-vegetarian",
+        "field_provenance": {"dietary": "extracted", "catering": "extracted"},
+    }
+    extraction = ExtractionResult(
+        event_type="MEETING_ROOM",
+        summary="more requests",
+        entities={"dietary": "2 veg, rest non-veg", "catering": "tea for 6, coffee for rest", "external_visitors": 8},
+        missing_information=[],
+        confidence=0.9,
+        reason="addon",
+    )
+    heuristic = HeuristicProvider().extract(subject=subject, body=body).entities
+    facts = refine_meeting_room_extraction(
+        extraction, subject=subject, body=body, prior_facts=prior, heuristic_entities=heuristic
+    ).entities
+    assert facts["external_visitors"] == 8
+    assert facts["visitor_details"] == "Rahul Sharma and Aman Verma"
+    assert facts["dietary"] == "2 veg, rest non-veg"
+    assert facts["date"].startswith("2026-10-25") or facts["date"] >= "2026-10-25"
+    # Reducing the same mail again (orchestrator pass) must not add the 6 a second time.
+    assert reduce_meeting_facts(facts, primary_entities={}, source_text=body)["external_visitors"] == 8
+
+
 def test_our_subject_tag_is_not_the_requesters_confirm():
     from app.services.meeting_room import is_booking_confirmation
 

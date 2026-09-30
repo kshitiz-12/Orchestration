@@ -60,6 +60,7 @@ _CASE_STATE_KEYS = (
     "replaced_room_note",
     "catering_rejected",
     "catering_notes",
+    "visitor_additions_applied",
     "no_resource_alternatives",
     "no_resource_fingerprint",
     "no_resource_choice",

@@ -41,6 +41,8 @@ _SKIP_ENTITY_KEYS = frozenset(REQUIREMENT_FIELDS) | frozenset(PLATFORM_KEYS) | {
     "amount",
     "location",
     "catering_notes",
+    "visitor_additions_applied",
+    "external_visitors_add_phrase",
     "busy_fit_rooms",
     "meeting_window",
     "spawned_from_outcome_id",

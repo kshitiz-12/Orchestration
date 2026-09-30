@@ -219,6 +219,30 @@ def _today_label() -> str:
     return now.strftime("%Y-%m-%d (%A)")
 
 
+def _roll_past_date_forward(value: Any, source_text: str) -> Optional[str]:
+    """Model sometimes stamps last year on "25th Oct"; a meeting date the requester gave
+    without a year is always the next upcoming one."""
+    import re
+    from datetime import datetime, timedelta, timezone
+
+    from app.services.room_booking import parse_meeting_date
+
+    day = parse_meeting_date(value) if value else None
+    if not day:
+        return None
+    today = datetime.now(timezone(timedelta(hours=5, minutes=30))).date()
+    if day >= today or re.search(rf"\b{day.year}\b", source_text or ""):
+        return None
+    for years in range(1, 3):
+        try:
+            candidate = day.replace(year=day.year + years)
+        except ValueError:
+            continue
+        if candidate >= today:
+            return candidate.isoformat()
+    return None
+
+
 def build_interpreter_payload(
     *,
     subject: str,
@@ -408,6 +432,11 @@ def refine_meeting_room_extraction(
             merged[flag] = True
         else:
             merged.pop(flag, None)
+
+    # Body only: our own subject echoes whatever date we wrote last time.
+    fixed_date = _roll_past_date_forward(merged.get("date"), body)
+    if fixed_date:
+        merged["date"] = fixed_date
 
     from app.ai.messy_meeting_parse import catering_phrases
 

@@ -155,7 +155,7 @@ def must_keep_tokens(draft: str, case_reference: Optional[str], facts: dict[str,
 
 def _first_name(name: Optional[str]) -> Optional[str]:
     text = (name or "").strip()
-    if not text or text.lower() in {"there", "team", "user", "unknown"}:
+    if not text or text.lower() in {"there", "team", "user", "unknown"} or text.lower().startswith("anonymous"):
         return None
     return text.split()[0]
 

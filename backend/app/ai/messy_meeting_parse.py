@@ -247,6 +247,7 @@ def parse_messy_meeting_signals(text: str) -> dict[str, Any]:
     if m_more:
         count = m_more.group(1).lower()
         out["external_visitors_add"] = int(count) if count.isdigit() else _NUMBER_WORDS[count]
+        out["external_visitors_add_phrase"] = re.sub(r"\s+", " ", m_more.group(0)).strip().lower()[:120]
         extra_name = (m_more.group(2) or "").strip(" ,.")
         extra_name = re.split(
             r"\n|catering\b|parking\b|tea\b|coffee\b|display\b|rest stays\b|confirm\b",
@@ -359,7 +360,9 @@ def parse_vehicle_plates(text: str) -> list[str]:
     return out
 
 
-_TRANSIENT_SIGNAL_KEYS = frozenset({"external_visitors_add", "visitor_details_append"})
+_TRANSIENT_SIGNAL_KEYS = frozenset(
+    {"external_visitors_add", "external_visitors_add_phrase", "visitor_details_append"}
+)
 
 
 def apply_grounded_reply_signals(
@@ -394,7 +397,13 @@ def apply_grounded_reply_signals(
             out["guest_vehicles"] = max(prior_cars, len(str(plates).split(",")))
 
     add = sig.get("external_visitors_add")
+    phrase = sig.get("external_visitors_add_phrase") or f"+{add}"
+    # One mail is reduced several times (extract, orchestrate, office default); "6 more"
+    # must be added once, not once per pass.
+    if add and phrase in (prior.get("visitor_additions_applied") or []):
+        add = None
     if add:
+        out["visitor_additions_applied"] = (list(prior.get("visitor_additions_applied") or []) + [phrase])[-10:]
         try:
             prior_n = int(prior.get("external_visitors") or 0)
         except (TypeError, ValueError):

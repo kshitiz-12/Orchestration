@@ -857,7 +857,9 @@ class HeuristicProvider(LLMProvider):
                     maxsplit=1,
                     flags=re.I,
                 )[0].strip(" ,.")
-                if raw_names and not re.match(r"^(will|yes|attend|required)\b", raw_names, re.I):
+                from app.ai.messy_meeting_parse import _looks_like_names
+
+                if _looks_like_names(raw_names) and not re.match(r"^(yes|required)\b", raw_names, re.I):
                     entities["visitor_details"] = raw_names[:500]
             if "visitor names" in text or "abc industries" in text:
                 entities["visitor_details"] = entities.get("visitor_details") or body[:500]

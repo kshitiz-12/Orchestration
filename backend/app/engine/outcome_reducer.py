@@ -290,8 +290,13 @@ def reduce_meeting_facts(
         }
         unknown_only = {}
         src = (source_text or "").lower()
+        # The interpreter already answered these for this message; a regex guess
+        # ("non veg" → "non-vegetarian") must not overwrite "2 veg, rest non-veg".
+        primary_answered = {k for k, v in (primary_entities or {}).items() if _answered(v)}
         for key, value in candidate_entities.items():
             if key in PLATFORM_KEYS and key not in REQUIREMENT_FIELDS:
+                continue
+            if key in primary_answered:
                 continue
             if not _answered(merged.get(key)):
                 unknown_only[key] = value
