@@ -36,6 +36,7 @@ from app.agent.playbooks import (
     evidence_hint,
     fill_required,
     has_playbook,
+    label_value,
     label_for,
     missing_questions,
     normalize_category,
@@ -139,6 +140,45 @@ def is_service_case(outcome: Optional[Outcome]) -> bool:
     return bool(outcome) and outcome.template_code == SERVICE_TEMPLATE
 
 
+_PERSON_KEYS = ("employee_name", "joiner_name", "name", "full_name", "new_joiner", "joinee_name", "candidate_name",
+                "employee", "on_behalf_of", "visitor_names", "guest_name")
+_ID_KEYS = ("employee_id", "emp_id", "staff_id")
+
+
+def _norm_values(value: Any) -> set[str]:
+    items = value if isinstance(value, (list, tuple)) else [value]
+    return {re.sub(r"\s+", " ", str(v)).strip().lower() for v in items if str(v or "").strip()}
+
+
+def _identity(details: dict, text: str = "") -> tuple[set[str], set[str]]:
+    people: set[str] = set()
+    ids: set[str] = set()
+    for k in _PERSON_KEYS:
+        people |= _norm_values(details.get(k)) if details.get(k) else set()
+    for k in _ID_KEYS:
+        ids |= _norm_values(details.get(k)) if details.get(k) else set()
+    for k in ("name", "employee_name", "full_name"):
+        if v := label_value(text, k):
+            people |= _norm_values(v)
+    for k in _ID_KEYS:
+        if v := label_value(text, k):
+            ids |= _norm_values(v)
+    return people, ids
+
+
+def _about_someone_else(intent: AgentIntent, target: Outcome, text: str) -> bool:
+    """The new mail names a different person (or employee ID) than the case it was linked to."""
+    facts = target.facts or {}
+    old_people, old_ids = _identity(
+        {**((facts.get("ai_plan") or {}).get("details") or {}), **(facts.get("details") or {})},
+        facts.get("raw_request") or "",
+    )
+    new_people, new_ids = _identity(dict(intent.details or {}), text)
+    if new_ids and old_ids and not (new_ids & old_ids):
+        return True
+    return bool(new_people and old_people and not (new_people & old_people))
+
+
 def _set_facts(session: Session, outcome: Outcome, **updates: Any) -> dict:
     facts = {**(outcome.facts or {}), **updates}
     outcome.facts = facts
@@ -232,7 +272,7 @@ class AdminDesk:
         decision = self.agent.decide(payload, heuristic_hint=hint)
         self._record_decision(event, conversation, decision)
 
-        mine, legacy = self._split(decision, current, cases)
+        mine, legacy = self._split(decision, current, cases, f"{event.subject or ''}\n{text}")
         self.handoff_categories = {normalize_category(i.category) for i in legacy} if self.agent.can_reason else set()
         if not mine:
             return None
@@ -292,7 +332,7 @@ class AdminDesk:
         return found
 
     def _split(
-        self, decision: AgentDecision, current: Optional[Outcome], cases: list[Outcome]
+        self, decision: AgentDecision, current: Optional[Outcome], cases: list[Outcome], text: str = ""
     ) -> tuple[list[AgentIntent], list[AgentIntent]]:
         mine: list[AgentIntent] = []
         legacy: list[AgentIntent] = []
@@ -313,7 +353,14 @@ class AdminDesk:
                     mine.append(intent)
             else:
                 target = self._find_case(intent.case_reference, current, cases)
-                if target is not None and is_service_case(target):
+                if (target is not None and is_service_case(target) and intent.type == "update_case"
+                        and current is None and not _CASE_REF.search((text or "").upper())
+                        and _about_someone_else(intent, target, text)):
+                    # A fresh email (not a reply, no reference) about a different person is a new request,
+                    # even when an open case of the same type is waiting for details.
+                    intent.type, intent.case_reference = "new_request", None
+                    mine.append(intent)
+                elif target is not None and is_service_case(target):
                     mine.append(intent)
                 elif target is None and intent.type == "update_case" and cat not in LEGACY_CATEGORIES | {"legacy", "general"}:
                     intent.type = "new_request"

@@ -266,7 +266,7 @@ _LOCATION_IN_TEXT = re.compile(
 )
 
 
-def _label_value(text: str, key: str) -> Optional[str]:
+def label_value(text: str, key: str) -> Optional[str]:
     label = re.escape(key.replace("_", " ")).replace(r"\ ", r"[\s_-]*")
     m = re.search(rf"^[\s>*\u2022-]*{label}\s*[:=\-]\s*(.{{1,120}}?)\s*$", text or "", re.I | re.M)
     return m.group(1).strip() if m else None
@@ -282,7 +282,7 @@ def fill_required(category: str, details: dict[str, Any], text: str = "") -> dic
             continue
         value = next((out[k] for k in keys[1:] if out.get(k) not in (None, "", [], {})), None)
         if value is None:
-            value = next((v for k in keys if (v := _label_value(text, k))), None)
+            value = next((v for k in keys if (v := label_value(text, k))), None)
         if value is not None:
             out[main] = value
     return out

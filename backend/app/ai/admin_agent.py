@@ -125,6 +125,8 @@ Your job for EACH inbound mail:
        it_support (problem) vs laptop/software/phone_sim/asset (provide or move something).
    - update_case: new or changed details for an existing case (give case_reference). If an OPEN_CASES entry is
      RESOLVED and they say it is still not working / happened again, that is update_case on that case (it reopens).
+     A fresh email (not a reply in the case thread, no case reference) that is a complete request about a different
+     person, item or place is a new_request - even if an open case of the same type is waiting for details.
    - status: they ask what is happening with a case.
    - cancel: they no longer need it.
    - close: they confirm it is done / resolved / satisfied.

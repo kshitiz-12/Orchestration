@@ -223,6 +223,47 @@ def test_name_given_in_the_email_is_never_asked_for_again(session: Session, env)
     assert "name?" not in reply
 
 
+def test_new_email_about_another_joiner_is_a_new_case_not_an_update(session: Session, env):
+    tid = _tid(session)
+    first = FakeGemini(_decision(
+        {"type": "new_request", "category": "onboarding", "summary": "Onboarding for Priya Sharma",
+         "details": {"employee_name": "Priya Sharma", "employee_id": "EMP-2041"}},
+    ))
+    _run(session, tid, _mail(session, tid, "Priya Sharma joins, EMP-2041, please set up", subject="New Joining - Priya",
+                             sender="hr.lead@acme.demo", thread="t-priya"), first)
+    priya = session.exec(select(Outcome)).one()
+    assert priya.facts["agent_stage"] == "AWAITING_INFO"
+
+    linked = FakeGemini(_decision(
+        {"type": "update_case", "category": "onboarding", "case_reference": priya.case_reference,
+         "details": {"employee_name": "Amit Kumar", "employee_id": "EMP-2046", "joining_date": "2026-10-01"}},
+    ))
+    _run(session, tid, _mail(session, tid, "Details:\n- Name: Amit Kumar\n- Employee ID: EMP-2046\n- Joining date: 1 Oct",
+                             subject="New Joining - Amit Kumar", sender="hr.lead@acme.demo", thread="t-amit"), linked)
+    cases = {c.title: c for c in session.exec(select(Outcome)).all()}
+    assert len(cases) == 2, "Amit gets his own case"
+    session.refresh(priya)
+    assert priya.facts["details"]["employee_name"] == "Priya Sharma", "Priya's case is untouched"
+
+
+def test_reply_in_the_case_thread_still_updates_it(session: Session, env):
+    tid = _tid(session)
+    first = FakeGemini(_decision(
+        {"type": "new_request", "category": "onboarding", "summary": "Onboarding",
+         "details": {"employee_id": "EMP-2041"}},
+    ))
+    _run(session, tid, _mail(session, tid, "new joiner EMP-2041, please set up", sender="hr.lead@acme.demo", thread="t-x"), first)
+    case = session.exec(select(Outcome)).one()
+    answer = FakeGemini(_decision(
+        {"type": "update_case", "category": "onboarding", "case_reference": case.case_reference,
+         "details": {"employee_name": "Priya Sharma", "joining_date": "2026-10-01"}},
+    ))
+    _run(session, tid, _mail(session, tid, "Her name is Priya Sharma, joining 1 Oct", sender="hr.lead@acme.demo", thread="t-x"), answer)
+    assert len(session.exec(select(Outcome)).all()) == 1
+    session.refresh(case)
+    assert case.facts["details"]["employee_name"] == "Priya Sharma"
+
+
 def test_fill_required_reads_label_lines():
     from app.agent.playbooks import fill_required, missing_questions
 
