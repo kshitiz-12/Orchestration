@@ -146,6 +146,7 @@ def _request_summary(session: Session, outcome: Outcome) -> dict:
         "details": details,
         "missing": facts.get("missing") or facts.get("checklist_missing") or [],
         "teams": facts.get("team_groups") or [],
+        "tasks": facts.get("tasks") or [],
         "notes": {k: facts.get(k) for k in ("progress_note", "blocked_reason", "resolution_note", "reopen_reason", "decision_reason")
                   if facts.get(k)},
         "reopen_count": facts.get("reopen_count") or 0,
@@ -308,7 +309,10 @@ def get_outcome(outcome_id: str, session: SessionDep, tenant_id: TenantDep, _use
     from app.domain.meeting import build_field_contract
 
     facts = dict(outcome.facts or {})
-    field_contract = facts.get("field_contract") or build_field_contract(facts)
+    field_contract = (
+        None if outcome.template_code == "SERVICE_REQUEST"
+        else facts.get("field_contract") or build_field_contract(facts)
+    )
     return {
         "request": _request_summary(session, outcome),
         "outcome": outcome,

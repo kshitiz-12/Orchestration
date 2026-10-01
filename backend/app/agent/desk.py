@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 import secrets
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from sqlalchemy.orm.attributes import flag_modified
@@ -39,6 +39,8 @@ from app.agent.playbooks import (
     missing_questions,
     normalize_category,
     playbook_for,
+    split_tasks,
+    tasks_from_text,
 )
 from app.agent.priority import infer_priority, sla_hours_for
 from app.ai.admin_agent import (
@@ -417,6 +419,7 @@ class AdminDesk:
                 "raw_request": raw[:2000],
                 "desired_outcome": intent.desired_outcome or None,
                 "risk_signals": intent.risk_signals or None,
+                "tasks": list(intent.tasks) or tasks_from_text(raw) or None,
                 "ai_plan": {
                     "category": category,
                     "priority": intent.priority,
@@ -553,25 +556,47 @@ class AdminDesk:
             self._work_order(outcome, route, headline="Visitor pre-registered - add to today's gate manifest", final=True)
             return {"intent": intent, "status": "issued", "outcome": outcome, "passes": passes}
         if action == "fan_out":
-            teams = [route] + [route_for(self.session, self.tenant_id, c) for c in playbook_for(category).fan_out]
+            book = playbook_for(category)
+            cats = [book.category, *book.fan_out]
+            routes = [route] + [route_for(self.session, self.tenant_id, c) for c in book.fan_out]
+            per_team = split_tasks(book.category, facts.get("tasks") or [], cats, facts.get("details"))
             by_inbox: dict[tuple[str, ...], list[Route]] = {}
-            for team in teams:
-                group = by_inbox.setdefault(tuple(team.recipients), [])
+            inbox_cats: dict[tuple[str, ...], list[str]] = {}
+            for cat, team in zip(cats, routes):
+                key = tuple(team.recipients)
+                group = by_inbox.setdefault(key, [])
                 if all(t.department_code != team.department_code for t in group):
                     group.append(team)
-            names = [t.department_name for group in by_inbox.values() for t in group]
-            groups = []
+                inbox_cats.setdefault(key, []).append(cat)
+            requester = (outcome.requester_email or "").strip().lower()
+
+            def raised_it(inbox: tuple[str, ...], group: list[Route]) -> bool:
+                # The requester's own team (its real contact, not an admin fallback) doesn't get a work order for it.
+                return bool(requester) and requester in {r.lower() for r in inbox} and not any(
+                    t.redirected_to_admin for t in group)
+
+            own = {k for k, g in by_inbox.items() if raised_it(k, g)}
+            if len(own) == len(by_inbox):
+                own = set()
+            names, groups, first_inbox = [], [], None
             for inbox, group in by_inbox.items():
                 label = " + ".join(t.department_name for t in group)
-                groups.append({"label": label, "recipients": list(inbox), "done": False})
+                tasks = list(dict.fromkeys(t for c in inbox_cats[inbox] for t in per_team.get(c, [])))
+                if inbox in own:
+                    groups.append({"label": label, "recipients": list(inbox), "done": True, "tasks": tasks,
+                                   "note": "Raised by this team - no work order sent", "raised_by_team": True})
+                    continue
+                names.extend(t.department_name for t in group)
+                first_inbox = first_inbox or inbox
+                groups.append({"label": label, "recipients": list(inbox), "done": False, "tasks": tasks})
                 self._work_order(
-                    outcome, group[0], headline=f"{playbook_for(category).label} - {label} tasks",
-                    final=False, fingerprint_extra=label,
+                    outcome, group[0], headline=f"{book.label} - {label} tasks",
+                    final=False, fingerprint_extra=label, tasks=tasks,
                 )
             day1 = self._day_one_note(outcome) if category == "onboarding" else ""
             _set_facts(self.session, outcome, agent_stage="DISPATCHED", missing=[], teams=names, team_groups=groups,
                        day1_note=day1 or None)
-            self._ticket_status(outcome, "ASSIGNED", assignee=route.recipients[0] if route.recipients else None)
+            self._ticket_status(outcome, "ASSIGNED", assignee=first_inbox[0] if first_inbox else None)
             return {"intent": intent, "status": "dispatched", "outcome": outcome, "team": ", ".join(names), "day1": day1}
         if action == "parking" and (facts.get("details") or {}).get("parking_type") == "employee_permanent":
             _set_facts(self.session, outcome, agent_stage="DISPATCHED", missing=[])
@@ -789,10 +814,14 @@ class AdminDesk:
         self.session.flush()
         return out
 
-    def _briefing(self, outcome: Outcome, headline: str, *, kind: str) -> str:
+    def _briefing(self, outcome: Outcome, headline: str, *, kind: str, tasks: Optional[list[str]] = None) -> str:
         facts = outcome.facts or {}
         name = resolve_requester_name(self.session, outcome=outcome)
         lines = [f"{outcome.case_reference} - {outcome.title}", "", headline, ""]
+        if tasks is None and kind in {"work", "decision"} and not facts.get("team_groups"):
+            tasks = facts.get("tasks")
+        if tasks:
+            lines += ["YOUR TASKS:" if kind == "work" else "Requested:", *[f"{i}. {t}" for i, t in enumerate(tasks, 1)], ""]
         lines.append(f"Requester: {name} <{outcome.requester_email}>" if name not in {"there", "team"} else f"Requester: {outcome.requester_email}")
         lines.append(f"Type: {facts.get('category_label') or label_for(facts.get('agent_category'))}")
         if facts.get("department_name"):
@@ -837,11 +866,23 @@ class AdminDesk:
         who = d.get("employee_name") or d.get("joiner_name") or d.get("name") or "the new joiner"
         when = d.get("joining_date") or d.get("start_date") or d.get("date") or "the joining date"
         where = d.get("location") or d.get("office") or "the office reception"
+        try:
+            today = datetime.now(timezone(timedelta(hours=5, minutes=30))).date()
+            joined = datetime.fromisoformat(str(when)[:10]).date() <= today
+        except ValueError:
+            joined = False
+        if joined:
+            return (
+                f"First-days note for {who} (you can forward this):\n"
+                f"- Joined on {when} at {where}; HR will complete any pending joining formalities.\n"
+                "- The laptop, login, desk and ID / access card are being arranged; until the card is ready, please "
+                "use a visitor pass at reception."
+            )
         return (
             f"Day-1 note for {who} (you can forward this):\n"
             f"- Report on {when} at {where} by 9:30 AM with a government photo ID.\n"
             "- HR will meet you at reception for joining formalities.\n"
-            "- IT will hand over your laptop and login; Facilities will show you your desk and issue your access card."
+            "- Your laptop, login, desk and ID / access card will be ready on day one."
         )
 
     def _preferred_vendor(self, category: str) -> Optional[str]:
@@ -854,14 +895,15 @@ class AdminDesk:
         return None
 
     def _work_order(
-        self, outcome: Outcome, route: Route, *, headline: str, final: bool, fingerprint_extra: str = ""
+        self, outcome: Outcome, route: Route, *, headline: str, final: bool, fingerprint_extra: str = "",
+        tasks: Optional[list[str]] = None,
     ) -> None:
         if not route.recipients:
             return
         note = ""
         if route.redirected_to_admin:
             note = f"(No {route.department_name} contact set yet - sent to you. Add it in Company setup.)"
-        body = self._briefing(outcome, f"{headline}\n{note}".strip(), kind="info" if final else "work")
+        body = self._briefing(outcome, f"{headline}\n{note}".strip(), kind="info" if final else "work", tasks=tasks)
         self.comms.send_case_update(
             outcome=outcome,
             communication_type=CommunicationType.INFORMATION_ONLY.value if final else CommunicationType.ACTION_REQUIRED.value,
@@ -927,7 +969,7 @@ class AdminDesk:
             if missing_refs:
                 draft += "\n\nReference: " + ", ".join(missing_refs)
             for r in results:
-                if r.get("day1") and "Day-1 note" not in draft:
+                if r.get("day1") and r["day1"].split(" for ")[0] not in draft:
                     draft += "\n\n" + r["day1"]
             return draft
         if all(r["status"] == "small_talk" for r in results) and not draft:
@@ -1179,11 +1221,12 @@ class AdminDesk:
         _set_facts(self.session, outcome, agent_stage="BLOCKED", blocked_reason=note, blocked_by=actor,
                    blocked_at=utcnow().isoformat())
         self._ticket_status(outcome, "ON_HOLD")
+        team, _ = self._team_of(outcome, actor)
         if actor != self._admin():
-            self._notify_admin(outcome, kind="at_risk", headline=f"Team reports a problem: {note[:80]}")
+            self._notify_admin(outcome, kind="at_risk", headline=f"{team} reports a problem: {note[:80]}")
         self._tell_requester(
             outcome,
-            f"A quick update on {outcome.case_reference} ({outcome.title}): the team has hit a snag - {note}\n\n"
+            f"A quick update on {outcome.case_reference} ({outcome.title}): {team} has hit a snag - {note}\n\n"
             "We're on it and will update you as soon as it moves.",
         )
         return {"applied": True, "action": "blocked"}
@@ -1197,7 +1240,12 @@ class AdminDesk:
         _set_facts(self.session, outcome, agent_stage="IN_PROGRESS", progress_note=note, progress_by=actor,
                    acknowledged_at=facts.get("acknowledged_at") or utcnow().isoformat())
         self._ticket_status(outcome, "IN_PROGRESS")
-        self._tell_requester(outcome, f"Update on {outcome.case_reference} ({outcome.title}) from the team: {note}")
+        team, _ = self._team_of(outcome, actor)
+        self._order_update(
+            outcome, actor,
+            requester_msg=f"Update on {outcome.case_reference} ({outcome.title}) from {team}: {note}",
+            admin_headline=f"{team} update: {note[:80]}",
+        )
         return {"applied": True, "action": "in_progress"}
 
     def _team_done(self, outcome: Outcome, body: str, actor: str, files: Optional[list[str]] = None) -> dict:
@@ -1218,6 +1266,19 @@ class AdminDesk:
                 if note or files:
                     self._record_evidence(outcome, note, actor, files)
                 _set_facts(self.session, outcome, team_groups=groups, agent_stage="IN_PROGRESS")
+                team = " + ".join(g["label"] for g in mine)
+                tasks = [t for g in mine for t in g.get("tasks") or []]
+                done_lines = "".join(f"\n- {t}" for t in tasks)
+                self._order_update(
+                    outcome, actor,
+                    requester_msg=(
+                        f"Progress on {outcome.case_reference} ({outcome.title}): {team} has finished their part."
+                        + (f"{done_lines}" if done_lines else "")
+                        + (f"\nNote from the team: {note}" if note else "")
+                        + f"\n\nStill in progress: {', '.join(pending)}."
+                    ),
+                    admin_headline=f"{team} done - still waiting on {', '.join(pending)}",
+                )
                 return {"applied": True, "action": "team_done", "pending": pending}
             _set_facts(self.session, outcome, team_groups=groups)
 
@@ -1237,12 +1298,16 @@ class AdminDesk:
             self._tell_requester(outcome, f"About your question ({outcome.case_reference}): {note}")
             self._draft_knowledge(outcome, note, actor)
         else:
-            self._tell_requester(
-                outcome,
-                f"Good news - {outcome.case_reference} ({outcome.title}) has been taken care of."
-                + (f"\nNote from the team: {note}" if note else "")
-                + f"\n\nIf anything is still not right, just reply \"not fixed\" and I'll reopen it. "
-                f"Otherwise it closes automatically in {days} day{'s' if days != 1 else ''}.",
+            team, _ = self._team_of(outcome, actor)
+            self._order_update(
+                outcome, actor,
+                requester_msg=(
+                    f"Good news - {outcome.case_reference} ({outcome.title}) has been taken care of."
+                    + (f"\nNote from {team}: {note}" if note else "")
+                    + f"\n\nIf anything is still not right, just reply \"not fixed\" and I'll reopen it. "
+                    f"Otherwise it closes automatically in {days} day{'s' if days != 1 else ''}."
+                ),
+                admin_headline=f"Completed - {team} finished the last part" if len(groups) > 1 else f"Completed by {team}",
             )
         if evidence == "missing":
             self.comms.send_case_update(
@@ -1349,8 +1414,6 @@ class AdminDesk:
         outcome.priority = new
         start = facts.get("dispatched_at")
         if start:
-            from datetime import datetime
-
             outcome.due_at = datetime.fromisoformat(start) + timedelta(hours=hours)
         self.session.add(outcome)
         _set_facts(self.session, outcome, sla_hours=hours, priority_reason=f"set by {actor}",
@@ -1418,6 +1481,25 @@ class AdminDesk:
             after={"approval": decision, "reason": reason},
             correlation_id=outcome.outcome_id,
         )
+
+    def _team_of(self, outcome: Outcome, actor: str) -> tuple[str, list[str]]:
+        """Which team (and its tasks) a reply came from, so updates say who did what."""
+        actor = (actor or "").lower()
+        for g in (outcome.facts or {}).get("team_groups") or []:
+            if actor in {r.lower() for r in g.get("recipients") or []}:
+                return g.get("label") or "The team", list(g.get("tasks") or [])
+        facts = outcome.facts or {}
+        return facts.get("department_name") or "The team", []
+
+    def _order_update(self, outcome: Outcome, actor: str, *, requester_msg: str, admin_headline: str) -> None:
+        """Every team update reaches the requester (the raising team) and the admin."""
+        self._tell_requester(outcome, requester_msg)
+        admin = self._admin()
+        if not admin or digest_mode() or (actor or "").lower() == admin.lower():
+            return
+        if (outcome.requester_email or "").lower() == admin.lower():
+            return
+        self._notify_admin(outcome, kind="info", headline=admin_headline)
 
     def _tell_requester(self, outcome: Outcome, message: str) -> None:
         if not outcome.requester_email:

@@ -126,6 +126,108 @@ def test_onboarding_fans_out_and_sends_day_one_note(session: Session, env):
     assert "Day-1 note for Sneha Iyer" in reply.body and "Monday 12 Oct" in reply.body
 
 
+_PRIYA = """Hi Admin team,
+
+Please note that Priya Sharma has joined us today.
+
+Details:
+- Name: Priya Sharma
+- Employee ID: EMP-2041
+- Location: 3rd floor, Bengaluru office
+
+Could you please arrange the following:
+1. Laptop, company email ID and system access
+2. A desk/workstation near the marketing team
+3. ID and access card for the office and 3rd floor
+
+Thanks,
+HR Team"""
+
+
+def _priya_case(session, tid, tasks):
+    _set_dept_email(session, "HR", "hr.lead@acme-real.com")
+    _set_dept_email(session, "IT", "it-helpdesk@acme-real.com")
+    _set_dept_email(session, "FACILITIES", "facilities@acme-real.com")
+    fake = FakeGemini(_decision(
+        {"type": "new_request", "category": "onboarding", "summary": "Onboarding for Priya Sharma", "tasks": tasks,
+         "details": {"employee_name": "Priya Sharma", "joining_date": "2026-10-01", "location": "3rd floor, Bengaluru"}},
+    ))
+    _run(session, tid, _mail(session, tid, _PRIYA, subject="New Joining - Priya Sharma", sender="hr.lead@acme-real.com"), fake)
+    return session.exec(select(Outcome)).one()
+
+
+def test_each_team_gets_only_its_own_tasks_and_the_raising_team_gets_none(session: Session, env):
+    tid = _tid(session)
+    case = _priya_case(session, tid, [
+        "Set up Windows laptop with marketing software", "Create company email ID",
+        "Allocate desk near the Marketing team, 3rd floor", "Issue ID and access card for office and 3rd floor",
+    ])
+    it = _mails_to(session, "it-helpdesk@acme-real.com")[-1].body
+    assert "YOUR TASKS:" in it and "1. Set up Windows laptop" in it and "2. Create company email ID" in it
+    assert "desk" not in it.split("Requester:")[0].lower()
+    fac = [m.body for m in _mails_to(session, "facilities@acme-real.com") if "WORK ORDER" in m.subject]
+    assert len(fac) == 1 and "Allocate desk near the Marketing team" in fac[0]
+    assert "access card" not in fac[0].split("Requester:")[0]
+    assert "3. Issue ID and access card" in it, "access cards are an IT category here, so they join IT's list"
+    assert not [m for m in _mails_to(session, "hr.lead@acme-real.com") if "WORK ORDER" in (m.subject or "")], \
+        "HR raised it, so HR gets no work order"
+    hr = next(g for g in case.facts["team_groups"] if g["label"] == "People / HR")
+    assert hr["done"] and hr["raised_by_team"]
+
+    it_order = _mails_to(session, "it-helpdesk@acme-real.com")[-1]
+    _run(session, tid, _mail(session, tid, "on it, laptop being imaged", sender="it-helpdesk@acme-real.com",
+                             subject=f"Re: {it_order.subject}"))
+    assert "from IT Support: on it, laptop being imaged" in _mails_to(session, "hr.lead@acme-real.com")[-1].body
+    assert any("IT Support update" in (m.subject or "") for m in _mails_to(session, ADMIN))
+    _run(session, tid, _mail(session, tid, "done, laptop and email handed over", sender="it-helpdesk@acme-real.com",
+                             subject=f"Re: {it_order.subject}"))
+    hr_update = _mails_to(session, "hr.lead@acme-real.com")[-1].body
+    assert "IT Support has finished their part" in hr_update and "- Set up Windows laptop" in hr_update
+    assert "Still in progress: Facilities & Maintenance" in hr_update
+    assert any("IT Support done - still waiting on Facilities" in (m.subject or "") for m in _mails_to(session, ADMIN))
+    fac_order = [m for m in _mails_to(session, "facilities@acme-real.com") if "WORK ORDER" in m.subject][-1]
+    _run(session, tid, _mail(session, tid, "done, desk 3F-12 allocated", sender="facilities@acme-real.com",
+                             subject=f"Re: {fac_order.subject}"))
+    session.refresh(case)
+    assert case.facts["agent_stage"] == "RESOLVED"
+    assert "Good news" in _mails_to(session, "hr.lead@acme-real.com")[-1].body
+    assert any("Completed - Facilities & Maintenance finished the last part" in (m.subject or "")
+               for m in _mails_to(session, ADMIN))
+
+
+def test_tasks_are_read_from_the_email_list_when_the_ai_gives_none(session: Session, env):
+    tid = _tid(session)
+    _priya_case(session, tid, [])
+    it = _mails_to(session, "it-helpdesk@acme-real.com")[-1].body
+    assert "1. Laptop, company email ID and system access" in it
+    fac = [m.body for m in _mails_to(session, "facilities@acme-real.com") if "WORK ORDER" in m.subject][0]
+    assert "A desk/workstation near the marketing team" in fac
+    assert "2. ID and access card for the office" in it
+    assert "Name: Priya Sharma" not in fac.split("Requester:")[0], "'Key: value' facts are not tasks"
+
+
+def test_split_tasks_defaults_and_unmatched():
+    from app.agent.playbooks import split_tasks
+
+    out = split_tasks("onboarding", ["Arrange a welcome lunch with the team"],
+                      ["onboarding", "it_support", "maintenance", "access_card"], {"employee_name": "Ravi", "joining_date": "12 Oct"})
+    assert out["onboarding"] == ["Arrange a welcome lunch with the team"]
+    assert out["it_support"] == ["Laptop, company email ID and system logins ready for Ravi by 12 Oct"]
+    assert out["access_card"] == ["Issue ID and access card for Ravi"]
+
+
+def test_onboarding_for_someone_who_already_joined_skips_report_on_wording(session: Session, env):
+    tid = _tid(session)
+    fake = FakeGemini(_decision(
+        {"type": "new_request", "category": "onboarding", "summary": "Onboarding for Priya Sharma",
+         "details": {"employee_name": "Priya Sharma", "joining_date": "2020-01-15", "location": "Bengaluru office"}},
+    ))
+    _run(session, tid, _mail(session, tid, "Priya Sharma joined today, please set her up", sender="hr.lead@acme.demo"), fake)
+    reply = _mails_to(session, "hr.lead@acme.demo")[-1]
+    assert "First-days note for Priya Sharma" in reply.body and "Report on" not in reply.body
+    assert reply.body.count("note for Priya Sharma") == 1
+
+
 def test_travel_asks_only_for_what_is_missing(session: Session, env):
     tid = _tid(session)
     fake = FakeGemini(_decision(

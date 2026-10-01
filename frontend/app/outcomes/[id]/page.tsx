@@ -387,7 +387,27 @@ export default function OutcomeDetailPage() {
               <tr>
                 <td className="muted">Teams</td>
                 <td>
-                  {(request.teams || []).map((t: any) => `${t.label}: ${t.done ? "done" : "pending"}`).join(" · ")}
+                  {(request.teams || []).map((t: any) => (
+                    <div key={t.label} style={{ marginBottom: "0.35rem" }}>
+                      <strong>{t.label}</strong>:{" "}
+                      {t.raised_by_team ? "raised the request (no work order)" : t.done ? "done" : "pending"}
+                      {(t.tasks || []).length > 0 && (
+                        <ul style={{ margin: "0.2rem 0 0", paddingLeft: "1.1rem" }}>
+                          {t.tasks.map((x: string) => <li key={x}>{x}</li>)}
+                        </ul>
+                      )}
+                    </div>
+                  ))}
+                </td>
+              </tr>
+            )}
+            {(request.teams || []).length <= 1 && (request.tasks || []).length > 0 && (
+              <tr>
+                <td className="muted">Tasks</td>
+                <td>
+                  <ul style={{ margin: 0, paddingLeft: "1.1rem" }}>
+                    {request.tasks.map((x: string) => <li key={x}>{x}</li>)}
+                  </ul>
                 </td>
               </tr>
             )}

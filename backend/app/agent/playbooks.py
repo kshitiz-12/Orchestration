@@ -398,6 +398,73 @@ def decision_class(category: Optional[str], needs_admin: bool) -> str:
     return "A"
 
 
+_TASK_WORDS: dict[str, re.Pattern] = {
+    "it_support": re.compile(
+        r"laptop|desktop|computer|e-?mail|\bsystem|log-?ins?\b|account|software|\bvpn\b|password|monitor|headset|"
+        r"\bsim\b|mobile|phone|wi-?fi|\bapps?\b|tools? access|\bdata\b|backup", re.I),
+    "access_card": re.compile(r"access card|id card|\bid\b(?= and access)|badge|\bcards?\b|biometric|door access|"
+                              r"floor access|turnstile", re.I),
+    "maintenance": re.compile(r"\bdesk|workstation|\bseat|chair|cabin|furniture|locker|drawer|pedestal|cubicle", re.I),
+    "onboarding": re.compile(r"paperwork|document|induction|orientation|payroll|offer letter|contract|formalit|"
+                             r"background|\bbgv\b|policy|policies|welcome kit|buddy", re.I),
+    "offboarding": re.compile(r"paperwork|document|exit interview|full (?:and|&) final|\bf&f\b|relieving|"
+                              r"experience letter|clearance|formalit|settlement|notice", re.I),
+}
+
+_DEFAULT_TEAM_TASKS: dict[str, dict[str, str]] = {
+    "onboarding": {
+        "onboarding": "Complete joining formalities, documents and induction for {who}",
+        "it_support": "Laptop, company email ID and system logins ready for {who} by {when}",
+        "maintenance": "Desk / workstation ready for {who} by {when}",
+        "access_card": "Issue ID and access card for {who}",
+    },
+    "offboarding": {
+        "offboarding": "Exit formalities, clearance and full & final settlement for {who}",
+        "it_support": "Collect laptop and IT assets from {who}; disable email and system access after {when}",
+        "access_card": "Collect ID / access card from {who} and deactivate it after {when}",
+    },
+}
+
+
+def split_tasks(category: Optional[str], tasks: list[str], team_categories: list[str],
+                details: Optional[dict] = None) -> dict[str, list[str]]:
+    """Give each team on a multi-team request its own to-do list: what was asked, matched by keywords; anything
+    unmatched stays with the owning team (first entry); a team left with nothing gets the playbook's default task."""
+    out: dict[str, list[str]] = {c: [] for c in team_categories}
+    if not team_categories:
+        return out
+    for task in tasks:
+        text = str(task).strip().rstrip(".")
+        if not text:
+            continue
+        scores = {c: len(_TASK_WORDS[c].findall(text)) for c in team_categories if c in _TASK_WORDS}
+        best = max(scores.items(), key=lambda kv: kv[1], default=(None, 0))
+        out[best[0] if best[1] else team_categories[0]].append(text)
+    d = details or {}
+    who = d.get("employee_name") or d.get("joiner_name") or d.get("name") or "the employee"
+    when = (d.get("joining_date") or d.get("last_working_day") or d.get("start_date") or d.get("date")
+            or "the agreed date")
+    defaults = _DEFAULT_TEAM_TASKS.get(normalize_category(category), {})
+    for c, items in out.items():
+        if not items and c in defaults:
+            items.append(defaults[c].format(who=who, when=when))
+    return out
+
+
+_LIST_ITEM = re.compile(r"^\s*(?:\d+[.)]|[-*\u2022])\s+(.+)$")
+_KEY_VALUE = re.compile(r"^[\w /&'-]{1,30}:\s")
+
+
+def tasks_from_text(text: str) -> list[str]:
+    """Fallback when the model gives no task list: the numbered/bulleted asks in the email (not 'Key: value' facts)."""
+    out = []
+    for line in (text or "").splitlines():
+        m = _LIST_ITEM.match(line)
+        if m and not _KEY_VALUE.match(m.group(1)):
+            out.append(m.group(1).strip())
+    return out[:12]
+
+
 def catalogue_for_prompt() -> list[dict[str, Any]]:
     """Compact request-type catalogue the model sees, so it picks real categories and asks the right things."""
     out = []

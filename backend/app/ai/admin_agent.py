@@ -39,10 +39,11 @@ class AgentIntent(BaseModel):
     priority: str = "MEDIUM"
     desired_outcome: str = ""
     risk_signals: list[str] = Field(default_factory=list)
+    tasks: list[str] = Field(default_factory=list)
     # question intents: False when OFFICE_KNOWLEDGE does not hold the answer (no-guess rule)
     answer_verified: bool = True
 
-    @field_validator("risk_signals", mode="before")
+    @field_validator("risk_signals", "tasks", mode="before")
     @classmethod
     def _signals(cls, v: Any) -> list:
         if isinstance(v, str):
@@ -140,6 +141,10 @@ Your job for EACH inbound mail:
    For meeting_room and invoice just capture the intent - specialised flows collect their details.
    - desired_outcome: one line on what "done" looks like for the requester (e.g. "AC cooling again in 4th floor bay").
    - risk_signals: short tags for anything risky you notice (safety, money, access, confidential, external party).
+   - tasks: each concrete action the requester wants done, one short imperative line per action, keeping their
+     specifics (e.g. ["Set up Windows laptop with marketing software", "Create company email ID",
+     "Allocate desk near the Marketing team, 3rd floor", "Issue ID and access card for office and 3rd floor"]).
+     Split combined asks into separate actions so each can go to the right team. Empty when nothing specific was asked.
    - SIMILAR_VERIFIED_CASES are past requests that were completed and verified here. Use them as precedent for the
      category, team and what to ask - but never copy their dates, names or amounts.
 4. priority (impact x urgency): URGENT = safety risk or work stopped for many (fire, smoke, sparks, flooding, gas,
@@ -170,7 +175,7 @@ Your job for EACH inbound mail:
 Return JSON only:
 {"intents":[{"type":"...","category":"...","summary":"short title","details":{},"case_reference":null,
 "missing":[],"needs_admin_decision":false,"decision_reason":"","priority":"MEDIUM","desired_outcome":"",
-"risk_signals":[],"answer_verified":true}],
+"risk_signals":[],"tasks":[],"answer_verified":true}],
 "reply_to_requester":"...","confidence":0.0,"reason_summary":""}
 """
 
