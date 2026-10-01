@@ -34,6 +34,7 @@ from app.agent.playbooks import (
     case_prefix,
     decision_class,
     evidence_hint,
+    fill_required,
     has_playbook,
     label_for,
     missing_questions,
@@ -485,6 +486,14 @@ class AdminDesk:
             f"{text}\n{facts.get('raw_request') or ''}\n{details}"
         ):
             details = {**details, "parking_type": "employee_permanent", "visit_date": details.get("visit_date") or "Permanent"}
+            facts = _set_facts(self.session, outcome, details=details)
+            ticket = self._ticket(outcome)
+            if ticket:
+                ticket.details = details
+                self.session.add(ticket)
+        filled = fill_required(category, details, f"{facts.get('raw_request') or ''}\n{text}")
+        if filled != details:
+            details = filled
             facts = _set_facts(self.session, outcome, details=details)
             ticket = self._ticket(outcome)
             if ticket:

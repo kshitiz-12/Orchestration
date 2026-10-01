@@ -184,8 +184,9 @@ PLAYBOOKS: tuple[Playbook, ...] = (
     Playbook(
         "onboarding", "New joiner onboarding", prefix="ONB", action="fan_out", department="HR",
         fan_out=("it_support", "maintenance", "access_card"),
-        required=((("employee_name", "joiner_name", "name"), "What is the new joiner's name?"),
-                  (("joining_date", "start_date", "date"), "What is their joining date?")),
+        required=((("employee_name", "joiner_name", "name", "new_joiner", "joinee_name", "full_name", "candidate_name",
+                    "employee", "on_behalf_of"), "What is the new joiner's name?"),
+                  (("joining_date", "start_date", "date", "date_of_joining", "doj"), "What is their joining date?")),
         aliases=("new_joiner", "joiner", "new_hire"),
         nice_to_have=("Team / manager, location and laptop type?",),
     ),
@@ -263,6 +264,28 @@ _LOCATION_IN_TEXT = re.compile(
     r"near\s+(?:the\s+)?\w+)",
     re.I,
 )
+
+
+def _label_value(text: str, key: str) -> Optional[str]:
+    label = re.escape(key.replace("_", " ")).replace(r"\ ", r"[\s_-]*")
+    m = re.search(rf"^[\s>*\u2022-]*{label}\s*[:=\-]\s*(.{{1,120}}?)\s*$", text or "", re.I | re.M)
+    return m.group(1).strip() if m else None
+
+
+def fill_required(category: str, details: dict[str, Any], text: str = "") -> dict[str, Any]:
+    """Before asking, use what is already there: a synonym key the model chose, or a 'Name: Priya' line in the
+    email. The value is stored under the playbook's main key so every later step finds it."""
+    out = dict(details or {})
+    for keys, _ in playbook_for(category).required:
+        main = keys[0]
+        if out.get(main) not in (None, "", [], {}):
+            continue
+        value = next((out[k] for k in keys[1:] if out.get(k) not in (None, "", [], {})), None)
+        if value is None:
+            value = next((v for k in keys if (v := _label_value(text, k))), None)
+        if value is not None:
+            out[main] = value
+    return out
 
 
 def missing_questions(category: str, details: dict[str, Any]) -> list[str]:
@@ -474,6 +497,7 @@ def catalogue_for_prompt() -> list[dict[str, Any]]:
             "label": p.label,
             "also_called": list(p.aliases[:6]),
             "needs": [q for _, q in p.required],
+            "detail_keys": [keys[0] for keys, _ in p.required],
             "admin_sign_off": p.sensitive,
             "team": p.department,
         })

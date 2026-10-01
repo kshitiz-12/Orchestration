@@ -206,6 +206,31 @@ def test_tasks_are_read_from_the_email_list_when_the_ai_gives_none(session: Sess
     assert "Name: Priya Sharma" not in fac.split("Requester:")[0], "'Key: value' facts are not tasks"
 
 
+def test_name_given_in_the_email_is_never_asked_for_again(session: Session, env):
+    tid = _tid(session)
+    _set_dept_email(session, "IT", "it-helpdesk@acme-real.com")
+    fake = FakeGemini(_decision(
+        {"type": "new_request", "category": "onboarding", "summary": "Onboarding logistics for Priya Sharma",
+         "details": {"on_behalf_of": "Priya Sharma", "employee_id": "EMP-2041", "location": "3rd floor, Bengaluru"}},
+    ))
+    _run(session, tid, _mail(session, tid, _PRIYA.replace("- Name: Priya Sharma", "- Name: Priya Sharma\n- Joining date: 1 October 2026"),
+                             subject="New Joining - Priya Sharma", sender="hr.lead@acme.demo"), fake)
+    case = session.exec(select(Outcome)).one()
+    assert case.facts["agent_stage"] == "DISPATCHED", case.facts.get("missing")
+    assert case.facts["details"]["employee_name"] == "Priya Sharma"
+    assert case.facts["details"]["joining_date"] == "1 October 2026"
+    reply = _mails_to(session, "hr.lead@acme.demo")[-1].body
+    assert "name?" not in reply
+
+
+def test_fill_required_reads_label_lines():
+    from app.agent.playbooks import fill_required, missing_questions
+
+    filled = fill_required("onboarding", {}, "Details:\n- Name: Ravi Kumar\n- Date of joining: 12 Oct")
+    assert filled["employee_name"] == "Ravi Kumar" and filled["joining_date"] == "12 Oct"
+    assert missing_questions("onboarding", filled) == []
+
+
 def test_split_tasks_defaults_and_unmatched():
     from app.agent.playbooks import split_tasks
 
