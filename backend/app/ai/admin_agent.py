@@ -298,9 +298,50 @@ def build_agent_payload(
     }
 
 
+TEAM_REPLY_INSTRUCTION = """You read a reply from an office team (IT, facilities, HR, security, a vendor or the admin)
+to a work order and decide what it means for the case. Judge by meaning, not keywords; use YOUR_TASKS to see what
+their part is.
+- done: their part is finished or ready ("desk is ready", "laptop handed over", "all set", "good to go",
+  "arranged everything, will hand it over when he arrives" - the work is ready even if a hand-over is still to happen).
+- progress: acknowledged or started but not finished ("on it", "ETA 4 pm", "scheduled for tomorrow", "will do today").
+- blocked: they cannot proceed or need something (a part, approval, access, budget, information, a vendor).
+- message: something to pass to the requester that is not a status (a question for them, instructions, info).
+- unclear: none of the above.
+note: their point in a short clean sentence (no greetings or signatures). Never invent facts.
+Return JSON only: {"action":"done|progress|blocked|message|unclear","note":"","confidence":0.0}"""
+
+TEAM_ACTIONS = {"done", "progress", "blocked", "message", "unclear"}
+
+
+class TeamReply(BaseModel):
+    action: str = "unclear"
+    note: str = ""
+    confidence: float = 0.7
+
+    @field_validator("action", mode="before")
+    @classmethod
+    def _action(cls, v: Any) -> str:
+        a = str(v or "").strip().lower()
+        return a if a in TEAM_ACTIONS else "unclear"
+
+
 class AdminAgent:
     def __init__(self, provider: Any = None):
         self.provider = provider
+
+    def read_team_reply(self, text: str, context: dict) -> Optional[TeamReply]:
+        """What a team's free-text reply means; None when the AI is unavailable (word rules take over)."""
+        if not self.can_reason or not (text or "").strip():
+            return None
+        try:
+            data, _ = self.provider.generate_json(
+                system_instruction=TEAM_REPLY_INSTRUCTION, payload={**context, "REPLY": text[:2000]}, temperature=0.0,
+            )
+            reading = TeamReply.model_validate(data or {})
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("team_reply_reading_failed", error=str(exc)[:300])
+            return None
+        return reading if reading.action != "unclear" and reading.confidence >= 0.5 else None
 
     @property
     def can_reason(self) -> bool:

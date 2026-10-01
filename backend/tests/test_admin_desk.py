@@ -180,7 +180,7 @@ def test_department_done_closes_loop_with_requester(session: Session, env):
     session.refresh(case)
     assert case.facts["agent_stage"] == "RESOLVED"
     assert "taken care of" in _mails_to(session, REQ)[-1].body
-    assert any("Completed by" in m.subject for m in _mails_to(session, ADMIN))
+    assert any("Completed by" in m.body for m in _mails_to(session, ADMIN))
 
 
 def test_status_question_answers_from_case_state(session: Session, env):

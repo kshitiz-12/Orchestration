@@ -113,7 +113,7 @@ def test_team_verbs_move_the_case_without_false_completion(session: Session, env
     _team_says(session, tid, "issue: spare wheel not in stock, need vendor", subject)
     session.refresh(case)
     assert case.facts["agent_stage"] == "BLOCKED" and case.status == "AT_RISK"
-    assert any("AT RISK" in m.subject for m in _mails_to(session, ADMIN))
+    assert any("reports a problem" in m.body for m in _mails_to(session, ADMIN))
 
     _team_says(session, tid, "done, wheel replaced", subject)
     session.refresh(case)
@@ -213,6 +213,37 @@ def test_sweep_reminds_approver_and_auto_closes_resolved(session: Session, env):
     assert sweep_desk_cases(session, tid, now=utcnow() + timedelta(hours=73))["auto_closed"] == 1
     session.refresh(repair)
     assert repair.status == "CLOSED"
+
+
+def test_email_dropped_mid_processing_is_picked_up_again_once(session: Session, env):
+    from app.models.intake import RawEmailEvent
+    from app.services.hold_sweeper import recover_stuck_emails
+
+    tid = _tid(session)
+    ev = _mail(session, tid, "Hi", sender="stuck.user@acme.demo", subject="hi")
+    ev.processing_stage = "AI_INTERPRETATION"
+    ev.created_at = utcnow() - timedelta(minutes=10)
+    session.add(ev)
+    session.commit()
+    fresh = _mail(session, tid, "Hi again", sender="fresh.user@acme.demo", subject="hi")
+    fresh.processing_stage = "AI_INTERPRETATION"
+    session.add(fresh)
+    session.commit()
+
+    assert recover_stuck_emails(session, tid) == [ev.event_id], "only mail stuck for a while is retried"
+    assert session.get(RawEmailEvent, ev.event_id).processing_stage == "COMPLETED"
+    assert len(_mails_to(session, "stuck.user@acme.demo")) == 1
+    assert recover_stuck_emails(session, tid) == []
+    assert len(_mails_to(session, "stuck.user@acme.demo")) == 1
+
+
+def test_times_keep_their_minutes():
+    from datetime import datetime
+
+    from app.engine.event_services import fmt_local
+
+    assert fmt_local(datetime(2026, 10, 2, 10, 6)) == "2 Oct, 10:06 AM"
+    assert fmt_local(datetime(2026, 10, 12, 9, 30)) == "12 Oct, 9:30 AM"
 
 
 def test_kpis_and_list_are_type_neutral(client, session: Session, env, auth_headers):

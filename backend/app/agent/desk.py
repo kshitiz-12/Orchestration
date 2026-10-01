@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Optional
 
 from sqlalchemy.orm.attributes import flag_modified
@@ -127,11 +127,15 @@ _TEAM_PROGRESS_RE = re.compile(
     r"eta\b|by\s+(?:today|tomorrow|eod|\d)|in\s+\d+\s*(?:min|mins|minutes|hours?|hrs?))",
     re.I,
 )
-_DONE_WORDS = r"(?:done|fixed|resolved|completed|closed|sorted|repaired|replaced|delivered|arranged|cleaned|installed|issued)"
+_DONE_WORDS = (r"(?:done|fixed|resolved|complete[d]?|finished|closed|sorted|repaired|replaced|delivered|arranged|"
+               r"cleaned|installed|issued|ready|allocated|provided|configured|created|activated|handed\s+over|"
+               r"set\s*up|prepared|booked|organi[sz]ed|shared|given)")
+_ALL_DONE_RE = re.compile(r"^\s*(?:all|everything)\s+(?:is\s+|are\s+)?(?:done|complete[d]?|finished)\b", re.I)
 
 
 def _is_done_reply(low: str) -> bool:
-    if re.search(rf"\b(?:will|to|not|n'?t|yet\s+to|tomorrow|later|soon)\s+(?:be\s+)?(?:get\s+)?{_DONE_WORDS}\b", low):
+    if re.search(rf"\b(?:will|to|not|n'?t|yet\s+to|tomorrow|later|soon|almost|nearly)\s+(?:be\s+)?(?:get\s+)?"
+                 rf"{_DONE_WORDS}\b", low):
         return False
     return bool(re.search(rf"\b{_DONE_WORDS}\b", low))
 
@@ -206,12 +210,66 @@ def _as_list(value: Any) -> list[str]:
 
 def _details_lines(details: dict) -> list[str]:
     lines = []
+    copies = {"visit_date": ("date", "visit_day", "on"), "visit_time": ("time", "arrival_time")}
     for key, value in details.items():
         if value in (None, "", [], {}):
+            continue
+        if any(details.get(src) == value for src in copies.get(key, ())):
             continue
         shown = ", ".join(_as_list(value)) if isinstance(value, list) else str(value)
         lines.append(f"- {key.replace('_', ' ').capitalize()}: {shown}")
     return lines
+
+
+_IST = timezone(timedelta(hours=5, minutes=30))
+READY_FOR_JOINING = "READY_FOR_JOINING"
+# The day-one handover check goes out once the office day has started.
+_HANDOVER_CHECK_AT = time(9, 30)
+
+
+def _ist_now() -> datetime:
+    return datetime.now(_IST).replace(tzinfo=None)
+
+
+def _ist_to_utc(moment: datetime) -> datetime:
+    return moment - timedelta(hours=5, minutes=30)
+
+
+def joining_day(facts: dict) -> Optional[date]:
+    if facts.get("joining_on"):
+        try:
+            return date.fromisoformat(str(facts["joining_on"]))
+        except ValueError:
+            pass
+    d = facts.get("details") or {}
+    raw = d.get("joining_date") or d.get("start_date") or d.get("date_of_joining") or d.get("doj") or d.get("date")
+    if not raw:
+        return None
+    from app.services.room_booking import parse_meeting_date
+
+    return parse_meeting_date(raw, today=_ist_now().date())
+
+
+def _joiner(facts: dict) -> str:
+    d = facts.get("details") or {}
+    return str(d.get("employee_name") or d.get("joiner_name") or d.get("name") or "the new joiner")
+
+
+def _day_label(day: date) -> str:
+    return f"{day.day} {day:%b %Y}"
+
+
+_SIGNOFF_RE = re.compile(r"^\s*(?:best|kind|warm)?\s*(?:regards|thanks|thank you|cheers|sincerely)\b.*$", re.I)
+
+
+def _before_signoff(draft: str, block: str) -> str:
+    """Put an extra block above the sign-off ("Best regards, / Workplace Team"), not under it."""
+    lines = draft.rstrip().split("\n")
+    for i in range(len(lines) - 1, max(-1, len(lines) - 5), -1):
+        if _SIGNOFF_RE.match(lines[i]):
+            head = "\n".join(lines[:i]).rstrip()
+            return f"{head}\n\n{block}\n\n" + "\n".join(lines[i:])
+    return f"{draft.rstrip()}\n\n{block}"
 
 
 def _normalize_details(details: dict) -> dict:
@@ -634,7 +692,7 @@ class AdminDesk:
             own = {k for k, g in by_inbox.items() if raised_it(k, g)}
             if len(own) == len(by_inbox):
                 own = set()
-            names, groups, first_inbox = [], [], None
+            names, groups, first_inbox, orders = [], [], None, []
             for inbox, group in by_inbox.items():
                 label = " + ".join(t.department_name for t in group)
                 tasks = list(dict.fromkeys(t for c in inbox_cats[inbox] for t in per_team.get(c, [])))
@@ -645,13 +703,18 @@ class AdminDesk:
                 names.extend(t.department_name for t in group)
                 first_inbox = first_inbox or inbox
                 groups.append({"label": label, "recipients": list(inbox), "done": False, "tasks": tasks})
-                self._work_order(
-                    outcome, group[0], headline=f"{book.label} - {label} tasks",
-                    final=False, fingerprint_extra=label, tasks=tasks,
-                )
+                orders.append((group[0], label, tasks))
+            joining = joining_day(facts) if category == "onboarding" else None
+            if joining:
+                _set_facts(self.session, outcome, joining_on=joining.isoformat())
             day1 = self._day_one_note(outcome) if category == "onboarding" else ""
             _set_facts(self.session, outcome, agent_stage="DISPATCHED", missing=[], teams=names, team_groups=groups,
                        day1_note=day1 or None)
+            for team_route, label, tasks in orders:
+                self._work_order(
+                    outcome, team_route, headline=f"{book.label} - {label} tasks",
+                    final=False, fingerprint_extra=label, tasks=tasks,
+                )
             self._ticket_status(outcome, "ASSIGNED", assignee=first_inbox[0] if first_inbox else None)
             return {"intent": intent, "status": "dispatched", "outcome": outcome, "team": ", ".join(names), "day1": day1}
         if action == "parking" and (facts.get("details") or {}).get("parking_type") == "employee_permanent":
@@ -880,7 +943,10 @@ class AdminDesk:
             lines += ["YOUR TASKS:" if kind == "work" else "Requested:", *[f"{i}. {t}" for i, t in enumerate(tasks, 1)], ""]
         lines.append(f"Requester: {name} <{outcome.requester_email}>" if name not in {"there", "team"} else f"Requester: {outcome.requester_email}")
         lines.append(f"Type: {facts.get('category_label') or label_for(facts.get('agent_category'))}")
-        if facts.get("department_name"):
+        working = [g["label"] for g in facts.get("team_groups") or [] if not g.get("raised_by_team")]
+        if working:
+            lines.append(f"Teams working on it: {', '.join(working)}")
+        elif facts.get("department_name"):
             lines.append(f"Team: {facts['department_name']}")
         if outcome.priority and outcome.priority != "MEDIUM":
             lines.append(f"Priority: {outcome.priority.title()}" + (f" ({facts['priority_reason']})" if facts.get("priority_reason") else ""))
@@ -891,7 +957,9 @@ class AdminDesk:
         vendor = self._preferred_vendor(facts.get("agent_category") or "")
         if vendor:
             lines.append(f"Preferred vendor: {vendor}")
-        detail_lines = _details_lines({k: v for k, v in (facts.get("details") or {}).items() if k != "description"})
+        # With a task list, the raw item list would show every team the other teams' work.
+        hide = {"description"} | ({"items", "item", "tasks", "requirements"} if facts.get("tasks") or facts.get("team_groups") else set())
+        detail_lines = _details_lines({k: v for k, v in (facts.get("details") or {}).items() if k not in hide})
         desc = (facts.get("details") or {}).get("description")
         if desc:
             lines += ["", f"What they asked: {desc}"]
@@ -922,12 +990,8 @@ class AdminDesk:
         who = d.get("employee_name") or d.get("joiner_name") or d.get("name") or "the new joiner"
         when = d.get("joining_date") or d.get("start_date") or d.get("date") or "the joining date"
         where = d.get("location") or d.get("office") or "the office reception"
-        try:
-            today = datetime.now(timezone(timedelta(hours=5, minutes=30))).date()
-            joined = datetime.fromisoformat(str(when)[:10]).date() <= today
-        except ValueError:
-            joined = False
-        if joined:
+        day = joining_day(outcome.facts or {})
+        if day and day <= _ist_now().date():
             return (
                 f"First-days note for {who} (you can forward this):\n"
                 f"- Joined on {when} at {where}; HR will complete any pending joining formalities.\n"
@@ -1026,7 +1090,7 @@ class AdminDesk:
                 draft += "\n\nReference: " + ", ".join(missing_refs)
             for r in results:
                 if r.get("day1") and r["day1"].split(" for ")[0] not in draft:
-                    draft += "\n\n" + r["day1"]
+                    draft = _before_signoff(draft, r["day1"])
             return draft
         if all(r["status"] == "small_talk" for r in results) and not draft:
             return ""
@@ -1229,6 +1293,26 @@ class AdminDesk:
             self._close(outcome, f"Closed by {actor}", closure="administrative")
             self._tell_requester(outcome, f"{outcome.case_reference} ({outcome.title}) is now closed. Reply here if you need anything else.")
             return {"applied": True, "action": "close"}
+        if not re.match(r"^\s*cancel", low) and facts.get("agent_stage") != "RESOLVED":
+            team, tasks = self._team_of(outcome, actor)
+            reading = self.agent.read_team_reply(body, {
+                "CASE": f"{outcome.case_reference} - {outcome.title}",
+                "TYPE": facts.get("category_label") or facts.get("agent_category"),
+                "STAGE": facts.get("agent_stage"),
+                "TEAM": team,
+                "YOUR_TASKS": tasks or facts.get("tasks") or [],
+            })
+            if reading:
+                note = reading.note.strip() or None
+                if reading.action == "done":
+                    return self._team_done(outcome, body, actor, files, note=note)
+                if reading.action == "progress":
+                    return self._team_progress(outcome, body, actor, note=note)
+                if reading.action == "blocked":
+                    return self._team_blocked(outcome, body, actor, note=note)
+                if reading.action == "message" and note:
+                    self._tell_requester(outcome, f"Message about {outcome.case_reference} ({outcome.title}) from {team}: {note}")
+                    return {"applied": True, "action": "message"}
         if _TEAM_ISSUE_RE.match(body):
             return self._team_blocked(outcome, body, actor)
         if _TEAM_PROGRESS_RE.match(body):
@@ -1270,8 +1354,8 @@ class AdminDesk:
         )
         return {"applied": True, "action": "reject"}
 
-    def _team_blocked(self, outcome: Outcome, body: str, actor: str) -> dict:
-        note = re.sub(r"^\s*(?:issue|problem|blocked|on\s+hold)\s*[:\-,]?\s*", "", body, flags=re.I).strip()[:400]
+    def _team_blocked(self, outcome: Outcome, body: str, actor: str, note: Optional[str] = None) -> dict:
+        note = (note or re.sub(r"^\s*(?:issue|problem|blocked|on\s+hold)\s*[:\-,]?\s*", "", body, flags=re.I).strip())[:400]
         outcome.status = OutcomeStatus.AT_RISK.value
         self.session.add(outcome)
         _set_facts(self.session, outcome, agent_stage="BLOCKED", blocked_reason=note, blocked_by=actor,
@@ -1287,8 +1371,8 @@ class AdminDesk:
         )
         return {"applied": True, "action": "blocked"}
 
-    def _team_progress(self, outcome: Outcome, body: str, actor: str) -> dict:
-        note = body.strip().splitlines()[0][:300]
+    def _team_progress(self, outcome: Outcome, body: str, actor: str, note: Optional[str] = None) -> dict:
+        note = (note or body.strip().splitlines()[0])[:300]
         facts = outcome.facts or {}
         if outcome.status == OutcomeStatus.AT_RISK.value:
             outcome.status = OutcomeStatus.ACTIVE.value
@@ -1304,20 +1388,32 @@ class AdminDesk:
         )
         return {"applied": True, "action": "in_progress"}
 
-    def _team_done(self, outcome: Outcome, body: str, actor: str, files: Optional[list[str]] = None) -> dict:
+    def _team_done(self, outcome: Outcome, body: str, actor: str, files: Optional[list[str]] = None,
+                   note: Optional[str] = None) -> dict:
         facts = outcome.facts or {}
         files = files or []
-        note = re.sub(r"^\s*(?:it'?s\s+|all\s+)?(?:done|fixed|resolved|completed|closed)\b[\s,.:\-]*", "", body, flags=re.I).strip()
+        note = note or re.sub(r"^\s*(?:it'?s\s+|all\s+)?(?:done|fixed|resolved|completed|closed)\b[\s,.:\-]*", "", body,
+                              flags=re.I).strip()
         if facts.get("agent_stage") == "RESOLVED":
             return self._add_evidence(outcome, note or body, actor, files)
         groups = [dict(g) for g in facts.get("team_groups") or []]
         admin = self._admin()
-        if len(groups) > 1 and actor != admin:
-            mine = [g for g in groups if actor in (g.get("recipients") or [])]
+        who = (actor or "").lower()
+        mine = [g for g in groups if not g.get("done") and who in {r.lower() for r in g.get("recipients") or []}]
+        # The admin finishes the whole job only when not standing in for a team that is still pending
+        # (e.g. IT has no inbox yet), or when they say so outright.
+        on_a_team = any(who in {r.lower() for r in g.get("recipients") or []} for g in groups)
+        acting_as_team = on_a_team and not _ALL_DONE_RE.match(body)
+        if len(groups) > 1 and (who != (admin or "").lower() or acting_as_team):
             for g in mine:
                 g["done"] = True
                 g["note"] = note[:300] or None
             pending = [g["label"] for g in groups if not g.get("done")]
+            if pending and not mine:
+                # A team that already finished (or someone outside the job) can't close the other teams' work.
+                if note or files:
+                    self._record_evidence(outcome, note, actor, files)
+                return {"applied": True, "action": "team_done", "pending": pending}
             if mine and pending:
                 if note or files:
                     self._record_evidence(outcome, note, actor, files)
@@ -1333,10 +1429,15 @@ class AdminDesk:
                         + (f"\nNote from the team: {note}" if note else "")
                         + f"\n\nStill in progress: {', '.join(pending)}."
                     ),
-                    admin_headline=f"{team} done - still waiting on {', '.join(pending)}",
+                    admin_headline=f"{team} done - still waiting on {', '.join(pending)}" + (f" ({note})" if note else ""),
                 )
                 return {"applied": True, "action": "team_done", "pending": pending}
             _set_facts(self.session, outcome, team_groups=groups)
+
+        if facts.get("agent_category") == "onboarding" and not facts.get("handover_check_at"):
+            joining = joining_day(facts)
+            if joining and joining > _ist_now().date():
+                return self._ready_for_joining(outcome, actor, note, files, groups, joining)
 
         hint = evidence_hint(facts.get("agent_category"))
         if files or len(note.split()) >= 3:
@@ -1363,7 +1464,8 @@ class AdminDesk:
                     + f"\n\nIf anything is still not right, just reply \"not fixed\" and I'll reopen it. "
                     f"Otherwise it closes automatically in {days} day{'s' if days != 1 else ''}."
                 ),
-                admin_headline=f"Completed - {team} finished the last part" if len(groups) > 1 else f"Completed by {team}",
+                admin_headline=(f"Completed - {team} finished the last part" if len(groups) > 1 else f"Completed by {team}")
+                + (f": {note}" if note else ""),
             )
         if evidence == "missing":
             self.comms.send_case_update(
@@ -1380,9 +1482,84 @@ class AdminDesk:
                 subject_hint="Completion note needed",
                 suppress_fingerprint=f"proof:{outcome.outcome_id}:{facts.get('reopen_count') or 0}",
             )
-        if admin and actor != admin and not digest_mode():
-            self._notify_admin(outcome, kind="info", headline=f"Completed by {actor}")
+        if facts.get("knowledge_gap") and note and admin and actor != admin and not digest_mode():
+            self._notify_admin(outcome, kind="info", headline=f"Answered by {actor}")
         return {"applied": True, "action": "done", "evidence": evidence}
+
+    def _ready_for_joining(self, outcome: Outcome, actor: str, note: str, files: list[str], groups: list[dict],
+                           joining: date) -> dict:
+        """Everything is prepared but the joiner hasn't arrived: hold the case open for the day-one handover."""
+        facts = outcome.facts or {}
+        if note or files:
+            self._record_evidence(outcome, note, actor, files)
+        if facts.get("agent_stage") == READY_FOR_JOINING:
+            return {"applied": True, "action": "ready_noted"}
+        for g in groups:
+            if not g.get("done"):
+                g["done"] = True
+                g["note"] = (note or "")[:300] or None
+        who, when = _joiner(facts), _day_label(joining)
+        outcome.due_at = _ist_to_utc(datetime.combine(joining, time(18, 0)))
+        self.session.add(outcome)
+        _set_facts(self.session, outcome, team_groups=groups, agent_stage=READY_FOR_JOINING, ready_at=utcnow().isoformat(),
+                   joining_on=joining.isoformat(), progress_note=f"Everything ready - handover on {when}")
+        working = [g for g in groups if not g.get("raised_by_team")]
+        lines = [
+            f"- {g['label']}: {'; '.join(g.get('tasks') or []) or 'their part'}" + (f" (note: {g['note']})" if g.get("note") else "")
+            for g in working
+        ]
+        self._order_update(
+            outcome, actor,
+            requester_msg=(
+                f"Everything for {who} is ready ahead of the joining day ({when}) - {outcome.case_reference}:\n"
+                + "\n".join(lines)
+                + f"\n\nOn {when} I'll ask the teams to confirm they've handed everything over to {who}, "
+                "and I'll confirm here once that's done."
+            ),
+            admin_headline=f"Ready for joining on {when} - handover check on the day" + (f" ({note})" if note else ""),
+        )
+        return {"applied": True, "action": "ready_for_joining", "joining_on": joining.isoformat()}
+
+    def start_handover_check(self, outcome: Outcome, now: Optional[datetime] = None) -> bool:
+        """On the joining day, ask each team to confirm the handover; the case resolves once they all do."""
+        facts = outcome.facts or {}
+        joining = joining_day(facts)
+        now = now or utcnow()
+        local = now + timedelta(hours=5, minutes=30)
+        if (facts.get("agent_stage") != READY_FOR_JOINING or facts.get("handover_check_at") or not joining
+                or local < datetime.combine(joining, _HANDOVER_CHECK_AT)):
+            return False
+        who = _joiner(facts)
+        groups = [dict(g) for g in facts.get("team_groups") or []]
+        working = [g for g in groups if not g.get("raised_by_team")]
+        for g in working:
+            g["prep_note"], g["note"], g["done"] = g.get("note"), None, False
+        outcome.due_at = max(_ist_to_utc(datetime.combine(joining, time(18, 0))), now + timedelta(hours=4))
+        self.session.add(outcome)
+        _set_facts(self.session, outcome, team_groups=groups, agent_stage="DISPATCHED", handover_check_at=now.isoformat(),
+                   dispatched_at=now.isoformat(), sla_reminded_at=None, sla_escalated_at=None, progress_note=None)
+        for g in working:
+            self.comms.send_case_update(
+                outcome=outcome,
+                communication_type=CommunicationType.ACTION_REQUIRED.value,
+                body=self._briefing(
+                    outcome,
+                    f"{who} joins today. Please hand everything over and reply \"handed over\" "
+                    "(or \"issue: <what is blocking>\").",
+                    kind="work", tasks=g.get("tasks"),
+                ),
+                recipients=list(g.get("recipients") or []),
+                action_label="WORK ORDER",
+                subject_hint=f"Handover today - {g['label']}",
+                suppress_fingerprint=f"handover:{outcome.outcome_id}:{g['label']}",
+            )
+        names = ", ".join(g["label"] for g in working) or "the teams"
+        self._tell_requester(
+            outcome,
+            f"{who} joins today ({outcome.case_reference}). I've asked {names} to confirm the handover "
+            "and will update you here once it's done.",
+        )
+        return True
 
     def _draft_knowledge(self, outcome: Outcome, answer: str, actor: str) -> None:
         """A human's answer becomes a draft FAQ; the AI only uses it once an admin approves it (governed learning)."""
@@ -1517,7 +1694,9 @@ class AdminDesk:
         if status == "issued":
             passes = ", ".join(f"{p['name']} ({p['pass_code']})" for p in result.get("passes", []))
             return f"{outcome.case_reference} is approved and your visitors are registered: {passes}."
-        team = (outcome.facts or {}).get("department_name") or "the team"
+        facts = outcome.facts or {}
+        team = ", ".join(facts.get("teams") or []) if status == "dispatched" and facts.get("team_groups") else ""
+        team = team or facts.get("department_name") or "the team"
         return f"{outcome.case_reference} ({outcome.title}) is approved and assigned to {team}. I'll update you once it's done."
 
     def _decide_approval(self, outcome: Outcome, decision: str, actor: str, reason: str = "") -> None:

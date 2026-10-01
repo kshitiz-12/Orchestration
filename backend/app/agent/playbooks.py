@@ -190,7 +190,7 @@ PLAYBOOKS: tuple[Playbook, ...] = (
         aliases=("new_joiner", "joiner", "new_hire"),
         nice_to_have=("Team / manager, location and laptop type?",),
     ),
-    Playbook("offboarding", "Employee exit", prefix="ONB", sensitive=True, action="fan_out", department="HR",
+    Playbook("offboarding", "Employee exit", prefix="EXT", sensitive=True, action="fan_out", department="HR",
              fan_out=("it_support", "access_card"), aliases=("exit", "last_working_day", "relieving")),
     Playbook("hr_query", "HR query", prefix="HRQ", sensitive=True, department="HR",
              aliases=("hr", "leave", "payslip", "attendance")),

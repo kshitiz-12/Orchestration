@@ -487,7 +487,7 @@ class ProcessingPipeline:
         if is_service_case(outcome):
             from app.services.admin_commands import admin_reply_text
 
-            result = AdminDesk(self.session, self.tenant_id, self.comms).apply_team_reply(
+            result = AdminDesk(self.session, self.tenant_id, self.comms, self.llm.provider).apply_team_reply(
                 outcome, admin_reply_text(event.body_text or event.body_for_ai or ""), sender,
                 attachments=[str(a.get("filename") or "") for a in (event.attachments or []) if isinstance(a, dict)],
             )

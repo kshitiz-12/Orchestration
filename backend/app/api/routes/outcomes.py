@@ -116,6 +116,7 @@ _STAGE_LABELS = {
     "DISPATCHED": "With the team",
     "IN_PROGRESS": "Team is working on it",
     "BLOCKED": "Team is blocked",
+    "READY_FOR_JOINING": "Ready - handover on the joining day",
     "RESOLVED": "Done - waiting for requester to confirm",
     "COMPLETED": "Done",
     "CLOSED": "Closed",

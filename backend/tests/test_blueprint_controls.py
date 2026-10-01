@@ -40,7 +40,7 @@ def test_bare_done_asks_for_proof_and_proof_makes_closure_verified(session: Sess
     _team(session, tid, "done", subject)
     session.refresh(case)
     assert case.facts["agent_stage"] == "RESOLVED" and case.facts["evidence_status"] == "missing"
-    assert any("Completion note needed" in m.subject or "PROOF NEEDED" in m.subject for m in _mails_to(session, TEAM))
+    assert any("To close it as verified" in m.body for m in _mails_to(session, TEAM))
 
     _team(session, tid, "replaced the broken wheel with a new castor", subject)
     session.refresh(case)

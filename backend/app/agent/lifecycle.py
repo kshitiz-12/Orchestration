@@ -4,6 +4,7 @@
 - pending approval: one reminder to the approver
 - waiting on the requester: one nudge, then close politely if they never answer
 - resolved: closes on its own after a quiet period (the requester was told and can reply "not fixed")
+- onboarding ready before the joining day: on that day, each team is asked to confirm the handover
 
 Every step fires at most once per case (timestamps in facts), so the sweep is safe to run every few minutes.
 """
@@ -46,7 +47,7 @@ def sweep_desk_cases(
     now: Optional[datetime] = None,
     comms: Optional[CommunicationService] = None,
 ) -> dict[str, int]:
-    from app.agent.desk import SERVICE_TEMPLATE, AdminDesk, _set_facts
+    from app.agent.desk import READY_FOR_JOINING, SERVICE_TEMPLATE, AdminDesk, _set_facts
     from app.agent.directory import route_for_case
 
     now = now or utcnow()
@@ -56,7 +57,8 @@ def sweep_desk_cases(
 
         comms = default_comms(session, tenant_id)
     desk = AdminDesk(session, tenant_id, comms)
-    counts = {"reminded": 0, "escalated": 0, "approval_reminders": 0, "nudged": 0, "closed_no_reply": 0, "auto_closed": 0}
+    counts = {"reminded": 0, "escalated": 0, "approval_reminders": 0, "nudged": 0, "closed_no_reply": 0, "auto_closed": 0,
+              "handover_checks": 0}
     rows = session.exec(
         select(Outcome).where(Outcome.tenant_id == tenant_id, Outcome.template_code == SERVICE_TEMPLATE)
     ).all()
@@ -68,6 +70,9 @@ def sweep_desk_cases(
                 counts_delta = _sla_followups(desk, outcome, facts, now, route_for_case, _set_facts)
                 for k, v in counts_delta.items():
                     counts[k] += v
+            elif stage == READY_FOR_JOINING and outcome.status in _OPEN:
+                if desk.start_handover_check(outcome, now):
+                    counts["handover_checks"] += 1
             elif stage == "AWAITING_APPROVAL" and outcome.status in _OPEN:
                 asked = _ts(facts.get("approval_requested_at")) or outcome.updated_at or outcome.created_at
                 hours = float(settings.desk_approval_reminder_hours or 8)

@@ -178,21 +178,90 @@ def test_each_team_gets_only_its_own_tasks_and_the_raising_team_gets_none(sessio
     _run(session, tid, _mail(session, tid, "on it, laptop being imaged", sender="it-helpdesk@acme-real.com",
                              subject=f"Re: {it_order.subject}"))
     assert "from IT Support: on it, laptop being imaged" in _mails_to(session, "hr.lead@acme-real.com")[-1].body
-    assert any("IT Support update" in (m.subject or "") for m in _mails_to(session, ADMIN))
+    assert any("IT Support update" in (m.body or "") for m in _mails_to(session, ADMIN))
     _run(session, tid, _mail(session, tid, "done, laptop and email handed over", sender="it-helpdesk@acme-real.com",
                              subject=f"Re: {it_order.subject}"))
     hr_update = _mails_to(session, "hr.lead@acme-real.com")[-1].body
     assert "IT Support has finished their part" in hr_update and "- Set up Windows laptop" in hr_update
     assert "Still in progress: Facilities & Maintenance" in hr_update
-    assert any("IT Support done - still waiting on Facilities" in (m.subject or "") for m in _mails_to(session, ADMIN))
+    assert any("IT Support done - still waiting on Facilities" in (m.body or "") for m in _mails_to(session, ADMIN))
     fac_order = [m for m in _mails_to(session, "facilities@acme-real.com") if "WORK ORDER" in m.subject][-1]
     _run(session, tid, _mail(session, tid, "done, desk 3F-12 allocated", sender="facilities@acme-real.com",
                              subject=f"Re: {fac_order.subject}"))
     session.refresh(case)
     assert case.facts["agent_stage"] == "RESOLVED"
     assert "Good news" in _mails_to(session, "hr.lead@acme-real.com")[-1].body
-    assert any("Completed - Facilities & Maintenance finished the last part" in (m.subject or "")
+    assert any("Completed - Facilities & Maintenance finished the last part" in (m.body or "")
                for m in _mails_to(session, ADMIN))
+
+
+def test_admin_standing_in_for_a_team_only_finishes_that_team(session: Session, env):
+    tid = _tid(session)
+    _set_dept_email(session, "HR", "hr.lead@acme-real.com")
+    _set_dept_email(session, "FACILITIES", "facilities@acme-real.com")
+    fake = FakeGemini(_decision(
+        {"type": "new_request", "category": "onboarding", "summary": "Onboarding for Naman Kumar",
+         "details": {"employee_name": "Naman Kumar", "joining_date": "2026-10-02"}},
+    ))
+    _run(session, tid, _mail(session, tid, _PRIYA, subject="New Joining - Naman", sender="hr.lead@acme-real.com"), fake)
+    case = session.exec(select(Outcome)).one()
+    it_order = [m for m in _mails_to(session, ADMIN) if "WORK ORDER" in m.subject][-1]
+    _run(session, tid, _mail(session, tid, "i have arranged everything, will hand over when he arrives",
+                             sender=ADMIN, subject=f"Re: {it_order.subject}"))
+    session.refresh(case)
+    assert case.facts["agent_stage"] != "RESOLVED", "Facilities hasn't finished yet"
+    assert "Still in progress: Facilities" in _mails_to(session, "hr.lead@acme-real.com")[-1].body
+
+    _run(session, tid, _mail(session, tid, "i have arranged everything again", sender=ADMIN, subject=f"Re: {it_order.subject}"))
+    session.refresh(case)
+    assert case.facts["agent_stage"] != "RESOLVED", "a repeat reply from a finished team doesn't close the case"
+
+    fac_order = [m for m in _mails_to(session, "facilities@acme-real.com") if "WORK ORDER" in m.subject][-1]
+    _run(session, tid, _mail(session, tid, "desk is ready", sender="facilities@acme-real.com",
+                             subject=f"Re: {fac_order.subject}"))
+    session.refresh(case)
+    assert case.facts["agent_stage"] == "RESOLVED"
+    assert "Good news" in _mails_to(session, "hr.lead@acme-real.com")[-1].body
+
+
+def test_team_replies_are_read_by_the_ai_not_keywords(session: Session, env):
+    tid = _tid(session)
+    _set_dept_email(session, "HR", "hr.lead@acme-real.com")
+    _set_dept_email(session, "IT", "it-helpdesk@acme-real.com")
+    _set_dept_email(session, "FACILITIES", "facilities@acme-real.com")
+    fake = FakeGemini(_decision(
+        {"type": "new_request", "category": "onboarding", "summary": "Onboarding for Naman Kumar",
+         "details": {"employee_name": "Naman Kumar", "joining_date": "2026-10-02"}},
+    ))
+    _run(session, tid, _mail(session, tid, _PRIYA, subject="New Joining - Naman", sender="hr.lead@acme-real.com"), fake)
+    case = session.exec(select(Outcome)).one()
+    fac_order = [m for m in _mails_to(session, "facilities@acme-real.com") if "WORK ORDER" in m.subject][-1]
+
+    reader = FakeGemini({"action": "done", "note": "Workstation 3F-12 is good to go", "confidence": 0.95})
+    _run(session, tid, _mail(session, tid, "the workstation is good to go, 3F-12", sender="facilities@acme-real.com",
+                             subject=f"Re: {fac_order.subject}"), reader)
+    assert reader.payloads and reader.payloads[0]["YOUR_TASKS"] == ["A desk/workstation near the marketing team"]
+    session.refresh(case)
+    fac = next(g for g in case.facts["team_groups"] if g["label"].startswith("Facilities"))
+    assert fac["done"] and fac["note"] == "Workstation 3F-12 is good to go"
+    assert "Facilities & Maintenance has finished their part" in _mails_to(session, "hr.lead@acme-real.com")[-1].body
+
+    it_order = _mails_to(session, "it-helpdesk@acme-real.com")[-1]
+    reader = FakeGemini({"action": "blocked", "note": "Waiting for laptop stock from the vendor", "confidence": 0.9})
+    _run(session, tid, _mail(session, tid, "laptops are out of stock, vendor delivery friday", sender="it-helpdesk@acme-real.com",
+                             subject=f"Re: {it_order.subject}"), reader)
+    session.refresh(case)
+    assert case.facts["agent_stage"] == "BLOCKED"
+    assert "Waiting for laptop stock from the vendor" in _mails_to(session, "hr.lead@acme-real.com")[-1].body
+
+
+def test_done_phrasings():
+    from app.agent.desk import _is_done_reply
+
+    for text in ("desk is ready", "laptop handed over", "email id created", "access card issued", "all set up"):
+        assert _is_done_reply(text), text
+    for text in ("will be ready by 4", "not ready yet", "almost ready"):
+        assert not _is_done_reply(text), text
 
 
 def test_tasks_are_read_from_the_email_list_when_the_ai_gives_none(session: Session, env):

@@ -18,6 +18,16 @@ from app.services.intake import IdempotentActionService
 logger = get_logger(__name__)
 
 
+def _rfc_message_id(provider_id: Optional[str]) -> Optional[str]:
+    """The Message-ID recipients see: CloudMailin's API hands back a bare id that goes out as <id@cloudmta.net>."""
+    pid = (provider_id or "").strip()
+    if not pid or pid.startswith("cloudmailin-api:"):
+        return None
+    if pid.startswith("<"):
+        return pid
+    return f"<{pid}>" if "@" in pid else f"<{pid}@cloudmta.net>"
+
+
 def humanize_email_local(email: str) -> str:
     local = (email or "").split("@")[0].strip()
     if not local:
@@ -380,6 +390,16 @@ class CommunicationService:
             polish=polish,
         )
 
+    def _earlier_mails(self, outcome: Outcome, recipients: list[str]) -> list[Communication]:
+        """Mail already sent on this case to exactly these people, oldest first."""
+        want = sorted(r.strip().lower() for r in recipients)
+        rows = self.session.exec(
+            select(Communication)
+            .where(Communication.outcome_id == outcome.outcome_id)
+            .order_by(Communication.created_at)  # type: ignore[arg-type]
+        ).all()
+        return [m for m in rows if sorted(str(r).strip().lower() for r in (m.recipients or [])) == want]
+
     def send_case_update(
         self,
         *,
@@ -437,9 +457,24 @@ class CommunicationService:
                 event_id = event.event_id
                 in_reply_to = event.provider_message_id or event.gmail_message_id
                 thread_id = thread_id or event.provider_conversation_id or event.gmail_thread_id
+        requester = (outcome.requester_email or "").strip().lower()
+        if outcome.template_code == "SERVICE_REQUEST":
+            earlier = self._earlier_mails(outcome, recipients)
+            if earlier:
+                # Same subject and a reply chain, so every update for this case lands in one conversation.
+                subject = re.sub(r"^\s*(?:re\s*:\s*)+", "", earlier[0].subject or "", flags=re.I) or subject
+                ids = [i for i in (_rfc_message_id(m.provider_message_id or m.gmail_message_id) for m in earlier) if i]
+                if ids:
+                    in_reply_to = ids[-1]
+                    if [r.strip().lower() for r in recipients] != [requester]:
+                        thread_id = ids[0]
+            elif label not in {"WORK ORDER", "DONE"} and outcome.title:
+                # This subject heads the whole thread, so use the case title rather than this one update's headline.
+                subject = short_case_subject(
+                    case_reference=outcome.case_reference or "", action_label=label, summary=outcome.title, title=outcome.title,
+                )
         key_suffix = suppress_fingerprint or event_id or hash(body)
         polish = None
-        requester = (outcome.requester_email or "").strip().lower()
         # Desk (non-room) cases already write human mail; the rewriter is tuned for room bookings.
         if requester and [r.strip().lower() for r in recipients] == [requester] and outcome.template_code != "SERVICE_REQUEST":
             polish = {

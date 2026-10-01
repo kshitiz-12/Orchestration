@@ -105,7 +105,7 @@ def local_now(now: Optional[datetime] = None) -> datetime:
 def fmt_local(dt: Optional[datetime]) -> str:
     if not dt:
         return ""
-    return re.sub(r"\b0(\d)", r"\1", dt.strftime("%d %b, %I:%M %p"))
+    return re.sub(r"(?<![:\d])0(\d)", r"\1", dt.strftime("%d %b, %I:%M %p"))
 
 
 def readiness_deadline(facts: dict[str, Any]) -> Optional[datetime]:

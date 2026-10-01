@@ -161,6 +161,61 @@ def _mail(
     )
 
 
+_UNFINISHED = {"INTAKE", "IDEMPOTENCY", "QUEUED", "AI_INTERPRETATION", "SCHEMA_VALIDATION", "CONTEXT_RETRIEVAL",
+               "RULES", "OUTCOME_ENGINE"}
+
+
+def recover_stuck_emails(session: Session, tenant_id: str, *, stale_minutes: int = 4, max_attempts: int = 3) -> list[str]:
+    """Mail processing runs inside the web process, so a restart (e.g. a deploy) can drop an email half-way.
+    Pick those up again; outbound mails are idempotent, so a re-run never double-sends."""
+    from app.engine.pipeline import ProcessingPipeline
+    from app.models.intake import ProcessingJob, RawEmailEvent
+
+    now = utcnow()
+    rows = session.exec(
+        select(RawEmailEvent).where(
+            RawEmailEvent.tenant_id == tenant_id,
+            RawEmailEvent.processing_stage.in_(_UNFINISHED),  # type: ignore[attr-defined]
+            RawEmailEvent.created_at < now - timedelta(minutes=stale_minutes),
+            RawEmailEvent.created_at > now - timedelta(hours=24),
+        )
+    ).all()
+    done = []
+    for event in rows:
+        job = session.exec(select(ProcessingJob).where(ProcessingJob.event_id == event.event_id)).first()
+        if job:
+            if job.status in {"SUCCEEDED", "DEAD_LETTER"} or job.attempts >= max_attempts:
+                continue
+            if job.status == "RUNNING" and job.locked_at and job.locked_at > now - timedelta(minutes=stale_minutes):
+                continue
+            if job.status == "PENDING" and job.available_at and job.available_at > now:
+                continue
+            job.status, job.locked_at, job.attempts = "RUNNING", now, job.attempts + 1
+            session.add(job)
+            session.commit()
+        try:
+            result = ProcessingPipeline(session, tenant_id).process_event(event.event_id)
+            if job:
+                job.status, job.completed_at, job.last_error = "SUCCEEDED", utcnow(), None
+                session.add(job)
+                session.commit()
+            logger.info("stuck_mail_recovered", event_id=event.event_id, status=result.get("status"))
+            done.append(event.event_id)
+        except Exception as exc:  # noqa: BLE001
+            session.rollback()
+            logger.warning("stuck_mail_retry_failed", event_id=event.event_id, error=str(exc))
+            if job:
+                job = session.get(ProcessingJob, job.job_id)
+                job.status = "DEAD_LETTER" if job.attempts >= max_attempts else "PENDING"
+                job.last_error = str(exc)[:4000]
+                session.add(job)
+            else:
+                event.processing_stage = "FAILED"
+                session.add(event)
+            session.commit()
+    return done
+
+
 def run_all_sweeps(session: Session, tenant_id: str) -> dict[str, Any]:
     from app.services.sla import tick_sla
 
@@ -184,6 +239,11 @@ def run_all_sweeps(session: Session, tenant_id: str) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         session.rollback()
         logger.warning("desk_sweep_failed", error=str(exc))
+    try:
+        out["stuck_mail"] = recover_stuck_emails(session, tenant_id)
+    except Exception as exc:  # noqa: BLE001
+        session.rollback()
+        logger.warning("stuck_mail_recovery_failed", error=str(exc))
     try:
         out["sla"] = tick_sla(session, tenant_id)
     except Exception as exc:  # noqa: BLE001
