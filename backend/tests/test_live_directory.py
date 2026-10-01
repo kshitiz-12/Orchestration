@@ -253,6 +253,38 @@ def test_catering_needs_approval_cafeteria_head_approves(session: Session, live)
     assert "Lunch for 20 served" in _mails_to(session, EMP)[-1].body
 
 
+def test_catering_date_given_later_waits_for_approval_and_is_due_by_the_meal(session: Session, live):
+    tid = live
+    _run(session, tid, _mail(session, tid, "i need food for 30 people , on 3rd floor , 10 veg rest non veg",
+                             sender=EMP, subject="need catering", thread="t-cat"), _ai(
+        {"type": "new_request", "category": "catering", "summary": "Catering for 30 people on 3rd floor",
+         "details": {"headcount": 30, "location": "3rd floor", "meal_preference": "10 veg, 20 non-veg"},
+         "missing": ["For which date and time?"]},
+    ))
+    case = _case(session)
+    assert case.facts["agent_stage"] == "AWAITING_INFO"
+
+    meal = datetime.now(timezone(timedelta(hours=5, minutes=30))).replace(tzinfo=None, second=0, microsecond=0) + timedelta(hours=3)
+    meal_day, meal_time = f"{meal.day} {meal:%B %Y}", meal.strftime("%H:%M")
+    _run(session, tid, _mail(session, tid, f"{meal_day}, {meal_time}", sender=EMP, subject="Re: need catering", thread="t-cat"),
+         FakeGemini({
+             "intents": [{"type": "update_case", "case_reference": case.case_reference, "category": "catering",
+                          "details": {"date": meal_day, "time": meal_time}}],
+             "reply_to_requester": "Hi,\n\nThanks - I've updated your request and passed it on to the Cafeteria team.\n\nWorkplace Team",
+             "confidence": 0.9,
+         }))
+    case = _case(session)
+    assert case.facts["agent_stage"] == "AWAITING_APPROVAL"
+    told = _mails_to(session, EMP)[-1].body
+    assert "passed it on to the Cafeteria" not in told and "approval" in told
+
+    decision = [m for m in _mails_to(session, ADMIN) if 'Reply "approve"' in m.body][-1]
+    _reply(session, tid, "approve", ADMIN, decision)
+    case = _case(session)
+    assert case.facts["agent_stage"] == "DISPATCHED"
+    assert case.due_at == meal - timedelta(hours=5, minutes=30), "the team's deadline is the meal time, not 12h later"
+
+
 def test_visitor_with_no_security_inbox_goes_to_admin(session: Session, live):
     tid = live
     _run(session, tid, _mail(session, tid, "Visitor Neha Kapoor from Deloitte on 8 Oct 3 PM", sender=EMP, subject="visitor"), _ai(

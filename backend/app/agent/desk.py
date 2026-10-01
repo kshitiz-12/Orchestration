@@ -250,6 +250,27 @@ def joining_day(facts: dict) -> Optional[date]:
     return parse_meeting_date(raw, today=_ist_now().date())
 
 
+# Requests for something at a set time: the team's deadline can't be later than that time.
+_TIMED_CATEGORIES = {"catering", "cafeteria", "event", "travel", "employee_transport", "guest_house"}
+
+
+def _needed_by(facts: dict) -> Optional[datetime]:
+    """When a timed service must be ready (naive UTC), from the request's date and time."""
+    if facts.get("agent_category") not in _TIMED_CATEGORIES:
+        return None
+    from app.services.room_booking import parse_clock, parse_meeting_date
+
+    d = facts.get("details") or {}
+    raw_day = next((d.get(k) for k in ("date", "visit_date", "event_date", "travel_date") if d.get(k)), None)
+    raw_time = next((d.get(k) for k in ("time", "visit_time", "start_time", "pickup_time", "event_time") if d.get(k)), None)
+    day = parse_meeting_date(raw_day, today=_ist_now().date()) if raw_day else None
+    exact = re.fullmatch(r"\s*([01]\d|2[0-3]):([0-5]\d)\s*", str(raw_time or ""))
+    clock = time(int(exact.group(1)), int(exact.group(2))) if exact else (parse_clock(raw_time) if raw_time else None)
+    if not day or not clock:
+        return None
+    return _ist_to_utc(datetime.combine(day, clock))
+
+
 def _joiner(facts: dict) -> str:
     d = facts.get("details") or {}
     return str(d.get("employee_name") or d.get("joiner_name") or d.get("name") or "the new joiner")
@@ -753,6 +774,9 @@ class AdminDesk:
         hours = float(facts.get("sla_hours") or 24)
         now = utcnow()
         outcome.due_at = now + timedelta(hours=hours)
+        needed_by = _needed_by(facts)
+        if needed_by and now + timedelta(minutes=15) < needed_by < outcome.due_at:
+            outcome.due_at = needed_by
         _set_facts(self.session, outcome, dispatched_at=now.isoformat())
         ticket = self._ticket(outcome)
         if ticket:
@@ -1101,6 +1125,8 @@ class AdminDesk:
         low = draft.lower()
         for r in results:
             intent = r.get("intent")
+            if r["status"] == "awaiting_approval" and (_FORWARD_CLAIM_RE.search(draft) or "approv" not in low):
+                return False
             if intent and intent.type == "update_case" and r["status"] == "awaiting_info":
                 if "?" not in draft or _FORWARD_CLAIM_RE.search(draft):
                     return False
