@@ -4,6 +4,7 @@ from app.api.routes import (
     auth,
     gmail,
     intake,
+    learning,
     ops,
     outcomes,
     outlook,
@@ -23,4 +24,5 @@ api_router.include_router(gmail.router)
 api_router.include_router(outlook.router)
 api_router.include_router(webhooks.router)
 api_router.include_router(setup.router)
+api_router.include_router(learning.router)
 api_router.include_router(public_approvals.router)

@@ -90,7 +90,7 @@ export default function ReviewsPage() {
   return (
     <AppShell
       title="Needs your decision"
-      subtitle="Reviews, spend approvals, and room proposals waiting on an operator."
+      subtitle="Approvals, sign-offs and proposals for every request type that are waiting on you."
       actions={
         <button className="btn secondary" onClick={load}>
           Refresh
@@ -122,7 +122,7 @@ export default function ReviewsPage() {
                   {payload.vendor ? `${payload.vendor} · ` : ""}
                   {payload.amount_ex_tax != null
                     ? `${payload.currency || "INR"} ${payload.amount_ex_tax}`
-                    : "Spend approval needed before catering can proceed."}
+                    : payload.reason || o.title || "Sign-off needed before the team can proceed."}
                 </p>
                 <div className="row" style={{ marginTop: "0.9rem" }}>
                   <button

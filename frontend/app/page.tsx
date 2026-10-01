@@ -1,9 +1,9 @@
 "use client";
 
 import { AppShell } from "@/components/AppShell";
-import { ReadinessBar, StatusBadge } from "@/components/Status";
+import { StatusBadge } from "@/components/Status";
 import { api } from "@/lib/api";
-import { friendlyStatus, friendlyType } from "@/lib/labels";
+import { friendlyPriority, friendlyStatus, priorityTone, requestType } from "@/lib/labels";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 
@@ -40,7 +40,7 @@ export default function HomePage() {
   const filtered = outcomes.filter((o) => {
     const q = query.trim().toLowerCase();
     if (!q) return true;
-    return [o.case_reference, o.template_code, o.requester_email, o.status, o.title]
+    return [o.case_reference, requestType(o), o.department, o.requester_email, o.status, o.title]
       .filter(Boolean)
       .some((v) => String(v).toLowerCase().includes(q));
   });
@@ -52,16 +52,36 @@ export default function HomePage() {
     kpis?.waiting_on_you != null
       ? Number(kpis.waiting_on_you)
       : waitingReviews + pendingConfirm;
-  const late = Number(kpis?.overdue_tasks || 0);
+  const pastSla = Number(kpis?.past_sla || 0);
+  const late = Number(kpis?.overdue_tasks || 0) + pastSla;
+  const urgent = Number(kpis?.urgent_open || 0);
   const problems = Number(kpis?.failures || 0);
   const openCases = Number(kpis?.outcomes_active || 0);
   const needsAttention = Number(kpis?.at_risk || 0) + awaitingReqs + Number(kpis?.no_resource || 0);
+  const byType: { label: string; count: number }[] = Array.isArray(kpis?.open_by_type) ? kpis.open_by_type : [];
+  const byDept: { label: string; count: number }[] = Array.isArray(kpis?.open_by_department) ? kpis.open_by_department : [];
 
   const nextSteps: { title: string; detail: string; href: string; tone: "warn" | "danger" | "ok" | "neutral" }[] = [];
+  if (urgent > 0) {
+    nextSteps.push({
+      title: `${urgent} urgent request${urgent === 1 ? "" : "s"} open`,
+      detail: "Safety or work-stopping issues - the team and you were alerted when they came in.",
+      href: "/outcomes",
+      tone: "danger",
+    });
+  }
+  if (pastSla > 0) {
+    nextSteps.push({
+      title: `${pastSla} request${pastSla === 1 ? "" : "s"} past due`,
+      detail: "The team missed the agreed time. Chase them or reassign from the request page.",
+      href: "/outcomes",
+      tone: "warn",
+    });
+  }
   if (waitingYou > 0) {
     const bits: string[] = [];
-    if (pendingConfirm > 0) bits.push(`${pendingConfirm} room confirm`);
-    if (waitingReviews > 0) bits.push(`${waitingReviews} review/approval`);
+    if (waitingReviews > 0) bits.push(`${waitingReviews} approval/review`);
+    if (pendingConfirm > 0) bits.push(`${pendingConfirm} booking to confirm`);
     nextSteps.push({
       title: `${waitingYou} item${waitingYou === 1 ? "" : "s"} waiting for your decision`,
       detail: bits.length ? bits.join(" · ") : "Open these first — the system paused until someone decides.",
@@ -73,13 +93,14 @@ export default function HomePage() {
     nextSteps.push({
       title: `${awaitingReqs} request${awaitingReqs === 1 ? "" : "s"} still missing details`,
       detail: "We already emailed the requester for only the remaining gaps.",
-      href: "/outcomes",
+      href: "/outcomes?waiting=requester",
       tone: "neutral",
     });
   }
-  if (late > 0) {
+  if (Number(kpis?.overdue_tasks || 0) > 0) {
+    const n = Number(kpis.overdue_tasks);
     nextSteps.push({
-      title: `${late} late task${late === 1 ? "" : "s"}`,
+      title: `${n} late task${n === 1 ? "" : "s"}`,
       detail: "Someone still needs to finish work on these requests.",
       href: "/tasks",
       tone: "warn",
@@ -172,18 +193,58 @@ export default function HomePage() {
         <Link href="/reviews" className="kpi clickable">
           <div className="label">Waiting on you</div>
           <div className="value">{waitingYou || "—"}</div>
-          <div className="hint">
-            {pendingConfirm > 0
-              ? `${pendingConfirm} room confirm · ${waitingReviews} review/approval`
-              : "Approve, confirm rooms, or ask for more info"}
-          </div>
+          <div className="hint">Approvals, reviews and confirmations</div>
         </Link>
-        <Link href="/tasks" className="kpi clickable">
+        <Link href="/outcomes" className="kpi clickable">
           <div className="label">Late work</div>
           <div className="value">{late || "—"}</div>
-          <div className="hint">Tasks past their due time</div>
+          <div className="hint">
+            Past due{kpis?.resolved_24h != null ? ` · ${kpis.resolved_24h} resolved in 24h` : ""}
+          </div>
         </Link>
+        <div className="kpi">
+          <div className="label">Automation (30 days)</div>
+          <div className="value">{kpis?.automation_rate_pct != null ? `${kpis.automation_rate_pct}%` : "—"}</div>
+          <div className="hint">
+            Routine steps done without a human
+            {kpis?.verified_closure_pct != null ? ` · ${kpis.verified_closure_pct}% closures verified` : ""}
+          </div>
+        </div>
       </div>
+
+      {kpis?.ai_emergency_stop && (
+        <div className="panel" style={{ marginBottom: "1.1rem", borderColor: "var(--danger)" }}>
+          <strong>AI is paused (emergency stop).</strong> Requests are still logged and safety issues still go out
+          urgently, but every other request waits for your approval. Turn off AI_EMERGENCY_STOP to resume.
+        </div>
+      )}
+
+      {(byType.length > 0 || byDept.length > 0) && (
+        <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: "1rem", marginBottom: "1.1rem" }}>
+          <div className="panel">
+            <div className="panel-head"><h2>Open by type</h2></div>
+            <div className="stack" style={{ gap: "0.35rem" }}>
+              {byType.slice(0, 10).map((r) => (
+                <Link key={r.label} href={`/outcomes?type=${encodeURIComponent(r.label)}`} className="table-link"
+                  style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span>{r.label}</span><strong>{r.count}</strong>
+                </Link>
+              ))}
+            </div>
+          </div>
+          <div className="panel">
+            <div className="panel-head"><h2>Open by team</h2></div>
+            <div className="stack" style={{ gap: "0.35rem" }}>
+              {byDept.slice(0, 10).map((r) => (
+                <Link key={r.label} href={`/outcomes?department=${encodeURIComponent(r.label)}`} className="table-link"
+                  style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span>{r.label}</span><strong>{r.count}</strong>
+                </Link>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="grid actions">
         <Link href="/reviews" className="action-tile">
@@ -229,10 +290,11 @@ export default function HomePage() {
             <thead>
               <tr>
                 <th>Case #</th>
-                <th>What is it?</th>
+                <th>Type</th>
+                <th>Team</th>
                 <th>From</th>
+                <th>Priority</th>
                 <th>Status</th>
-                <th>Progress</th>
               </tr>
             </thead>
             <tbody>
@@ -248,14 +310,15 @@ export default function HomePage() {
                     </div>
                   </td>
                   <td>
-                    <span className="badge">{friendlyType(o.template_code)}</span>
+                    <span className="badge">{requestType(o)}</span>
                   </td>
+                  <td className="muted">{o.department || "—"}</td>
                   <td>{o.requester_email}</td>
                   <td>
-                    <StatusBadge status={friendlyStatus(o.status)} />
+                    <span className={`badge ${priorityTone(o.priority)}`}>{friendlyPriority(o.priority)}</span>
                   </td>
                   <td>
-                    <ReadinessBar value={o.readiness_pct} />
+                    <StatusBadge status={friendlyStatus(o.status)} />
                   </td>
                 </tr>
               ))}

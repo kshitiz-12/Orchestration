@@ -228,6 +228,53 @@ def test_demo_reset_clears_desk_tickets_and_passes(session: Session, env):
     assert session.exec(select(Outcome)).all() == []
 
 
+def test_permanent_employee_parking_goes_to_security_without_a_date(session: Session, env):
+    tid = _tid(session)
+    _set_dept_email(session, "SECURITY", "frontdesk@acme-real.com")
+    first = FakeGemini(_decision(
+        {"type": "new_request", "category": "car_parking", "summary": "Car parking allocation", "details": {},
+         "missing": ["What is the vehicle number?", "Which date do you need parking?"]},
+    ))
+    _run(session, tid, _mail(session, tid, "I need car parking", subject="hi", thread="t-prk"), first)
+    case = session.exec(select(Outcome)).one()
+    assert case.facts["agent_stage"] == "AWAITING_INFO"
+
+    second = FakeGemini(_decision(
+        {"type": "update_case", "case_reference": case.case_reference, "category": "parking",
+         "details": {"car_no": "DL2caz9103"}},
+        reply="Hi Kapil,\n\nThanks! I've forwarded it to the Security team.\n\nWorkplace Team",
+    ))
+    _run(session, tid, _mail(
+        session, tid, "Car No: DL2caz9103\n\nI am new joinee and need permanent car parking",
+        subject="Re: hi", thread="t-prk",
+    ), second)
+    session.refresh(case)
+    assert case.facts["agent_stage"] == "DISPATCHED"
+    assert case.facts["details"]["vehicle_numbers"] == "DL2caz9103"
+    order = _mails_to(session, "frontdesk@acme-real.com")[-1]
+    assert "permanent allocation" in order.subject.lower() or "permanent allocation" in order.body.lower()
+    assert session.exec(select(VisitorPass)).all() == []
+
+
+def test_update_reply_claiming_forwarded_is_replaced_when_still_waiting(session: Session, env):
+    tid = _tid(session)
+    first = FakeGemini(_decision(
+        {"type": "new_request", "category": "parking", "summary": "Guest parking", "details": {}},
+    ))
+    _run(session, tid, _mail(session, tid, "need guest parking", subject="parking", thread="t-g"), first)
+    case = session.exec(select(Outcome)).one()
+    second = FakeGemini(_decision(
+        {"type": "update_case", "case_reference": case.case_reference, "category": "parking",
+         "details": {"car_no": "HR26AB1234"}},
+        reply="Hi,\n\nThanks - forwarded to Security.\n\nWorkplace Team",
+    ))
+    _run(session, tid, _mail(session, tid, "car HR26AB1234", subject="Re: parking", thread="t-g"), second)
+    session.refresh(case)
+    assert case.facts["agent_stage"] == "AWAITING_INFO"
+    reply = _mails_to(session, REQ)[-1]
+    assert "forwarded" not in reply.body.lower() and "Which date do you need parking?" in reply.body
+
+
 def test_tool_catalogue_marks_room_and_invoice_as_existing_flows():
     assert legacy_categories() == {"meeting_room", "invoice"}
     tools = {t["tool"]: t for t in tool_catalogue()}

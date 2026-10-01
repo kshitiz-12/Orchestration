@@ -377,6 +377,15 @@ def test_room_is_held_while_details_are_pending_and_lapses_quietly(session: Sess
     assert len(case.mails(REQ)) == before
 
 
+def test_day_of_month_is_not_taken_as_a_start_time():
+    from app.engine.meeting_scenario import _plausible_clock
+
+    for bad in ("7", 7, "", None, "7th"):
+        assert not _plausible_clock(bad)
+    for good in ("10 AM", "2pm", "14:00", "10-12", "10 to 1 pm", "afternoon", "1400"):
+        assert _plausible_clock(good)
+
+
 # ---------- setup: catalogue + cost centres
 def test_setup_site_services_and_cost_centres(client, auth_headers):
     rows = client.get("/api/v1/setup/site-services", headers=auth_headers).json()

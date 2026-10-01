@@ -1,6 +1,10 @@
+from datetime import timedelta
+
 from fastapi import APIRouter, HTTPException
 from sqlmodel import Session, func, select
 
+from app.agent.learning import CLOSURE_LABELS
+from app.agent.playbooks import DECISION_CLASSES
 from app.api.deps import SessionDep, TenantDep, UserDep
 from app.engine.outcome_engine import OutcomeEngine
 from app.models.intake import AIDecision, Conversation, HumanReviewItem, RawEmailEvent
@@ -52,7 +56,8 @@ def dashboard_kpis(session: SessionDep, tenant_id: TenantDep, _user: UserDep):
             )
         ).one(),
         **inbox_kpi_counts(session, tenant_id),
-        **_meeting_wait_kpis(session, tenant_id),
+        **_wait_kpis(session, tenant_id),
+        **_automation_kpis(session, tenant_id),
         "failures": session.exec(
             select(func.count())
             .select_from(__import__("app.models.intake", fromlist=["ProcessingJob"]).ProcessingJob)
@@ -64,35 +69,169 @@ def dashboard_kpis(session: SessionDep, tenant_id: TenantDep, _user: UserDep):
                 ),
             )
         ).one(),
-        "new_emails_24h": count(RawEmailEvent),
+        "new_emails_24h": count(RawEmailEvent, RawEmailEvent.created_at >= utcnow() - timedelta(hours=24)),
     }
 
 
-def _meeting_wait_kpis(session: Session, tenant_id: str) -> dict:
-    """Count meeting stages that need action (JSON facts — counted in app for SQLite/PG)."""
+def type_label(outcome: Outcome) -> str:
+    from app.agent.playbooks import label_for
+
+    facts = outcome.facts or {}
+    if outcome.template_code == "SERVICE_REQUEST":
+        return facts.get("category_label") or label_for(facts.get("agent_category") or outcome.category)
+    if outcome.template_code == "MEETING_ROOM":
+        return "Training / event" if (outcome.case_reference or "").startswith("TRG-") else "Meeting room"
+    return label_for((outcome.category or outcome.template_code or "general").lower())
+
+
+def department_of(outcome: Outcome) -> str:
+    facts = outcome.facts or {}
+    if facts.get("department_name"):
+        return facts["department_name"]
+    return {"MEETING_ROOM": "Admin & Workplace", "INVOICE": "Finance & Accounts"}.get(outcome.template_code or "", "Admin & Workplace")
+
+
+def waiting_on(outcome: Outcome) -> str:
+    """Who the case is waiting on right now, in one word: requester, approver, team, admin or nobody."""
+    facts = outcome.facts or {}
+    if outcome.status in {"CLOSED", "CANCELLED", "ADMINISTRATIVELY_CLOSED", "VERIFIED"}:
+        return "nobody"
+    stage = str(facts.get("agent_stage") or facts.get("orchestration_stage") or "").upper()
+    if outcome.status == "RESOLVED" or stage in {"RESOLVED", "COMPLETED"}:
+        return "requester"
+    if stage in {"AWAITING_INFO", "AWAITING_REQUIREMENTS"} or (facts.get("checklist_missing") and not facts.get("booked_room")):
+        return "requester"
+    if stage == "AWAITING_APPROVAL" or facts.get("approval_pending"):
+        return "approver"
+    if facts.get("pending_confirmation") and not facts.get("booked_room"):
+        return "requester"
+    if stage in {"BLOCKED", "NO_RESOURCE"} or outcome.status == "AT_RISK":
+        return "admin"
+    return "team"
+
+
+_STAGE_LABELS = {
+    "AWAITING_INFO": "Waiting for details from the requester",
+    "AWAITING_APPROVAL": "Waiting for approval",
+    "DISPATCHED": "With the team",
+    "IN_PROGRESS": "Team is working on it",
+    "BLOCKED": "Team is blocked",
+    "RESOLVED": "Done - waiting for requester to confirm",
+    "COMPLETED": "Done",
+    "CLOSED": "Closed",
+    "CLOSED_NO_REPLY": "Closed - no reply from requester",
+    "REJECTED": "Not approved",
+    "CANCELLED": "Cancelled",
+}
+
+
+def _request_summary(session: Session, outcome: Outcome) -> dict:
+    """Type-neutral header for the detail page: what, who owns it, where it stands, when it's due."""
+    from app.models.company import ServiceTicket
+
+    facts = outcome.facts or {}
+    stage = str(facts.get("agent_stage") or facts.get("orchestration_stage") or outcome.status or "").upper()
+    ticket = session.exec(select(ServiceTicket).where(ServiceTicket.outcome_id == outcome.outcome_id)).first()
+    details = facts.get("details") if isinstance(facts.get("details"), dict) else {}
+    return {
+        "type_label": type_label(outcome),
+        "department": department_of(outcome),
+        "waiting_on": waiting_on(outcome),
+        "stage": stage,
+        "stage_label": _STAGE_LABELS.get(stage, stage.replace("_", " ").capitalize()),
+        "priority": outcome.priority or "MEDIUM",
+        "priority_reason": facts.get("priority_reason"),
+        "due_at": outcome.due_at,
+        "past_due": bool(outcome.due_at and outcome.due_at < utcnow() and outcome.status not in {"CLOSED", "RESOLVED", "CANCELLED"}),
+        "details": details,
+        "missing": facts.get("missing") or facts.get("checklist_missing") or [],
+        "teams": facts.get("team_groups") or [],
+        "notes": {k: facts.get(k) for k in ("progress_note", "blocked_reason", "resolution_note", "reopen_reason", "decision_reason")
+                  if facts.get(k)},
+        "reopen_count": facts.get("reopen_count") or 0,
+        "is_service_request": outcome.template_code == "SERVICE_REQUEST",
+        "decision_class": facts.get("decision_class"),
+        "decision_class_label": DECISION_CLASSES.get(facts.get("decision_class") or ""),
+        "desired_outcome": facts.get("desired_outcome"),
+        "knowledge_gap": bool(facts.get("knowledge_gap")),
+        "evidence_status": facts.get("evidence_status"),
+        "evidence": [
+            {"type": e.evidence_type, "note": e.description, "files": e.record_ref,
+             "by": (e.metadata_json or {}).get("by"), "at": e.created_at}
+            for e in session.exec(select(Evidence).where(Evidence.outcome_id == outcome.outcome_id)).all()
+        ],
+        "closure_type": facts.get("closure_type"),
+        "closure_label": CLOSURE_LABELS.get(facts.get("closure_type") or ""),
+        "verified": facts.get("verified"),
+        "corrections": facts.get("corrections") or [],
+        "ai_reason": (facts.get("ai_plan") or {}).get("reason_summary"),
+        "ai_confidence": (facts.get("ai_plan") or {}).get("confidence"),
+        "ticket": {
+            "status": ticket.status,
+            "assignee": ticket.assignee_email,
+            "location": ticket.location,
+            "sla_due_at": ticket.sla_due_at,
+        } if ticket else None,
+    }
+
+
+def _automation_kpis(session: Session, tenant_id: str) -> dict:
+    from app.agent.learning import automation_kpis
+    from app.core.config import get_settings
+
+    return {**automation_kpis(session, tenant_id), "ai_emergency_stop": bool(get_settings().ai_emergency_stop)}
+
+
+def _wait_kpis(session: Session, tenant_id: str) -> dict:
+    """Counts across every request type (JSON facts are read in app so it works on SQLite and Postgres)."""
     rows = session.exec(
         select(Outcome).where(
             Outcome.tenant_id == tenant_id,
-            Outcome.template_code == "MEETING_ROOM",
-            Outcome.status.in_(list(OPEN_OUTCOME_STATUSES)),  # type: ignore
+            Outcome.status.in_(list(OPEN_OUTCOME_STATUSES) + ["RESOLVED"]),  # type: ignore
         )
     ).all()
-    awaiting_requirements = 0
-    no_resource = 0
+    now = utcnow()
+    awaiting_requirements = no_resource = past_sla = urgent_open = 0
+    by_type: dict[str, int] = {}
+    by_department: dict[str, int] = {}
     for outcome in rows:
         facts = outcome.facts or {}
-        stage = str(facts.get("orchestration_stage") or "").upper()
-        if facts.get("pending_confirmation") and facts.get("proposed_room") and not facts.get("booked_room"):
+        if outcome.status == "RESOLVED":
             continue
-        if stage == "AWAITING_REQUIREMENTS" or (
-            facts.get("checklist_missing") and not facts.get("booked_room") and not facts.get("proposed_room")
-        ):
+        by_type[type_label(outcome)] = by_type.get(type_label(outcome), 0) + 1
+        dept = department_of(outcome)
+        by_department[dept] = by_department.get(dept, 0) + 1
+        if outcome.priority == "URGENT":
+            urgent_open += 1
+        if outcome.due_at and outcome.due_at < now:
+            past_sla += 1
+        stage = str(facts.get("agent_stage") or facts.get("orchestration_stage") or "").upper()
+        if outcome.template_code == "MEETING_ROOM":
+            if facts.get("pending_confirmation") and facts.get("proposed_room") and not facts.get("booked_room"):
+                continue
+            if stage == "AWAITING_REQUIREMENTS" or (
+                facts.get("checklist_missing") and not facts.get("booked_room") and not facts.get("proposed_room")
+            ):
+                awaiting_requirements += 1
+            elif stage == "NO_RESOURCE":
+                no_resource += 1
+        elif stage == "AWAITING_INFO":
             awaiting_requirements += 1
-        elif stage == "NO_RESOURCE":
-            no_resource += 1
+    resolved_24h = session.exec(
+        select(func.count()).select_from(Outcome).where(
+            Outcome.tenant_id == tenant_id,
+            Outcome.status.in_(["RESOLVED", "CLOSED", "VERIFIED"]),  # type: ignore
+            Outcome.updated_at >= now - timedelta(hours=24),
+        )
+    ).one()
     return {
         "awaiting_requirements": awaiting_requirements,
         "no_resource": no_resource,
+        "past_sla": past_sla,
+        "urgent_open": urgent_open,
+        "resolved_24h": resolved_24h,
+        "open_by_type": sorted(({"label": k, "count": v} for k, v in by_type.items()), key=lambda r: -r["count"]),
+        "open_by_department": sorted(({"label": k, "count": v} for k, v in by_department.items()), key=lambda r: -r["count"]),
     }
 
 
@@ -103,11 +242,21 @@ def list_outcomes(
     _user: UserDep,
     status: str | None = None,
     limit: int = 100,
+    type: str | None = None,
+    department: str | None = None,
 ):
     stmt = select(Outcome).where(Outcome.tenant_id == tenant_id).order_by(Outcome.created_at.desc())  # type: ignore
     if status:
         stmt = stmt.where(Outcome.status == status)
-    return session.exec(stmt.limit(limit)).all()
+    out = []
+    for o in session.exec(stmt.limit(limit if not (type or department) else max(limit, 500))).all():
+        row = {**o.model_dump(), "type_label": type_label(o), "department": department_of(o), "waiting_on": waiting_on(o)}
+        if type and row["type_label"] != type:
+            continue
+        if department and row["department"] != department:
+            continue
+        out.append(row)
+    return out[:limit]
 
 
 @router.get("/outcomes/{outcome_id}")
@@ -161,6 +310,7 @@ def get_outcome(outcome_id: str, session: SessionDep, tenant_id: TenantDep, _use
     facts = dict(outcome.facts or {})
     field_contract = facts.get("field_contract") or build_field_contract(facts)
     return {
+        "request": _request_summary(session, outcome),
         "outcome": outcome,
         "requirements": requirements,
         "tasks": tasks,
@@ -183,6 +333,17 @@ def close_outcome(outcome_id: str, session: SessionDep, tenant_id: TenantDep, us
     outcome = session.get(Outcome, outcome_id)
     if not outcome or outcome.tenant_id != tenant_id:
         raise HTTPException(404, "Outcome not found")
+    if outcome.template_code == "SERVICE_REQUEST":
+        from app.agent.desk import AdminDesk
+        from app.services.approval_actions import default_comms
+
+        desk = AdminDesk(session, tenant_id, default_comms(session, tenant_id))
+        facts = outcome.facts or {}
+        proven = facts.get("agent_stage") == "RESOLVED" and facts.get("evidence_status") in {"provided", "admin_confirmed", "not_required"}
+        desk._close(outcome, f"Closed from the dashboard by {user.email}",
+                    closure="verified_evidence" if proven else "administrative")
+        session.commit()
+        return outcome
     engine = OutcomeEngine(session, tenant_id)
     try:
         engine.try_close(outcome, actor=user.email)
@@ -394,6 +555,14 @@ def reopen_outcome(
     outcome = session.get(Outcome, outcome_id)
     if not outcome or outcome.tenant_id != tenant_id:
         raise HTTPException(404, "Outcome not found")
+    if outcome.template_code == "SERVICE_REQUEST":
+        from app.agent.desk import AdminDesk
+        from app.services.approval_actions import default_comms
+
+        desk = AdminDesk(session, tenant_id, default_comms(session, tenant_id))
+        desk.reopen(outcome, getattr(payload, "reason", None) or "Reopened from the dashboard", actor=user.email)
+        session.commit()
+        return outcome
 
     before_status = outcome.status
     facts = dict(outcome.facts or {})

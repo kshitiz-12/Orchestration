@@ -25,8 +25,9 @@ const GROUPS = [
   {
     label: "More",
     links: [
-      { href: "/resources", label: "Rooms & seats" },
+      { href: "/resources", label: "Resources" },
       { href: "/invoices", label: "Invoices" },
+      { href: "/learning", label: "AI learning" },
       { href: "/failures", label: "Problems" },
       { href: "/setup", label: "Company setup" },
       { href: "/config", label: "Settings" },

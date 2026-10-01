@@ -6,7 +6,7 @@ from typing import Any
 
 from sqlmodel import Session, select
 
-from app.models.company import ServiceTicket, VisitorPass
+from app.models.company import LearningRecord, ServiceTicket, VisitorPass
 from app.models.intake import (
     AIDecision,
     Conversation,
@@ -55,6 +55,7 @@ def reset_demo_operational_data(session: Session, tenant_id: str) -> dict[str, A
         RoomBooking,
         ServiceTicket,
         VisitorPass,
+        LearningRecord,
         Communication,
         Evidence,
         Approval,

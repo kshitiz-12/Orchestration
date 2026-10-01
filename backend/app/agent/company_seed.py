@@ -15,12 +15,17 @@ from app.models.org import Person, Vendor
 PLACEHOLDER_DOMAIN = "example.invalid"
 
 DEFAULT_DEPARTMENTS: list[dict] = [
-    {"code": "ADMIN", "name": "Admin & Workplace", "categories": ["general", "meeting_room", "supplies", "courier"], "sla_hours": 24},
-    {"code": "FACILITIES", "name": "Facilities & Maintenance", "categories": ["maintenance", "furniture", "electrical", "plumbing", "hvac"], "sla_hours": 8},
+    {"code": "ADMIN", "name": "Admin & Workplace", "categories": [
+        "general", "meeting_room", "supplies", "courier", "printing", "seating", "event", "guest_house"], "sla_hours": 24},
+    {"code": "FACILITIES", "name": "Facilities & Maintenance", "categories": [
+        "maintenance", "furniture", "electrical", "plumbing", "hvac", "pest_control", "waste_disposal", "health_safety"],
+     "sla_hours": 8},
     {"code": "HOUSEKEEPING", "name": "Housekeeping", "categories": ["housekeeping", "pantry", "cleaning"], "sla_hours": 4},
-    {"code": "IT", "name": "IT Support", "categories": ["it_support", "access_card", "laptop", "network"], "sla_hours": 8},
-    {"code": "SECURITY", "name": "Security & Front Desk", "categories": ["visitor", "security", "parking"], "sla_hours": 4},
-    {"code": "TRAVEL", "name": "Travel Desk", "categories": ["travel", "cab", "hotel", "flight"], "sla_hours": 12},
+    {"code": "IT", "name": "IT Support", "categories": [
+        "it_support", "access_card", "laptop", "network", "software", "phone_sim", "asset"], "sla_hours": 8},
+    {"code": "SECURITY", "name": "Security & Front Desk", "categories": [
+        "visitor", "security", "parking", "material_gate_pass", "lost_found", "keys_locker"], "sla_hours": 4},
+    {"code": "TRAVEL", "name": "Travel Desk", "categories": ["travel", "cab", "hotel", "flight", "employee_transport"], "sla_hours": 12},
     {"code": "HR", "name": "People / HR", "categories": ["onboarding", "hr_query", "offboarding"], "sla_hours": 24},
     {"code": "FINANCE", "name": "Finance & Accounts", "categories": ["invoice", "reimbursement", "payment"], "sla_hours": 48, "spend_approval_limit": 50000},
     {"code": "PROCUREMENT", "name": "Procurement", "categories": ["purchase", "vendor"], "sla_hours": 48, "spend_approval_limit": 25000},

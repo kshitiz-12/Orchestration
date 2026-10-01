@@ -16,16 +16,31 @@ from sqlmodel import Session, select
 
 from app.agent.company_seed import is_placeholder
 from app.agent.digest import digest_mode
-from app.agent.directory import Route, catalogue, handles_category, knowledge_text, route_for
+from app.agent.directory import (
+    Route,
+    catalogue,
+    find_department,
+    handles_category,
+    knowledge_text,
+    route_for,
+    route_for_case,
+)
+from app.agent.learning import add_correction, similar_verified
+from app.agent.learning import record_closure as save_learning_record
 from app.agent.playbooks import (
     LEGACY_CATEGORIES,
+    RiskVerdict,
     assess_risk,
     case_prefix,
+    decision_class,
+    evidence_hint,
     has_playbook,
+    label_for,
     missing_questions,
     normalize_category,
     playbook_for,
 )
+from app.agent.priority import infer_priority, sla_hours_for
 from app.ai.admin_agent import (
     AdminAgent,
     AgentDecision,
@@ -45,7 +60,7 @@ from app.engine.outcome_engine import OutcomeEngine
 from app.models.company import ServiceTicket, VisitorPass
 from app.models.intake import Conversation, RawEmailEvent
 from app.models.org import Person, Resource, Vendor, utcnow
-from app.models.outcome import Approval, Outcome
+from app.models.outcome import Approval, Evidence, Outcome
 from app.services.communication import CommunicationService, resolve_requester_name
 from app.services.email_utils import strip_for_ai
 
@@ -63,6 +78,58 @@ _VENDOR_HINTS = {
     "plumbing": ("facility", "plumbing"),
     "catering": ("catering", "food"),
 }
+
+
+_EMPLOYEE_PARKING_RE = re.compile(
+    r"\b(?:permanent|monthly|regular|daily|own\s+car|my\s+car|new\s+joinee|new\s+joiner|employee\s+parking"
+    r"|parking\s+sticker|long[\s-]term)\b",
+    re.I,
+)
+# The model's own draft admits it does not know - treat the question as unverified even if it forgot the flag.
+_UNVERIFIED_ANSWER_RE = re.compile(
+    r"\b(?:check\s+with\s+(?:the\s+)?(?:team|admin|hr|facilities)|get\s+back\s+to\s+you|not\s+sure|"
+    r"don'?t\s+have\s+(?:that|this|the)\s+(?:information|details)|could\s*n[o']?t\s+verify|unable\s+to\s+(?:confirm|verify))\b",
+    re.I,
+)
+_FORWARD_CLAIM_RE = re.compile(
+    r"\b(?:forwarded|passed\s+(?:it\s+)?(?:on|along)|assigned|sent\s+(?:it\s+)?to|handed\s+over|arranged|allotted|allocated)\b",
+    re.I,
+)
+
+
+_NOT_FIXED_RE = re.compile(
+    r"\b(?:not\s+(?:yet\s+)?(?:fixed|working|resolved|done|sorted|solved|repaired|cleaned|delivered|received)|"
+    r"still\s+(?:not|isn'?t|doesn'?t|broken|leaking|the\s+same|an?\s+issue|a\s+problem|pending|happening)|"
+    r"(?:isn'?t|doesn'?t|didn'?t|hasn'?t|wasn'?t)\s+(?:fixed|working|work|resolved|done|sorted|solved|arrived)|"
+    r"(?:same|again)\s+(?:issue|problem)|happening\s+again|broke\s+again|please\s+reopen|reopen)\b",
+    re.I,
+)
+_SATISFIED_RE = re.compile(
+    r"^\s*(?:thanks?|thank\s+you|thx|great|perfect|awesome|working\s+(?:now|fine)|it\s+works|all\s+good|"
+    r"sorted|resolved|confirmed|ok(?:ay)?\s+thanks?)\b",
+    re.I,
+)
+
+
+_TEAM_ISSUE_RE = re.compile(
+    r"^\s*(?:issue|problem|blocked|on\s+hold|can'?t|cannot|unable\s+to|not\s+possible|"
+    r"need(?:s|ed)?\s+(?:a\s+|an\s+)?(?:approval|part|spare|budget|vendor|quote|access)|waiting\s+(?:for|on))\b",
+    re.I,
+)
+_TEAM_PROGRESS_RE = re.compile(
+    r"^\s*(?:on\s+it|in\s+progress|working\s+on\s+it|started|noted|acknowledged|ack\b|received|"
+    r"(?:technician|electrician|plumber|engineer|person|someone|team)\s+(?:is\s+)?(?:assigned|on\s+the\s+way|coming|sent)|"
+    r"will\s+(?:be\s+)?(?:done|fix(?:ed)?|complete[d]?|deliver(?:ed)?|arrange[d]?|sort(?:ed)?|do\s+it|check)|"
+    r"eta\b|by\s+(?:today|tomorrow|eod|\d)|in\s+\d+\s*(?:min|mins|minutes|hours?|hrs?))",
+    re.I,
+)
+_DONE_WORDS = r"(?:done|fixed|resolved|completed|closed|sorted|repaired|replaced|delivered|arranged|cleaned|installed|issued)"
+
+
+def _is_done_reply(low: str) -> bool:
+    if re.search(rf"\b(?:will|to|not|n'?t|yet\s+to|tomorrow|later|soon)\s+(?:be\s+)?(?:get\s+)?{_DONE_WORDS}\b", low):
+        return False
+    return bool(re.search(rf"\b{_DONE_WORDS}\b", low))
 
 
 def is_service_case(outcome: Optional[Outcome]) -> bool:
@@ -109,7 +176,8 @@ def _normalize_details(details: dict) -> dict:
     for src in ("visitors", "visitor", "guests", "guest_names", "names"):
         if src in out and "visitor_names" not in out:
             out["visitor_names"] = out.pop(src)
-    for src in ("vehicle_number", "vehicle", "vehicles", "car_number"):
+    for src in ("vehicle_number", "vehicle", "vehicles", "car_number", "car_no", "car", "vehicle_no",
+                "registration_number", "number_plate", "plate", "car_registration"):
         if src in out and "vehicle_numbers" not in out:
             out["vehicle_numbers"] = out.pop(src)
     for src in ("date", "visit_day", "on"):
@@ -155,6 +223,7 @@ class AdminDesk:
             knowledge=knowledge_text(self.session, self.tenant_id),
             departments=catalogue(self.session, self.tenant_id),
             attachments=[a.get("filename", "") for a in (event.attachments or [])],
+            similar_cases=similar_verified(self.session, self.tenant_id, f"{event.subject or ''}\n{text}"),
         )
         hint = None if self.agent.can_reason else self._legacy_hint(event, current)
         decision = self.agent.decide(payload, heuristic_hint=hint)
@@ -260,6 +329,10 @@ class AdminDesk:
         cases: list[Outcome],
         decision: AgentDecision,
     ) -> Optional[dict]:
+        if intent.type == "question" and (
+            not intent.answer_verified or _UNVERIFIED_ANSWER_RE.search(decision.reply_to_requester or "")
+        ):
+            return self._knowledge_gap(intent, event, conversation, decision, current)
         if intent.type in {"small_talk", "question", "empty"}:
             return {"intent": intent, "status": intent.type}
         if intent.type == "status":
@@ -272,8 +345,34 @@ class AdminDesk:
         if intent.type == "cancel":
             return self._cancel(target, intent)
         if intent.type == "close":
-            return self._close(target, "Requester confirmed it is done.")
+            return self._close(target, "Requester confirmed it is done.", closure="verified_by_requester")
         return self._update(target, intent, event, decision)
+
+    def _knowledge_gap(
+        self,
+        intent: AgentIntent,
+        event: RawEmailEvent,
+        conversation: Conversation,
+        decision: AgentDecision,
+        current: Optional[Outcome],
+    ) -> dict:
+        """No-guess rule: a company question we cannot answer from verified knowledge goes to a person."""
+        question = strip_for_ai(event.body_text or "")[:600] or intent.summary
+        ask = AgentIntent(
+            type="new_request",
+            category="general",
+            summary=f"Question: {(intent.summary or question)[:120]}",
+            details={"question": question},
+            priority="MEDIUM",
+        )
+        result = self._new_request(
+            ask, event, conversation, decision,
+            has_legacy_case=bool(current and not is_service_case(current)),
+            extra_facts={"knowledge_gap": True},
+        )
+        if result.get("status") == "dispatched":
+            result["status"] = "knowledge_gap"
+        return result
 
     def _new_request(
         self,
@@ -283,6 +382,7 @@ class AdminDesk:
         decision: AgentDecision,
         *,
         has_legacy_case: bool,
+        extra_facts: Optional[dict] = None,
     ) -> dict:
         category = normalize_category(intent.category)
         route = route_for(self.session, self.tenant_id, category)
@@ -290,7 +390,10 @@ class AdminDesk:
         requester = (event.sender or "").lower()
         person = self.session.exec(select(Person).where(Person.email == requester)).first()
         ref = self.engine.next_case_reference(case_prefix(category))
-        title = (intent.summary or category.replace("_", " ").capitalize())[:200]
+        title = (intent.summary or label_for(category))[:200]
+        raw = strip_for_ai(event.body_text or "")
+        verdict = infer_priority(f"{intent.summary}\n{raw}\n{details}", intent.priority)
+        sla = sla_hours_for(verdict.priority, route.sla_hours)
         outcome = Outcome(
             tenant_id=self.tenant_id,
             case_reference=ref,
@@ -301,18 +404,36 @@ class AdminDesk:
             requester_email=requester,
             requester_person_id=person.person_id if person else None,
             status=OutcomeStatus.ACTIVE.value,
-            priority=intent.priority,
+            priority=verdict.priority,
             facts={
                 "agent_case": True,
                 "agent_category": category,
+                "category_label": label_for(category),
                 "details": details,
                 "department_code": route.department_code,
                 "department_name": route.department_name,
-                "raw_request": strip_for_ai(event.body_text or "")[:2000],
+                "priority_reason": verdict.reason or None,
+                "sla_hours": sla,
+                "raw_request": raw[:2000],
+                "desired_outcome": intent.desired_outcome or None,
+                "risk_signals": intent.risk_signals or None,
+                "ai_plan": {
+                    "category": category,
+                    "priority": intent.priority,
+                    "details": dict(intent.details or {}),
+                    "missing": list(intent.missing),
+                    "needs_admin": intent.needs_admin_decision,
+                    "desired_outcome": intent.desired_outcome,
+                    "risk_signals": intent.risk_signals,
+                    "confidence": decision.confidence,
+                    "source": decision.source,
+                    "reason_summary": decision.reason_summary,
+                },
+                **(extra_facts or {}),
             },
             business_event_id=event.event_id,
             conversation_id=conversation.conversation_id,
-            due_at=utcnow() + timedelta(hours=route.sla_hours),
+            due_at=utcnow() + timedelta(hours=sla),
         )
         self.session.add(outcome)
         self.session.flush()
@@ -328,10 +449,10 @@ class AdminDesk:
             title=title,
             description=str(details.get("description") or details.get("issue") or title)[:2000],
             location=str(details.get("location") or details.get("office") or "")[:200] or None,
-            priority=intent.priority,
+            priority=verdict.priority,
             department_code=route.department_code,
             requester_email=requester,
-            sla_due_at=utcnow() + timedelta(hours=route.sla_hours),
+            sla_due_at=utcnow() + timedelta(hours=sla),
             details=details,
         )
         self.session.add(ticket)
@@ -346,7 +467,9 @@ class AdminDesk:
             correlation_id=event.event_id,
         )
         admin = self._admin()
-        if (self.settings.admin_fyi_level or "").strip().lower() == "all" and admin and admin not in route.recipients:
+        if verdict.urgent:
+            self._notify_admin(outcome, kind="urgent", headline=f"URGENT - {verdict.reason}")
+        elif (self.settings.admin_fyi_level or "").strip().lower() == "all" and admin and admin not in route.recipients:
             self._notify_admin(outcome, kind="info", headline="New request opened")
         return self._progress(outcome, intent, route, decision, text=event.body_text or "")
 
@@ -355,14 +478,27 @@ class AdminDesk:
         facts = outcome.facts or {}
         category = facts.get("agent_category") or "general"
         details = facts.get("details") or {}
+        if category == "parking" and not details.get("parking_type") and _EMPLOYEE_PARKING_RE.search(
+            f"{text}\n{facts.get('raw_request') or ''}\n{details}"
+        ):
+            details = {**details, "parking_type": "employee_permanent", "visit_date": details.get("visit_date") or "Permanent"}
+            facts = _set_facts(self.session, outcome, details=details)
+            ticket = self._ticket(outcome)
+            if ticket:
+                ticket.details = details
+                self.session.add(ticket)
         missing = list(dict.fromkeys(intent.missing))
+        if details.get("parking_type") == "employee_permanent":
+            missing = [q for q in missing if not re.search(r"\b(?:date|day|when)\b", q, re.I)]
         # A free-text answer (rules fallback can't parse it) goes to the team rather than asking again.
         if not details.get("requester_note"):
             for question in missing_questions(category, details):
                 if question not in missing:
                     missing.append(question)
-        if missing:
-            _set_facts(self.session, outcome, agent_stage="AWAITING_INFO", missing=missing)
+        urgent = outcome.priority == "URGENT"
+        if missing and not urgent:
+            _set_facts(self.session, outcome, agent_stage="AWAITING_INFO", missing=missing,
+                       info_requested_at=utcnow().isoformat())
             self._ticket_status(outcome, "OPEN")
             return {"intent": intent, "status": "awaiting_info", "outcome": outcome, "missing": missing}
 
@@ -376,6 +512,9 @@ class AdminDesk:
             spend_limit=route.spend_approval_limit,
             known=has_playbook(category) or handles_category(self.session, self.tenant_id, category),
         )
+        if not risk.needs_admin and self.settings.ai_emergency_stop and not urgent:
+            risk = RiskVerdict(True, "the AI assistant is paused (emergency stop) - please confirm before the desk acts")
+        _set_facts(self.session, outcome, decision_class=decision_class(category, risk.needs_admin))
         if risk.needs_admin and not facts.get("admin_approved"):
             if facts.get("agent_stage") != "AWAITING_APPROVAL":
                 approval = Approval(
@@ -390,13 +529,20 @@ class AdminDesk:
                 _set_facts(
                     self.session, outcome, agent_stage="AWAITING_APPROVAL", missing=[],
                     decision_reason=risk.reason, approval_id=approval.approval_id,
+                    approval_requested_at=utcnow().isoformat(),
                 )
                 self._ticket_status(outcome, "AWAITING_APPROVAL")
-                self._notify_admin(outcome, kind="decision", headline=f"Needs your approval - {risk.reason}")
+                self._notify_admin(outcome, kind="decision", headline=f"Needs your approval - {risk.reason}", route=route)
             return {"intent": intent, "status": "awaiting_approval", "outcome": outcome, "reason": risk.reason}
-        return self._dispatch(outcome, intent, route)
+        result = self._dispatch(outcome, intent, route)
+        if missing:
+            # Urgent work starts at once; the open questions go to the requester in the same reply.
+            _set_facts(self.session, outcome, missing=missing)
+            result["missing"] = missing
+        return result
 
     def _dispatch(self, outcome: Outcome, intent: Optional[AgentIntent], route: Route) -> dict:
+        self._start_clock(outcome)
         facts = outcome.facts or {}
         category = facts.get("agent_category") or "general"
         action = playbook_for(category).action
@@ -414,16 +560,24 @@ class AdminDesk:
                 if all(t.department_code != team.department_code for t in group):
                     group.append(team)
             names = [t.department_name for group in by_inbox.values() for t in group]
-            for group in by_inbox.values():
+            groups = []
+            for inbox, group in by_inbox.items():
                 label = " + ".join(t.department_name for t in group)
+                groups.append({"label": label, "recipients": list(inbox), "done": False})
                 self._work_order(
                     outcome, group[0], headline=f"{playbook_for(category).label} - {label} tasks",
                     final=False, fingerprint_extra=label,
                 )
             day1 = self._day_one_note(outcome) if category == "onboarding" else ""
-            _set_facts(self.session, outcome, agent_stage="DISPATCHED", missing=[], teams=names, day1_note=day1 or None)
+            _set_facts(self.session, outcome, agent_stage="DISPATCHED", missing=[], teams=names, team_groups=groups,
+                       day1_note=day1 or None)
             self._ticket_status(outcome, "ASSIGNED", assignee=route.recipients[0] if route.recipients else None)
             return {"intent": intent, "status": "dispatched", "outcome": outcome, "team": ", ".join(names), "day1": day1}
+        if action == "parking" and (facts.get("details") or {}).get("parking_type") == "employee_permanent":
+            _set_facts(self.session, outcome, agent_stage="DISPATCHED", missing=[])
+            self._ticket_status(outcome, "ASSIGNED", assignee=route.recipients[0] if route.recipients else None)
+            self._work_order(outcome, route, headline="Employee parking - permanent allocation needed", final=False)
+            return {"intent": intent, "status": "dispatched", "outcome": outcome, "team": route.department_name}
         if action == "parking":
             slots = self._allot_parking(outcome)
             done = bool(slots) and all(s.get("slot") for s in slots)
@@ -437,8 +591,29 @@ class AdminDesk:
             return {"intent": intent, "status": "allocated" if done else "dispatched", "outcome": outcome, "parking": slots}
         _set_facts(self.session, outcome, agent_stage="DISPATCHED", missing=[])
         self._ticket_status(outcome, "ASSIGNED", assignee=route.recipients[0] if route.recipients else None)
-        self._work_order(outcome, route, headline="New work order", final=False)
+        headline = "New work order"
+        if facts.get("knowledge_gap"):
+            headline = 'Question needs a verified answer - reply "tell requester: <answer>"'
+        elif outcome.priority == "URGENT":
+            headline = "URGENT work order - please act now"
+        elif outcome.priority == "HIGH":
+            headline = "High-priority work order"
+        self._work_order(outcome, route, headline=headline, final=False)
         return {"intent": intent, "status": "dispatched", "outcome": outcome, "team": route.department_name}
+
+    def _start_clock(self, outcome: Outcome) -> None:
+        """SLA runs from when the team gets the work, not from when we were still asking or waiting for approval."""
+        facts = outcome.facts or {}
+        if facts.get("dispatched_at"):
+            return
+        hours = float(facts.get("sla_hours") or 24)
+        now = utcnow()
+        outcome.due_at = now + timedelta(hours=hours)
+        _set_facts(self.session, outcome, dispatched_at=now.isoformat())
+        ticket = self._ticket(outcome)
+        if ticket:
+            ticket.sla_due_at = outcome.due_at
+            self.session.add(ticket)
 
     def _update(self, outcome: Outcome, intent: AgentIntent, event: RawEmailEvent, decision: AgentDecision) -> dict:
         facts = outcome.facts or {}
@@ -453,12 +628,42 @@ class AdminDesk:
             ticket.details = details
             self.session.add(ticket)
         stage = facts.get("agent_stage")
-        route = route_for(self.session, self.tenant_id, facts.get("agent_category") or "general")
+        route = route_for_case(self.session, self.tenant_id, facts)
+        said = strip_for_ai(event.body_text or "")
+        if stage == "RESOLVED" and _NOT_FIXED_RE.search(said):
+            return self.reopen(outcome, said, actor=outcome.requester_email or "requester", intent=intent)
+        if stage == "RESOLVED" and _SATISFIED_RE.search(said):
+            self._close(outcome, "Requester confirmed it is sorted.", closure="verified_by_requester")
+            return {"intent": intent, "status": "closed", "outcome": outcome}
         if stage == "AWAITING_INFO":
             return self._progress(outcome, intent, route, decision, text=event.body_text or "")
         if stage in {"DISPATCHED", "AWAITING_APPROVAL"} and intent.details:
             self._work_order(outcome, route, headline="Update from requester", final=False, fingerprint_extra=event.event_id)
         return {"intent": intent, "status": "updated", "outcome": outcome}
+
+    def reopen(self, outcome: Outcome, reason: str, *, actor: str, intent: Optional[AgentIntent] = None) -> dict:
+        facts = outcome.facts or {}
+        count = int(facts.get("reopen_count") or 0) + 1
+        outcome.status = OutcomeStatus.ACTIVE.value
+        outcome.closed_at = None
+        self.session.add(outcome)
+        _set_facts(
+            self.session, outcome, agent_stage="DISPATCHED", reopen_count=count, reopen_reason=reason[:400],
+            dispatched_at=None, sla_reminded_at=None, sla_escalated_at=None, resolution_note=None,
+            evidence_status=None, closure_type=None, verified=None,
+        )
+        add_correction(self.session, outcome, "reopened", actor, reason=reason[:200])
+        self._start_clock(outcome)
+        self._ticket_status(outcome, "REOPENED")
+        route = route_for_case(self.session, self.tenant_id, facts)
+        self._work_order(
+            outcome, route, headline=f"Reopened - requester says it is not sorted (reopen #{count})",
+            final=False, fingerprint_extra=f"reopen{count}",
+        )
+        if count >= 2:
+            self._notify_admin(outcome, kind="at_risk", headline=f"Reopened {count} times - needs a closer look")
+        logger.info("desk_case_reopened", outcome_id=outcome.outcome_id, count=count, actor=actor)
+        return {"intent": intent, "status": "reopened", "outcome": outcome, "team": route.department_name}
 
     def _cancel(self, outcome: Outcome, intent: AgentIntent) -> dict:
         outcome.status = OutcomeStatus.CANCELLED.value
@@ -468,16 +673,39 @@ class AdminDesk:
         for vp in self.session.exec(select(VisitorPass).where(VisitorPass.outcome_id == outcome.outcome_id)).all():
             vp.status = "CANCELLED"
             self.session.add(vp)
-        route = route_for(self.session, self.tenant_id, (outcome.facts or {}).get("agent_category") or "general")
+        route = route_for_case(self.session, self.tenant_id, outcome.facts or {})
         self._work_order(outcome, route, headline="Cancelled by requester - no action needed", final=True)
+        self.record_closure(outcome, "cancelled")
         return {"intent": intent, "status": "cancelled", "outcome": outcome}
 
-    def _close(self, outcome: Outcome, note: str) -> dict:
+    def _close(self, outcome: Outcome, note: str, *, closure: str = "administrative") -> dict:
         outcome.status = OutcomeStatus.CLOSED.value
         outcome.closed_at = utcnow()
         _set_facts(self.session, outcome, agent_stage="CLOSED", resolution_note=note)
         self._ticket_status(outcome, "CLOSED")
+        self.record_closure(outcome, closure)
         return {"intent": None, "status": "closed", "outcome": outcome}
+
+    def record_closure(self, outcome: Outcome, closure: str) -> None:
+        """Honest closure reason (blueprint 11.3) and the learning record; never let it break the close itself."""
+        from app.agent.learning import VERIFIED_CLOSURES
+
+        _set_facts(self.session, outcome, closure_type=closure, verified=closure in VERIFIED_CLOSURES)
+        try:
+            save_learning_record(self.session, outcome)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("learning_record_failed", outcome_id=outcome.outcome_id, error=str(exc))
+
+    def auto_close_resolved(self, outcome: Outcome) -> None:
+        """Quiet period after resolution: verified only when the team left completion evidence."""
+        evidence = (outcome.facts or {}).get("evidence_status")
+        closure = "verified_evidence" if evidence in {"provided", "admin_confirmed", "not_required"} else "closed_without_evidence"
+        outcome.status = OutcomeStatus.CLOSED.value
+        outcome.closed_at = utcnow()
+        self.session.add(outcome)
+        _set_facts(self.session, outcome, agent_stage="CLOSED", closed_reason="auto-closed after resolution")
+        self._ticket_status(outcome, "CLOSED")
+        self.record_closure(outcome, closure)
 
     # ------------------------------------------------------------ helpers
     def _ticket(self, outcome: Outcome) -> Optional[ServiceTicket]:
@@ -566,9 +794,15 @@ class AdminDesk:
         name = resolve_requester_name(self.session, outcome=outcome)
         lines = [f"{outcome.case_reference} - {outcome.title}", "", headline, ""]
         lines.append(f"Requester: {name} <{outcome.requester_email}>" if name not in {"there", "team"} else f"Requester: {outcome.requester_email}")
-        lines.append(f"Type: {(facts.get('agent_category') or 'general').replace('_', ' ')}")
+        lines.append(f"Type: {facts.get('category_label') or label_for(facts.get('agent_category'))}")
         if facts.get("department_name"):
             lines.append(f"Team: {facts['department_name']}")
+        if outcome.priority and outcome.priority != "MEDIUM":
+            lines.append(f"Priority: {outcome.priority.title()}" + (f" ({facts['priority_reason']})" if facts.get("priority_reason") else ""))
+        if outcome.due_at and facts.get("dispatched_at"):
+            from app.engine.event_services import fmt_local
+
+            lines.append(f"Due by: {fmt_local(outcome.due_at + timedelta(hours=5, minutes=30))}")
         vendor = self._preferred_vendor(facts.get("agent_category") or "")
         if vendor:
             lines.append(f"Preferred vendor: {vendor}")
@@ -586,8 +820,15 @@ class AdminDesk:
         if kind == "decision":
             lines.append('Reply "approve" or "reject, <reason>". You can also say "tell requester: <message>".')
         elif kind == "work":
-            lines.append('Reply "done" when finished (add a note if you like), "assign to <email>", '
+            proof = evidence_hint(facts.get("agent_category"))
+            done = f'"done - <{proof}>"' if proof else '"done" when finished (add a note if you like)'
+            lines.append('Reply "on it" / "ETA 4 pm" to update the requester, "issue: <what is blocking>" if stuck, '
+                         f'{done}, "assign to <email>", '
                          '"tell requester: <message>", "change <detail> to <value>", "close" or "cancel".')
+            if proof:
+                lines.append("A job is only marked verified once we have that note or a photo attached to your reply.")
+            lines.append('Wrong team or type? Reply "change team to <team>", "change type to <type>" or '
+                         '"change priority to high" - the desk learns from these corrections.')
         return "\n".join(lines) + "\n"
 
     @staticmethod
@@ -634,16 +875,31 @@ class AdminDesk:
         if final and admin and admin not in route.recipients and not digest_mode():
             self._notify_admin(outcome, kind="info", headline=f"Completed by the desk - {headline}")
 
-    def _notify_admin(self, outcome: Outcome, *, kind: str, headline: str) -> None:
+    def _notify_admin(self, outcome: Outcome, *, kind: str, headline: str, route: Optional[Route] = None) -> None:
         admin = self._admin()
-        if not admin:
+        recipients = [admin] if admin else []
+        if kind == "decision" and route and route.approver and route.approver not in recipients:
+            recipients.append(route.approver)
+        if not recipients:
             return
+        body = self._briefing(outcome, headline, kind=kind)
+        if kind == "decision":
+            from app.services.approval_links import approval_links_block
+
+            links = approval_links_block((outcome.facts or {}).get("approval_id"))
+            if links:
+                body += f"\nOne click:\n{links}\n"
+        labels = {"decision": "OPS DECISION", "urgent": "URGENT", "at_risk": "AT RISK", "escalation": "ESCALATION"}
+        ctype = CommunicationType.APPROVAL_REQUIRED.value if kind == "decision" else (
+            CommunicationType.ACTION_REQUIRED.value if kind in {"urgent", "at_risk", "escalation"}
+            else CommunicationType.INFORMATION_ONLY.value
+        )
         self.comms.send_case_update(
             outcome=outcome,
-            communication_type=CommunicationType.APPROVAL_REQUIRED.value if kind == "decision" else CommunicationType.INFORMATION_ONLY.value,
-            body=self._briefing(outcome, headline, kind=kind),
-            recipients=[admin],
-            action_label="OPS DECISION" if kind == "decision" else "OPS UPDATE",
+            communication_type=ctype,
+            body=body,
+            recipients=recipients,
+            action_label=labels.get(kind, "OPS UPDATE"),
             subject_hint=headline[:80],
             suppress_fingerprint=f"admin:{kind}:{headline}",
         )
@@ -658,6 +914,9 @@ class AdminDesk:
     def _reply_text(
         self, decision: AgentDecision, mine: list[AgentIntent], results: list[dict], name: str, *, split: bool
     ) -> str:
+        if any(r["status"] == "knowledge_gap" for r in results):
+            # The model's draft may contain a guessed answer - only say what is verified.
+            return self._template_reply(results, name, split=split)
         refs = [r["outcome"].case_reference for r in results if r.get("intent") and r["intent"].type == "new_request" and r.get("outcome")]
         draft = (decision.reply_to_requester or "").strip()
         if draft and not split and self._draft_is_grounded(draft, mine, results):
@@ -680,6 +939,13 @@ class AdminDesk:
         low = draft.lower()
         for r in results:
             intent = r.get("intent")
+            if intent and intent.type == "update_case" and r["status"] == "awaiting_info":
+                if "?" not in draft or _FORWARD_CLAIM_RE.search(draft):
+                    return False
+            if r["status"] == "reopened" and "reopen" not in low:
+                return False
+            if r["status"] == "closed" and intent and intent.type == "update_case" and "close" not in low:
+                return False
             if not intent or intent.type != "new_request":
                 continue
             if r["status"] == "awaiting_approval" and not intent.needs_admin_decision:
@@ -705,9 +971,21 @@ class AdminDesk:
                 lines.append(f"I've logged {what} as {ref} and passed it to the admin for approval. I'll update you here.")
             elif status == "dispatched":
                 team = r.get("team") or ((outcome.facts or {}).get("department_name") if outcome else None) or "the team"
-                lines.append(f"I've logged {what} as {ref} and assigned it to {team}. I'll let you know once it's done.")
+                if outcome is not None and outcome.priority == "URGENT":
+                    lines.append(f"I've logged {what} as {ref} as URGENT and alerted {team} and the admin right away.")
+                else:
+                    lines.append(f"I've logged {what} as {ref} and assigned it to {team}. I'll let you know once it's done.")
+                if r.get("missing"):
+                    lines += ["", "To help them, could you also tell me:"] + [f"- {q}" for q in r["missing"]]
                 if r.get("day1"):
                     lines += ["", r["day1"]]
+            elif status == "knowledge_gap":
+                lines.append("I couldn't find a verified answer to that in our records, so rather than guess I've passed "
+                             f"your question to the admin team ({ref}). They'll reply to you here.")
+            elif status == "reopened":
+                team = r.get("team") or "the team"
+                lines.append(f"Sorry it's still not sorted - I've reopened {ref} ({what}) and sent it back to {team} "
+                             "with your note. I'll update you here.")
             elif status == "issued":
                 lines.append(f"Your visitors are pre-registered ({ref}):")
                 lines += [f"- {p['name']}: pass {p['pass_code']}" for p in r.get("passes", [])]
@@ -780,39 +1058,31 @@ class AdminDesk:
         self.session.flush()
 
     # ------------------------------------------------------------ admin / team replies
-    def apply_team_reply(self, outcome: Outcome, text: str, actor: str) -> dict:
+    def apply_team_reply(self, outcome: Outcome, text: str, actor: str, attachments: Optional[list[str]] = None) -> dict:
         """Admin or department replying on a desk case in plain words."""
+        files = [a for a in (attachments or []) if a]
         body = (text or "").strip()
         low = body.lower()
         facts = outcome.facts or {}
-        route = route_for(self.session, self.tenant_id, facts.get("agent_category") or "general")
+        route = route_for_case(self.session, self.tenant_id, facts)
         tell = re.search(r"(?:tell|inform|message|reply to)\s+(?:the\s+)?requester\s*[:\-,]?\s*(.+)", body, re.I | re.S)
         assign = re.search(r"\bassign(?:ed)?\s+(?:it\s+)?to\s+([\w.+-]+@[\w.-]+)", body, re.I)
         if re.match(r"^\s*(?:approved?|ok(?:ay)?\s+approved?|yes,?\s+approve|go\s+ahead)\b", low):
             if facts.get("agent_stage") != "AWAITING_APPROVAL":
                 return {"applied": False, "action": "approve", "note": "nothing pending approval"}
             self._decide_approval(outcome, "APPROVED", actor)
-            _set_facts(self.session, outcome, admin_approved=True, approved_by=actor)
-            result = self._dispatch(outcome, None, route)
-            self._tell_requester(outcome, self._approved_text(outcome, result))
+            self.on_approval_decided(outcome, approved=True, actor=actor)
             return {"applied": True, "action": "approve"}
         if re.match(r"^\s*(?:reject(?:ed)?|decline[d]?|deny|denied|not\s+approved)\b", low):
             reason = re.sub(r"^\s*(?:reject(?:ed)?|decline[d]?|deny|denied|not\s+approved)\b[\s,:\-]*", "", body, flags=re.I).strip()
             self._decide_approval(outcome, "REJECTED", actor, reason)
-            outcome.status = OutcomeStatus.CLOSED.value
-            outcome.closed_at = utcnow()
-            _set_facts(self.session, outcome, agent_stage="REJECTED", resolution_note=reason or "Not approved")
-            self._ticket_status(outcome, "REJECTED")
-            self._tell_requester(
-                outcome,
-                f"Sorry - {outcome.case_reference} ({outcome.title}) could not be approved"
-                + (f": {reason}" if reason else ".") + "\n\nReply here if you'd like to discuss it.",
-            )
+            self.on_approval_decided(outcome, approved=False, actor=actor, note=reason)
             return {"applied": True, "action": "reject"}
         if assign:
             email = assign.group(1).lower()
             self._ticket_status(outcome, "ASSIGNED", assignee=email)
             _set_facts(self.session, outcome, assignee_email=email)
+            add_correction(self.session, outcome, "reassigned", actor, to=email)
             self.comms.send_case_update(
                 outcome=outcome,
                 communication_type=CommunicationType.ACTION_REQUIRED.value,
@@ -824,14 +1094,29 @@ class AdminDesk:
             )
             return {"applied": True, "action": "assign", "assignee": email}
         if tell:
-            self._tell_requester(outcome, tell.group(1).strip())
+            message = tell.group(1).strip()
+            if facts.get("knowledge_gap") and facts.get("agent_stage") not in {"RESOLVED", "CLOSED"}:
+                self._tell_requester(outcome, f"About your question ({outcome.case_reference}): {message}")
+                self._record_evidence(outcome, message, actor, files)
+                self._resolve(outcome, note=message[:400], actor=actor, evidence="provided")
+                self._draft_knowledge(outcome, message, actor)
+                return {"applied": True, "action": "answered"}
+            self._tell_requester(outcome, message)
             return {"applied": True, "action": "message"}
         change = re.match(r"^\s*(?:change|update|set|move)\s+(?:the\s+)?(.{2,40}?)\s+to\s+(.+)$", body.splitlines()[0] if body else "", re.I)
         if change:
             field = re.sub(r"[^a-z0-9]+", "_", change.group(1).lower()).strip("_")
             value = change.group(2).strip().rstrip(".")
+            if field in {"category", "type", "request_type"}:
+                return self._recategorise(outcome, value, actor)
+            if field in {"team", "department", "dept"}:
+                return self._reroute(outcome, value, actor)
+            if field == "priority":
+                return self._reprioritise(outcome, value, actor)
+            previous = (facts.get("details") or {}).get(field)
             details = {**(facts.get("details") or {}), field: value}
             _set_facts(self.session, outcome, details=details)
+            add_correction(self.session, outcome, "detail_changed", actor, field=field, before=previous, after=value)
             ticket = self._ticket(outcome)
             if ticket:
                 ticket.details = details
@@ -843,30 +1128,270 @@ class AdminDesk:
             )
             return {"applied": True, "action": "change", "field": field, "value": value}
         if re.match(r"^\s*(?:close|close\s+it|close\s+the\s+case)\b", low):
-            self._close(outcome, f"Closed by {actor}")
+            self._close(outcome, f"Closed by {actor}", closure="administrative")
             self._tell_requester(outcome, f"{outcome.case_reference} ({outcome.title}) is now closed. Reply here if you need anything else.")
             return {"applied": True, "action": "close"}
-        if re.search(r"\b(?:done|fixed|resolved|completed|closed|sorted|repaired|replaced|delivered|arranged)\b", low):
-            note = re.sub(r"^\s*(?:it'?s\s+)?(?:done|fixed|resolved|completed|closed)\b[\s,.:\-]*", "", body, flags=re.I).strip()
-            _set_facts(self.session, outcome, agent_stage="RESOLVED", resolution_note=note or "Completed", resolved_by=actor)
-            outcome.status = OutcomeStatus.RESOLVED.value
-            self.session.add(outcome)
-            self._ticket_status(outcome, "RESOLVED")
-            self._tell_requester(
-                outcome,
-                f"Good news - {outcome.case_reference} ({outcome.title}) has been taken care of."
-                + (f"\nNote from the team: {note}" if note else "")
-                + "\n\nIf anything is still not right, just reply here and I'll reopen it.",
-            )
-            admin = self._admin()
-            if admin and actor != admin and not digest_mode():
-                self._notify_admin(outcome, kind="info", headline=f"Completed by {actor}")
-            return {"applied": True, "action": "done"}
+        if _TEAM_ISSUE_RE.match(body):
+            return self._team_blocked(outcome, body, actor)
+        if _TEAM_PROGRESS_RE.match(body):
+            return self._team_progress(outcome, body, actor)
+        if _is_done_reply(low):
+            return self._team_done(outcome, body, actor, files)
         if re.match(r"^\s*cancel", low):
             self._cancel(outcome, AgentIntent(type="cancel"))
             self._tell_requester(outcome, f"{outcome.case_reference} ({outcome.title}) has been cancelled by the admin team.")
             return {"applied": True, "action": "cancel"}
+        if facts.get("agent_stage") == "RESOLVED" and facts.get("evidence_status") == "missing" and (body or files):
+            return self._add_evidence(outcome, body, actor, files)
         return {"applied": False, "action": "unknown"}
+
+    def on_approval_decided(self, outcome: Outcome, *, approved: bool, actor: str, note: str = "") -> dict:
+        """Single place a desk approval takes effect - mail reply, dashboard or signed link."""
+        facts = outcome.facts or {}
+        if facts.get("agent_stage") != "AWAITING_APPROVAL":
+            return {"applied": False}
+        route = route_for_case(self.session, self.tenant_id, facts)
+        if approved:
+            if outcome.status == OutcomeStatus.AT_RISK.value:
+                outcome.status = OutcomeStatus.ACTIVE.value
+                self.session.add(outcome)
+            _set_facts(self.session, outcome, admin_approved=True, approved_by=actor)
+            result = self._dispatch(outcome, None, route)
+            self._tell_requester(outcome, self._approved_text(outcome, result))
+            return {"applied": True, "action": "approve", "result": result.get("status")}
+        outcome.status = OutcomeStatus.CLOSED.value
+        outcome.closed_at = utcnow()
+        self.session.add(outcome)
+        _set_facts(self.session, outcome, agent_stage="REJECTED", resolution_note=note or "Not approved", rejected_by=actor)
+        self._ticket_status(outcome, "REJECTED")
+        self.record_closure(outcome, "rejected")
+        self._tell_requester(
+            outcome,
+            f"Sorry - {outcome.case_reference} ({outcome.title}) could not be approved"
+            + (f": {note}" if note else ".") + "\n\nReply here if you'd like to discuss it.",
+        )
+        return {"applied": True, "action": "reject"}
+
+    def _team_blocked(self, outcome: Outcome, body: str, actor: str) -> dict:
+        note = re.sub(r"^\s*(?:issue|problem|blocked|on\s+hold)\s*[:\-,]?\s*", "", body, flags=re.I).strip()[:400]
+        outcome.status = OutcomeStatus.AT_RISK.value
+        self.session.add(outcome)
+        _set_facts(self.session, outcome, agent_stage="BLOCKED", blocked_reason=note, blocked_by=actor,
+                   blocked_at=utcnow().isoformat())
+        self._ticket_status(outcome, "ON_HOLD")
+        if actor != self._admin():
+            self._notify_admin(outcome, kind="at_risk", headline=f"Team reports a problem: {note[:80]}")
+        self._tell_requester(
+            outcome,
+            f"A quick update on {outcome.case_reference} ({outcome.title}): the team has hit a snag - {note}\n\n"
+            "We're on it and will update you as soon as it moves.",
+        )
+        return {"applied": True, "action": "blocked"}
+
+    def _team_progress(self, outcome: Outcome, body: str, actor: str) -> dict:
+        note = body.strip().splitlines()[0][:300]
+        facts = outcome.facts or {}
+        if outcome.status == OutcomeStatus.AT_RISK.value:
+            outcome.status = OutcomeStatus.ACTIVE.value
+            self.session.add(outcome)
+        _set_facts(self.session, outcome, agent_stage="IN_PROGRESS", progress_note=note, progress_by=actor,
+                   acknowledged_at=facts.get("acknowledged_at") or utcnow().isoformat())
+        self._ticket_status(outcome, "IN_PROGRESS")
+        self._tell_requester(outcome, f"Update on {outcome.case_reference} ({outcome.title}) from the team: {note}")
+        return {"applied": True, "action": "in_progress"}
+
+    def _team_done(self, outcome: Outcome, body: str, actor: str, files: Optional[list[str]] = None) -> dict:
+        facts = outcome.facts or {}
+        files = files or []
+        note = re.sub(r"^\s*(?:it'?s\s+|all\s+)?(?:done|fixed|resolved|completed|closed)\b[\s,.:\-]*", "", body, flags=re.I).strip()
+        if facts.get("agent_stage") == "RESOLVED":
+            return self._add_evidence(outcome, note or body, actor, files)
+        groups = [dict(g) for g in facts.get("team_groups") or []]
+        admin = self._admin()
+        if len(groups) > 1 and actor != admin:
+            mine = [g for g in groups if actor in (g.get("recipients") or [])]
+            for g in mine:
+                g["done"] = True
+                g["note"] = note[:300] or None
+            pending = [g["label"] for g in groups if not g.get("done")]
+            if mine and pending:
+                if note or files:
+                    self._record_evidence(outcome, note, actor, files)
+                _set_facts(self.session, outcome, team_groups=groups, agent_stage="IN_PROGRESS")
+                return {"applied": True, "action": "team_done", "pending": pending}
+            _set_facts(self.session, outcome, team_groups=groups)
+
+        hint = evidence_hint(facts.get("agent_category"))
+        if files or len(note.split()) >= 3:
+            self._record_evidence(outcome, note, actor, files)
+            evidence = "provided"
+        elif actor == admin:
+            evidence = "admin_confirmed"
+        elif not hint or facts.get("knowledge_gap"):
+            evidence = "not_required"
+        else:
+            evidence = "missing"
+        self._resolve(outcome, note=note, actor=actor, evidence=evidence)
+        days = max(1, round(float(getattr(self.settings, "desk_autoclose_hours", 72) or 72) / 24))
+        if facts.get("knowledge_gap") and note:
+            self._tell_requester(outcome, f"About your question ({outcome.case_reference}): {note}")
+            self._draft_knowledge(outcome, note, actor)
+        else:
+            self._tell_requester(
+                outcome,
+                f"Good news - {outcome.case_reference} ({outcome.title}) has been taken care of."
+                + (f"\nNote from the team: {note}" if note else "")
+                + f"\n\nIf anything is still not right, just reply \"not fixed\" and I'll reopen it. "
+                f"Otherwise it closes automatically in {days} day{'s' if days != 1 else ''}.",
+            )
+        if evidence == "missing":
+            self.comms.send_case_update(
+                outcome=outcome,
+                communication_type=CommunicationType.ACTION_REQUIRED.value,
+                body=self._briefing(
+                    outcome,
+                    f"Thanks for completing this. To close it as verified, please reply with {hint} "
+                    "(or attach a photo).",
+                    kind="info",
+                ),
+                recipients=[actor],
+                action_label="PROOF NEEDED",
+                subject_hint="Completion note needed",
+                suppress_fingerprint=f"proof:{outcome.outcome_id}:{facts.get('reopen_count') or 0}",
+            )
+        if admin and actor != admin and not digest_mode():
+            self._notify_admin(outcome, kind="info", headline=f"Completed by {actor}")
+        return {"applied": True, "action": "done", "evidence": evidence}
+
+    def _draft_knowledge(self, outcome: Outcome, answer: str, actor: str) -> None:
+        """A human's answer becomes a draft FAQ; the AI only uses it once an admin approves it (governed learning)."""
+        from app.models.company import KnowledgeEntry
+
+        question = str(((outcome.facts or {}).get("details") or {}).get("question") or outcome.title)
+        key = f"learned_{outcome.case_reference or outcome.outcome_id}".lower().replace("-", "_")
+        entry = self.session.exec(
+            select(KnowledgeEntry).where(KnowledgeEntry.tenant_id == self.tenant_id, KnowledgeEntry.key == key)
+        ).first() or KnowledgeEntry(tenant_id=self.tenant_id, key=key, title="", content="")
+        entry.title = re.sub(r"^Question:\s*", "", outcome.title or question)[:200]
+        entry.content = f"Q: {question.strip()[:600]}\nA: {answer.strip()[:1500]}\n(answered by {actor})"
+        entry.section = "draft"
+        entry.is_active = False
+        entry.updated_at = utcnow()
+        self.session.add(entry)
+        self.session.flush()
+
+    def _recategorise(self, outcome: Outcome, value: str, actor: str) -> dict:
+        facts = outcome.facts or {}
+        new = normalize_category(value)
+        old = facts.get("agent_category") or "general"
+        if new == old:
+            return {"applied": False, "action": "recategorise", "note": "already that type"}
+        before = route_for_case(self.session, self.tenant_id, facts)
+        route = route_for(self.session, self.tenant_id, new)
+        _set_facts(self.session, outcome, agent_category=new, category_label=label_for(new),
+                   department_code=route.department_code, department_name=route.department_name,
+                   department_override=None)
+        outcome.category = new.upper()[:40]
+        self.session.add(outcome)
+        ticket = self._ticket(outcome)
+        if ticket:
+            ticket.category = new
+            ticket.department_code = route.department_code
+            self.session.add(ticket)
+        add_correction(self.session, outcome, "recategorised", actor, before=old, after=new,
+                       from_team=before.department_code, to_team=route.department_code)
+        return self._handover(outcome, route, before, f"Re-routed to you by {actor} (now {label_for(new)})")
+
+    def _reroute(self, outcome: Outcome, value: str, actor: str) -> dict:
+        facts = outcome.facts or {}
+        dept = find_department(self.session, self.tenant_id, value)
+        if dept is None:
+            return {"applied": False, "action": "reroute", "note": f"no team called {value}"}
+        before = route_for_case(self.session, self.tenant_id, facts)
+        if dept.code == before.department_code:
+            return {"applied": False, "action": "reroute", "note": "already with that team"}
+        _set_facts(self.session, outcome, department_override=dept.code, department_code=dept.code, department_name=dept.name)
+        route = route_for_case(self.session, self.tenant_id, outcome.facts or {})
+        ticket = self._ticket(outcome)
+        if ticket:
+            ticket.department_code = dept.code
+            self.session.add(ticket)
+        add_correction(self.session, outcome, "rerouted", actor, category=facts.get("agent_category"),
+                       before=before.department_code, after=dept.code)
+        return self._handover(outcome, route, before, f"Re-routed to you by {actor}")
+
+    def _handover(self, outcome: Outcome, route: Route, before: Route, headline: str) -> dict:
+        if (outcome.facts or {}).get("agent_stage") in {"DISPATCHED", "IN_PROGRESS", "BLOCKED"}:
+            self._ticket_status(outcome, "ASSIGNED", assignee=route.recipients[0] if route.recipients else None)
+            self._work_order(outcome, route, headline=headline, final=False, fingerprint_extra=f"handover:{route.department_code}")
+            if before.recipients and set(before.recipients) != set(route.recipients):
+                self.comms.send_case_update(
+                    outcome=outcome,
+                    communication_type=CommunicationType.INFORMATION_ONLY.value,
+                    body=self._briefing(outcome, f"Moved to {route.department_name} - no action needed from you.", kind="info"),
+                    recipients=before.recipients,
+                    action_label="REASSIGNED",
+                    subject_hint="Moved to another team",
+                    suppress_fingerprint=f"moved:{route.department_code}",
+                )
+        return {"applied": True, "action": "rerouted", "team": route.department_name}
+
+    def _reprioritise(self, outcome: Outcome, value: str, actor: str) -> dict:
+        from app.agent.priority import normalize_priority
+
+        new = normalize_priority(value)
+        old = outcome.priority or "MEDIUM"
+        if new == old:
+            return {"applied": False, "action": "priority", "note": "already that priority"}
+        facts = outcome.facts or {}
+        route = route_for_case(self.session, self.tenant_id, facts)
+        hours = sla_hours_for(new, route.sla_hours)
+        outcome.priority = new
+        start = facts.get("dispatched_at")
+        if start:
+            from datetime import datetime
+
+            outcome.due_at = datetime.fromisoformat(start) + timedelta(hours=hours)
+        self.session.add(outcome)
+        _set_facts(self.session, outcome, sla_hours=hours, priority_reason=f"set by {actor}",
+                   sla_reminded_at=None, sla_escalated_at=None)
+        ticket = self._ticket(outcome)
+        if ticket:
+            ticket.priority = new
+            ticket.sla_due_at = outcome.due_at
+            self.session.add(ticket)
+        add_correction(self.session, outcome, "priority_changed", actor, before=old, after=new)
+        return {"applied": True, "action": "priority", "priority": new}
+
+    def _resolve(self, outcome: Outcome, *, note: str, actor: str, evidence: str) -> None:
+        _set_facts(self.session, outcome, agent_stage="RESOLVED", resolution_note=note or "Completed", resolved_by=actor,
+                   resolved_at=utcnow().isoformat(), evidence_status=evidence)
+        if outcome.status != OutcomeStatus.RESOLVED.value:
+            outcome.status = OutcomeStatus.RESOLVED.value
+            self.session.add(outcome)
+        self._ticket_status(outcome, "RESOLVED")
+
+    def _record_evidence(self, outcome: Outcome, note: str, actor: str, files: list[str]) -> None:
+        self.session.add(
+            Evidence(
+                tenant_id=self.tenant_id,
+                outcome_id=outcome.outcome_id,
+                evidence_type="ATTACHMENT" if files else "COMPLETION_NOTE",
+                record_ref=", ".join(files)[:500] or None,
+                description=(note or "")[:1000] or None,
+                metadata_json={"by": actor, "files": files},
+            )
+        )
+        self.session.flush()
+
+    def _add_evidence(self, outcome: Outcome, note: str, actor: str, files: list[str]) -> dict:
+        """Proof sent after the job was marked done: the case can now close as verified."""
+        if not (files or len((note or "").split()) >= 2):
+            return {"applied": False, "action": "evidence", "note": "no usable proof in the reply"}
+        self._record_evidence(outcome, note, actor, files)
+        _set_facts(self.session, outcome, evidence_status="provided",
+                   resolution_note=note[:400] if note else (outcome.facts or {}).get("resolution_note"))
+        return {"applied": True, "action": "evidence"}
 
     def _approved_text(self, outcome: Outcome, result: dict) -> str:
         status = result.get("status")

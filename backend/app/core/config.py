@@ -88,6 +88,14 @@ class Settings(BaseSettings):
     # Pending approvals / department task packages: one reminder after N hours, one escalation after M hours
     followup_reminder_hours: float = 8.0
     followup_escalate_hours: float = 24.0
+    # Service requests (non-meeting): resolved cases close on their own; unanswered questions get one nudge
+    desk_autoclose_hours: float = 72.0
+    desk_info_nudge_hours: float = 24.0
+    desk_info_close_hours: float = 96.0
+    desk_approval_reminder_hours: float = 8.0
+    # Emergency stop: no AI calls; rules still log requests and safety words still go urgent, but every
+    # new request waits for the admin (blueprint section 16).
+    ai_emergency_stop: bool = False
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 480
 

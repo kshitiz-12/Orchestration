@@ -71,6 +71,18 @@ def apply_decision(
     if outcome is None:
         return None
     comms = comms or default_comms(session, tenant_id)
+    if outcome.template_code == "SERVICE_REQUEST":
+        from app.agent.desk import AdminDesk
+
+        desk = AdminDesk(session, tenant_id, comms)
+        desk.on_approval_decided(outcome, approved=approved, actor=actor, note=note)
+        if via != "admin_mail":
+            desk._notify_admin(
+                outcome, kind="info",
+                headline=f"{'Approved' if approved else 'Not approved'} via {via.replace('_', ' ')} by {actor}",
+            )
+        logger.info("approval_decided", approval_id=approval.approval_id, decision=decision, via=via, desk=True)
+        return outcome
     orch = ClientMeetingOrchestrator(session, tenant_id, OutcomeEngine(session, tenant_id), comms)
     orch.on_approval_decided(outcome, approval, approved=approved, note=note)
     if via != "admin_mail":

@@ -88,7 +88,11 @@ export default function EmailInboxPage() {
           <h2 style={{ marginBottom: "0.75rem" }}>How to try it</h2>
           <ol className="muted" style={{ margin: 0, paddingLeft: "1.1rem", lineHeight: 1.55 }}>
             <li>
-              Send: <em>&quot;I need a meeting room for 3 people.&quot;</em> to the address above.
+              Send any office request to the address above, for example{" "}
+              <em>&quot;The AC on 3rd floor is not cooling&quot;</em>,{" "}
+              <em>&quot;Visitor coming tomorrow 11am, please arrange a pass&quot;</em>,{" "}
+              <em>&quot;Need a cab to the airport on Friday 6pm&quot;</em> or{" "}
+              <em>&quot;Book a room for 6 people at 3pm&quot;</em>.
             </li>
             <li>Open <strong>Home</strong> or <strong>All requests</strong> — a new case appears.</li>
             <li>If details are missing, the system emails clarifying questions.</li>

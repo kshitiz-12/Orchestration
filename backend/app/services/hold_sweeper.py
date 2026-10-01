@@ -178,6 +178,13 @@ def run_all_sweeps(session: Session, tenant_id: str) -> dict[str, Any]:
         session.rollback()
         logger.warning("event_followups_failed", error=str(exc))
     try:
+        from app.agent.lifecycle import sweep_desk_cases
+
+        out["desk"] = sweep_desk_cases(session, tenant_id)
+    except Exception as exc:  # noqa: BLE001
+        session.rollback()
+        logger.warning("desk_sweep_failed", error=str(exc))
+    try:
         out["sla"] = tick_sla(session, tenant_id)
     except Exception as exc:  # noqa: BLE001
         session.rollback()

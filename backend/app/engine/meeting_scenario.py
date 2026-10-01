@@ -68,6 +68,22 @@ from app.services.site_services import build_cost_plan, ensure_site_services, ha
 
 logger = get_logger(__name__)
 
+# A bare "7" is usually the day ("7th oct"), not 7 AM; a start time needs am/pm, a colon, a range or a word.
+_CLOCK_HINT_RE = re.compile(
+    r"\d\s*(?:a\.?m\.?|p\.?m\.?|hrs?|h)\b|\d[:.]\d{2}|\b\d{3,4}\b|\d\s*(?:-|–|to)\s*\d"
+    r"|\b(?:noon|midday|morning|afternoon|evening|eod|lunch|after\s*lunch)\b",
+    re.I,
+)
+
+
+def _plausible_clock(value: Any) -> bool:
+    if value is None or isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return False
+    text = str(value).strip()
+    return bool(text) and bool(_CLOCK_HINT_RE.search(text))
+
 
 _CANCEL_RE = re.compile(
     r"\b(?:cancel(?:l?ed)?|call(?:ed)?\s+off|scrap)\s+(?:the\s+|my\s+|this\s+|our\s+)?"
@@ -563,6 +579,9 @@ class ClientMeetingOrchestrator(EventServicesMixin):
             source_text=text_blob,
         )
         merged = enrich_event_facts(merged, strip_for_ai(text_blob))
+        for key in ("preferred_time", "time_window"):
+            if key in merged and not _plausible_clock(merged[key]):
+                merged.pop(key)
         if (
             event_kind(merged) == "training"
             and (outcome.case_reference or "").startswith("ROOM-")

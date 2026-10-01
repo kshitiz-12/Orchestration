@@ -488,7 +488,8 @@ class ProcessingPipeline:
             from app.services.admin_commands import admin_reply_text
 
             result = AdminDesk(self.session, self.tenant_id, self.comms).apply_team_reply(
-                outcome, admin_reply_text(event.body_text or event.body_for_ai or ""), sender
+                outcome, admin_reply_text(event.body_text or event.body_for_ai or ""), sender,
+                attachments=[str(a.get("filename") or "") for a in (event.attachments or []) if isinstance(a, dict)],
             )
             if not result.get("applied"):
                 self._ops_not_understood(outcome, sender)

@@ -136,6 +136,7 @@ def ensure_schema_compat() -> None:
         CostCentre,
         Department,
         KnowledgeEntry,
+        LearningRecord,
         ServiceTicket,
         SiteService,
         VisitorPass,
@@ -153,6 +154,7 @@ def ensure_schema_compat() -> None:
             VisitorPass.__table__,  # type: ignore[attr-defined]
             SiteService.__table__,  # type: ignore[attr-defined]
             CostCentre.__table__,  # type: ignore[attr-defined]
+            LearningRecord.__table__,  # type: ignore[attr-defined]
         ],
     )
     logger.info("schema_compat_ensured")

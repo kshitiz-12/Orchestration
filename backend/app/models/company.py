@@ -114,6 +114,30 @@ class ServiceTicket(TimestampMixin, table=True):
     details: dict = Field(default_factory=dict, sa_column=Column(JSON))
 
 
+class LearningRecord(TimestampMixin, table=True):
+    """What the AI planned, what humans corrected and how the case really ended (blueprint 18.1).
+
+    Only rows with learning_eligible=True (verified closure, no open dispute) are shown to the AI as precedent.
+    """
+
+    __tablename__ = "learning_records"
+
+    record_id: str = Field(default_factory=lambda: new_id("lrn_"), primary_key=True)
+    tenant_id: str = Field(foreign_key="tenants.tenant_id", index=True)
+    outcome_id: Optional[str] = Field(default=None, index=True)
+    case_reference: Optional[str] = None
+    category: str = Field(index=True)
+    request_text: Optional[str] = Field(default=None, sa_column=Column(Text))
+    ai_plan: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    corrections: list = Field(default_factory=list, sa_column=Column(JSON))
+    final_plan: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    execution: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    closure_type: str = "unknown"
+    verified: bool = False
+    reopen_count: int = 0
+    learning_eligible: bool = Field(default=False, index=True)
+
+
 class VisitorPass(TimestampMixin, table=True):
     __tablename__ = "visitor_passes"
 

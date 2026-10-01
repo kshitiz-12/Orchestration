@@ -3,7 +3,14 @@
 import { AppShell } from "@/components/AppShell";
 import { ReadinessBar, StatusBadge } from "@/components/Status";
 import { api } from "@/lib/api";
-import { friendlyAudit, friendlyStatus, friendlyType } from "@/lib/labels";
+import {
+  friendlyAudit,
+  friendlyPriority,
+  friendlyStatus,
+  friendlyWaitingOn,
+  priorityTone,
+  requestType,
+} from "@/lib/labels";
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
 
@@ -161,12 +168,24 @@ export default function OutcomeDetailPage() {
 
   const stageLabel = String(facts.orchestration_stage || contract.stage || "").replaceAll("_", " ") || "—";
   const requesterName = facts.requester_display_name || outcome.requester_email;
-  const canReopen = ["CLOSED", "VERIFIED", "ADMINISTRATIVELY_CLOSED"].includes(outcome.status);
+  const request = data.request || {};
+  const isService = Boolean(request.is_service_request);
+  const canReopen = ["CLOSED", "VERIFIED", "ADMINISTRATIVELY_CLOSED", ...(isService ? ["RESOLVED", "CANCELLED"] : [])].includes(
+    outcome.status,
+  );
+  const detailRows = Object.entries(request.details || {}).filter(
+    ([k, v]) => v !== null && v !== "" && !(Array.isArray(v) && v.length === 0) && k !== "requester_note",
+  );
+  const showValue = (v: any) =>
+    Array.isArray(v) ? v.map((x) => (typeof x === "object" ? Object.values(x).join(" ") : String(x))).join(", ")
+      : typeof v === "object" ? JSON.stringify(v) : String(v);
+  const dueRaw = request.due_at ? String(request.due_at) : "";
+  const dueDate = dueRaw ? new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(dueRaw) ? dueRaw : `${dueRaw}Z`) : null;
 
   return (
     <AppShell
       title={outcome.case_reference}
-      subtitle={outcome.title || friendlyType(outcome.template_code)}
+      subtitle={outcome.title || requestType({ ...outcome, type_label: request.type_label })}
       actions={
         <>
           <StatusBadge status={friendlyStatus(outcome.status)} />
@@ -218,6 +237,7 @@ export default function OutcomeDetailPage() {
           >
             Mark as done
           </button>
+          {!isService && (
           <button
             className="btn secondary"
             disabled={busy === "resend"}
@@ -244,6 +264,7 @@ export default function OutcomeDetailPage() {
           >
             Ask for more info again
           </button>
+          )}
           {canReopen && (
             <button
               className="btn secondary"
@@ -274,6 +295,172 @@ export default function OutcomeDetailPage() {
     >
       {msg && <p className={`badge ${msgTone === "ok" ? "ok" : "danger"}`}>{msg}</p>}
 
+      <div className="panel" style={{ marginBottom: "1.25rem" }}>
+        <h2 style={{ marginBottom: "0.5rem" }}>At a glance</h2>
+        <div className="row" style={{ gap: "0.5rem", flexWrap: "wrap", marginBottom: "0.75rem" }}>
+          <span className="badge">{request.type_label || requestType(outcome)}</span>
+          <span className="badge">{request.department || "Admin & Workplace"}</span>
+          <span className={`badge ${priorityTone(request.priority)}`}>
+            {friendlyPriority(request.priority)} priority
+          </span>
+          {request.waiting_on && request.waiting_on !== "nobody" && (
+            <span className="badge">Waiting on: {friendlyWaitingOn(request.waiting_on)}</span>
+          )}
+          {request.reopen_count > 0 && <span className="badge warn">Reopened {request.reopen_count}×</span>}
+        </div>
+        <table>
+          <tbody>
+            <tr>
+              <td className="muted" style={{ width: "28%" }}>Where it stands</td>
+              <td>{request.stage_label || friendlyStatus(outcome.status)}</td>
+            </tr>
+            {dueDate && (
+              <tr>
+                <td className="muted">Due by</td>
+                <td style={request.past_due ? { color: "var(--danger)", fontWeight: 600 } : undefined}>
+                  {dueDate.toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}
+                  {request.past_due ? " · overdue" : ""}
+                </td>
+              </tr>
+            )}
+            {request.priority_reason && (
+              <tr>
+                <td className="muted">Why this priority</td>
+                <td>{request.priority_reason}</td>
+              </tr>
+            )}
+            {request.decision_class && (
+              <tr>
+                <td className="muted">Who decides</td>
+                <td>
+                  Class {request.decision_class} - {request.decision_class_label}
+                </td>
+              </tr>
+            )}
+            {request.desired_outcome && (
+              <tr>
+                <td className="muted">Done looks like</td>
+                <td>{request.desired_outcome}</td>
+              </tr>
+            )}
+            {request.evidence_status && (
+              <tr>
+                <td className="muted">Completion proof</td>
+                <td
+                  style={request.evidence_status === "missing" ? { color: "var(--danger)", fontWeight: 600 } : undefined}
+                >
+                  {
+                    ({
+                      provided: "On file",
+                      admin_confirmed: "Confirmed by admin",
+                      not_required: "Not needed for this type",
+                      missing: "Missing - team asked for a note or photo",
+                    } as Record<string, string>)[request.evidence_status] || request.evidence_status
+                  }
+                </td>
+              </tr>
+            )}
+            {request.closure_label && (
+              <tr>
+                <td className="muted">How it closed</td>
+                <td>
+                  <span className={`badge ${request.verified ? "ok" : "warn"}`}>{request.closure_label}</span>
+                </td>
+              </tr>
+            )}
+            {request.ai_reason && (
+              <tr>
+                <td className="muted">AI reading</td>
+                <td>
+                  {request.ai_reason}
+                  {request.ai_confidence != null ? ` (confidence ${Math.round(request.ai_confidence * 100)}%)` : ""}
+                </td>
+              </tr>
+            )}
+            {request.ticket?.assignee && (
+              <tr>
+                <td className="muted">Assigned to</td>
+                <td>{request.ticket.assignee}</td>
+              </tr>
+            )}
+            {(request.teams || []).length > 1 && (
+              <tr>
+                <td className="muted">Teams</td>
+                <td>
+                  {(request.teams || []).map((t: any) => `${t.label}: ${t.done ? "done" : "pending"}`).join(" · ")}
+                </td>
+              </tr>
+            )}
+            {Object.entries(request.notes || {}).map(([k, v]) => (
+              <tr key={k}>
+                <td className="muted" style={{ textTransform: "capitalize" }}>{prettyField(k)}</td>
+                <td>{String(v)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {isService && (
+        <div className="panel" style={{ marginBottom: "1.25rem" }}>
+          <h2 style={{ marginBottom: "0.5rem" }}>Request details</h2>
+          {detailRows.length > 0 ? (
+            <table>
+              <tbody>
+                {detailRows.map(([k, v]) => (
+                  <tr key={k}>
+                    <td className="muted" style={{ textTransform: "capitalize", width: "28%" }}>{prettyField(k)}</td>
+                    <td>{showValue(v)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <p className="muted">No structured details yet - see the email thread below.</p>
+          )}
+          {(request.evidence || []).length > 0 && (
+            <>
+              <h3 style={{ margin: "0.9rem 0 0.4rem", fontSize: "0.95rem" }}>Completion evidence</h3>
+              <ul style={{ margin: 0 }}>
+                {(request.evidence || []).map((e: any, i: number) => (
+                  <li key={i}>
+                    {e.note || "Attachment"}
+                    {e.files ? ` · files: ${e.files}` : ""}
+                    {e.by ? <span className="muted"> - {e.by}</span> : null}
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+          {(request.corrections || []).length > 0 && (
+            <>
+              <h3 style={{ margin: "0.9rem 0 0.4rem", fontSize: "0.95rem" }}>Human corrections</h3>
+              <ul style={{ margin: 0 }}>
+                {(request.corrections || []).map((c: any, i: number) => (
+                  <li key={i}>
+                    {prettyField(c.kind)}
+                    {c.field ? `: ${prettyField(c.field)} ${c.before ? `"${c.before}" → ` : "→ "}"${c.after}"` : ""}
+                    {c.to ? ` to ${c.to}` : ""}
+                    {c.reason ? ` - ${c.reason}` : ""}
+                    <span className="muted"> ({c.by})</span>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+          {(request.missing || []).length > 0 && (
+            <>
+              <h3 style={{ margin: "0.9rem 0 0.4rem", fontSize: "0.95rem" }}>Still needed from the requester</h3>
+              <ul style={{ margin: 0 }}>
+                {(request.missing || []).map((q: any, i: number) => (
+                  <li key={i}>{typeof q === "string" ? q : q.question || q.field}</li>
+                ))}
+              </ul>
+            </>
+          )}
+        </div>
+      )}
+
       {facts.pending_confirmation && facts.proposed_room && typeof facts.proposed_room === "object" && (
         <div className="panel" style={{ marginBottom: "1.25rem" }}>
           <h2 style={{ marginBottom: "0.5rem" }}>Awaiting requester confirmation</h2>
@@ -284,6 +471,7 @@ export default function OutcomeDetailPage() {
         </div>
       )}
 
+      {!isService && (
       <div className="panel" style={{ marginBottom: "1.25rem" }}>
         <div className="field-split-upper">
           <h2 style={{ marginBottom: "0.5rem" }}>Confirmed / extracted</h2>
@@ -308,6 +496,7 @@ export default function OutcomeDetailPage() {
           )}
         </div>
       </div>
+      )}
 
       {outcome.template_code === "MEETING_ROOM" && (
         <div className="panel" style={{ marginBottom: "1.25rem" }}>
@@ -504,7 +693,7 @@ export default function OutcomeDetailPage() {
         <div className="kpi">
           <div className="label">Request type</div>
           <div className="value" style={{ fontSize: "0.95rem", marginTop: "0.5rem" }}>
-            {friendlyType(outcome.template_code)}
+            {request.type_label || requestType(outcome)}
           </div>
         </div>
       </div>

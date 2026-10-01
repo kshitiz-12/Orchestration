@@ -1018,10 +1018,15 @@ class HeuristicProvider(LLMProvider):
                     )
 
         # merge reply facts (e.g. time windows)
-        if prior and ("pm" in text or "am" in text or ":" in body):
+        if prior:
             import re
 
-            m = re.search(r"(\d{1,2}\s*(?:am|pm|\d{0,2})\s*(?:to|-)?\s*\d{0,2}\s*(?:am|pm)?)", text, re.I)
+            m = re.search(
+                r"\b(\d{1,2}(?::\d{2})?\s*(?:am|pm)(?:\s*(?:to|-)\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)?)?"
+                r"|\d{1,2}:\d{2}(?:\s*(?:to|-)\s*\d{1,2}:\d{2})?)\b",
+                text,
+                re.I,
+            )
             if m:
                 entities["time_window"] = m.group(1).strip()
                 missing = [mi for mi in missing if mi["field"] != "time"]

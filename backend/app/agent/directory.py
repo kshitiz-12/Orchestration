@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -47,11 +48,23 @@ def departments(session: Session, tenant_id: str) -> list[Department]:
 
 
 def department_for(session: Session, tenant_id: str, category: str) -> Optional[Department]:
+    from app.agent.playbooks import has_playbook, normalize_category, playbook_for
+
     cat = (category or "general").strip().lower()
     rows = departments(session, tenant_id)
     for dept in rows:
         if cat in [str(c).strip().lower() for c in dept.categories or []]:
             return dept
+    norm = normalize_category(cat)
+    if norm != cat:
+        for dept in rows:
+            if norm in [str(c).strip().lower() for c in dept.categories or []]:
+                return dept
+    if has_playbook(norm):
+        owner = playbook_for(norm).department
+        found = next((d for d in rows if d.code == owner), None)
+        if found:
+            return found
     return next((d for d in rows if d.code == "ADMIN"), None)
 
 
@@ -60,8 +73,33 @@ def handles_category(session: Session, tenant_id: str, category: str) -> bool:
     return any(cat in [str(c).strip().lower() for c in d.categories or []] for d in departments(session, tenant_id))
 
 
+def find_department(session: Session, tenant_id: str, text: str) -> Optional[Department]:
+    """Match an admin's free-text team name ("facilities", "IT", "Travel Desk") to a department."""
+    want = re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+    if not want:
+        return None
+    rows = departments(session, tenant_id)
+    for dept in rows:
+        if want in {dept.code.lower(), re.sub(r"[^a-z0-9]+", " ", dept.name.lower()).strip()}:
+            return dept
+    return next((d for d in rows if want in d.name.lower() or d.code.lower().startswith(want)), None)
+
+
+def route_for_case(session: Session, tenant_id: str, facts: dict) -> Route:
+    """Route for an existing case: an admin's team override wins over the category's default team."""
+    override = facts.get("department_override")
+    if override:
+        dept = next((d for d in departments(session, tenant_id) if d.code == override), None)
+        if dept is not None:
+            return _route_from(dept)
+    return route_for(session, tenant_id, facts.get("agent_category") or "general")
+
+
 def route_for(session: Session, tenant_id: str, category: str) -> Route:
-    dept = department_for(session, tenant_id, category)
+    return _route_from(department_for(session, tenant_id, category))
+
+
+def _route_from(dept: Optional[Department]) -> Route:
     admin = _admin()
     if dept is None:
         return Route("ADMIN", "Admin", [admin] if admin else [], approver=admin, redirected_to_admin=True)
