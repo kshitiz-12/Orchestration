@@ -22,6 +22,7 @@ class Route:
     spend_approval_limit: float = 0.0
     # True when the department has no real mailbox yet and the work order goes to the main admin
     redirected_to_admin: bool = False
+    handover_info: Optional[str] = None
 
 
 def _admin() -> Optional[str]:
@@ -116,6 +117,7 @@ def _route_from(dept: Optional[Department]) -> Route:
         sla_hours=dept.sla_hours or 24,
         spend_approval_limit=float(dept.spend_approval_limit or 0),
         redirected_to_admin=redirected,
+        handover_info=(dept.handover_info or "").strip() or None,
     )
 
 
@@ -140,7 +142,10 @@ def knowledge_text(session: Session, tenant_id: str, limit_chars: int = 6000) ->
 
 def catalogue(session: Session, tenant_id: str) -> list[dict]:
     """What the desk can route, for the agent prompt."""
-    return [
-        {"department": d.code, "name": d.name, "handles": list(d.categories or []), "sla_hours": d.sla_hours}
-        for d in departments(session, tenant_id)
-    ]
+    out = []
+    for d in departments(session, tenant_id):
+        row = {"department": d.code, "name": d.name, "handles": list(d.categories or []), "sla_hours": d.sla_hours}
+        if (d.handover_info or "").strip():
+            row["collect_from"] = d.handover_info.strip()
+        out.append(row)
+    return out

@@ -14,6 +14,7 @@ type Dept = {
   approver_email: string | null;
   sla_hours: number;
   spend_approval_limit: number;
+  handover_info?: string | null;
   is_active: boolean;
   needs_setup: boolean;
 };
@@ -230,6 +231,9 @@ function Departments({ onChange, setMsg }: TabProps) {
               <td>
                 <strong>{d.name}</strong>
                 <div className="muted mono">{d.code}</div>
+                {d.handover_info && (
+                  <div className="muted" style={{ fontSize: "0.75rem", maxWidth: 220 }}>Collect: {d.handover_info}</div>
+                )}
               </td>
               <td className="muted" style={{ maxWidth: 260, fontSize: "0.8rem" }}>{d.categories.join(", ")}</td>
               <td>
@@ -267,6 +271,7 @@ function DeptForm({ dept, onSave, onCancel }: { dept: Dept | null; onSave: (f: R
   const [approver, setApprover] = useState(clean(dept?.approver_email));
   const [sla, setSla] = useState(String(dept?.sla_hours ?? 24));
   const [limit, setLimit] = useState(String(dept?.spend_approval_limit ?? 0));
+  const [handover, setHandover] = useState(dept?.handover_info || "");
   const [active, setActive] = useState(dept?.is_active ?? true);
 
   return (
@@ -307,6 +312,14 @@ function DeptForm({ dept, onSave, onCancel }: { dept: Dept | null; onSave: (f: R
           <input type="number" min={0} value={limit} onChange={(e) => setLimit(e.target.value)} />
         </div>
       </div>
+      <div className="field">
+        <label>Where to collect (shared with requesters when their item is ready)</label>
+        <input
+          value={handover}
+          onChange={(e) => setHandover(e.target.value)}
+          placeholder="IT desk, 3rd floor, 10 AM - 6 PM, ask for Rahul"
+        />
+      </div>
       {dept && (
         <label className="row" style={{ gap: "0.4rem", marginBottom: "0.75rem" }}>
           <input type="checkbox" checked={active} onChange={(e) => setActive(e.target.checked)} /> Active
@@ -325,6 +338,7 @@ function DeptForm({ dept, onSave, onCancel }: { dept: Dept | null; onSave: (f: R
               approver_email: approver,
               sla_hours: Number(sla) || 24,
               spend_approval_limit: Number(limit) || 0,
+              handover_info: handover,
               is_active: active,
             })
           }

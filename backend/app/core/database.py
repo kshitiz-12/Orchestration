@@ -100,6 +100,7 @@ def ensure_schema_compat() -> None:
             "ALTER TABLE raw_email_events ADD COLUMN provider_message_id VARCHAR",
             "ALTER TABLE raw_email_events ADD COLUMN provider_conversation_id VARCHAR",
             "ALTER TABLE communications ADD COLUMN provider_message_id VARCHAR",
+            "ALTER TABLE departments ADD COLUMN handover_info TEXT",
         ]
     else:
         statements = [
@@ -107,6 +108,7 @@ def ensure_schema_compat() -> None:
             "ALTER TABLE raw_email_events ADD COLUMN IF NOT EXISTS provider_message_id VARCHAR",
             "ALTER TABLE raw_email_events ADD COLUMN IF NOT EXISTS provider_conversation_id VARCHAR",
             "ALTER TABLE communications ADD COLUMN IF NOT EXISTS provider_message_id VARCHAR",
+            "ALTER TABLE departments ADD COLUMN IF NOT EXISTS handover_info TEXT",
             """
             UPDATE raw_email_events
             SET provider = COALESCE(provider, source, 'OUTLOOK'),

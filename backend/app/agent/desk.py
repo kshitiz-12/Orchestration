@@ -65,7 +65,7 @@ from app.models.company import ServiceTicket, VisitorPass
 from app.models.intake import Conversation, RawEmailEvent
 from app.models.org import Person, Resource, Vendor, utcnow
 from app.models.outcome import Approval, Evidence, Outcome
-from app.services.communication import CommunicationService, resolve_requester_name
+from app.services.communication import CommunicationService, humanize_email_local, resolve_requester_name
 from app.services.email_utils import strip_for_ai
 
 logger = get_logger(__name__)
@@ -73,6 +73,9 @@ logger = get_logger(__name__)
 SERVICE_TEMPLATE = "SERVICE_REQUEST"
 _CLOSED = {OutcomeStatus.CLOSED.value, OutcomeStatus.CANCELLED.value, OutcomeStatus.ADMINISTRATIVELY_CLOSED.value}
 _CASE_REF = re.compile(r"\b([A-Z]{2,5}-\d{4}-\d{3,})\b")
+# Travel bookings a cab company can't fulfil.
+_NOT_A_CAB_RE = re.compile(r"\b(?:flight|air\s*ticket|airline|train|rail|hotel|visa|bus\s+ticket)s?\b", re.I)
+
 _VENDOR_HINTS = {
     "travel": ("transport", "travel", "cab"),
     "supplies": ("stationery", "supplies"),
@@ -248,6 +251,23 @@ def joining_day(facts: dict) -> Optional[date]:
     from app.services.room_booking import parse_meeting_date
 
     return parse_meeting_date(raw, today=_ist_now().date())
+
+
+# Things the requester picks up in person once the team has them ready.
+_COLLECTABLE = {"access_card", "laptop", "asset", "phone_sim", "supplies", "printing", "courier", "lost_found"}
+_PICKUP_RE = re.compile(
+    r"[^.\n]*\b(?:collect(?:ed)?|pick(?:ed)?\s*(?:it\s+|them\s+)?up|pickup|available\s+at|come\s+to|ask\s+for)\b[^.\n]*",
+    re.I,
+)
+
+
+def _pickup_from_text(text: str) -> Optional[str]:
+    m = _PICKUP_RE.search(text or "")
+    if not m:
+        return None
+    found = re.sub(r"^\s*(?:(?:ok(?:ay)?\s+)?approved?|done|ready|all\s+set)\b[\s,:\-]*", "", m.group(0),
+                   flags=re.I).strip(" ,;-")
+    return found[:300] or None
 
 
 # Requests for something at a set time: the team's deadline can't be later than that time.
@@ -523,6 +543,10 @@ class AdminDesk:
         raw = strip_for_ai(event.body_text or "")
         verdict = infer_priority(f"{intent.summary}\n{raw}\n{details}", intent.priority)
         sla = sla_hours_for(verdict.priority, route.sla_hours)
+        # Later updates only see the case, not this mail's From header - keep the name we greeted them with.
+        known_name = resolve_requester_name(self.session, event=event, conversation=conversation)
+        if known_name in {"there", "team"} or known_name == humanize_email_local(requester):
+            known_name = None
         outcome = Outcome(
             tenant_id=self.tenant_id,
             case_reference=ref,
@@ -536,6 +560,7 @@ class AdminDesk:
             priority=verdict.priority,
             facts={
                 "agent_case": True,
+                "requester_display_name": known_name,
                 "agent_category": category,
                 "category_label": label_for(category),
                 "details": details,
@@ -979,6 +1004,9 @@ class AdminDesk:
 
             lines.append(f"Due by: {fmt_local(outcome.due_at + timedelta(hours=5, minutes=30))}")
         vendor = self._preferred_vendor(facts.get("agent_category") or "")
+        if vendor and _NOT_A_CAB_RE.search(f"{outcome.title} {' '.join(facts.get('tasks') or [])}") \
+                and re.search(r"\b(?:cab|cabs|taxi|transport)\b", vendor, re.I):
+            vendor = None
         if vendor:
             lines.append(f"Preferred vendor: {vendor}")
         # With a task list, the raw item list would show every team the other teams' work.
@@ -1004,8 +1032,16 @@ class AdminDesk:
                          '"tell requester: <message>", "change <detail> to <value>", "close" or "cancel".')
             if proof:
                 lines.append("A job is only marked verified once we have that note or a photo attached to your reply.")
+            if facts.get("agent_category") in _COLLECTABLE:
+                on_file = self._handover_info(facts)
+                lines.append("When it is ready, say where and from whom to collect it (e.g. \"done - card ready, collect "
+                             "from IT desk, 3rd floor, ask for Rahul\") so the requester knows where to go."
+                             + (f" If you don't, we'll share what's on file: {on_file}" if on_file else ""))
             lines.append('Wrong team or type? Reply "change team to <team>", "change type to <type>" or '
                          '"change priority to high" - the desk learns from these corrections.')
+        elif kind in {"escalation", "at_risk", "urgent"}:
+            lines.append('Reply "assign to <email>" to hand it to someone else, "tell requester: <message>" to update '
+                         'them, "done - <note>" if it is already handled, or "cancel".')
         return "\n".join(lines) + "\n"
 
     @staticmethod
@@ -1106,9 +1142,12 @@ class AdminDesk:
         refs = [r["outcome"].case_reference for r in results if r.get("intent") and r["intent"].type == "new_request" and r.get("outcome")]
         draft = (decision.reply_to_requester or "").strip()
         if draft and not split and self._draft_is_grounded(draft, mine, results):
-            for i, ref in enumerate(refs, start=1):
+            # Replies about existing cases use the same tokens, numbered in the order the cases come up.
+            touched = list(dict.fromkeys(r["outcome"].case_reference for r in results if r.get("outcome")))
+            for i, ref in enumerate(refs or touched, start=1):
                 draft = draft.replace(f"[[REF{i}]]", ref)
-            draft = re.sub(r"\[\[REF\d+\]\]", "", draft)
+            draft = re.sub(r"\s*\(?\[\[REF\d+\]\]\)?", "", draft)
+            draft = re.sub(r"[ \t]+([.,;:!?])", r"\1", re.sub(r"[ \t]{2,}", " ", draft))
             missing_refs = [r for r in refs if r not in draft]
             if missing_refs:
                 draft += "\n\nReference: " + ", ".join(missing_refs)
@@ -1258,6 +1297,9 @@ class AdminDesk:
         if re.match(r"^\s*(?:approved?|ok(?:ay)?\s+approved?|yes,?\s+approve|go\s+ahead)\b", low):
             if facts.get("agent_stage") != "AWAITING_APPROVAL":
                 return {"applied": False, "action": "approve", "note": "nothing pending approval"}
+            pickup = _pickup_from_text(body) if facts.get("agent_category") in _COLLECTABLE else None
+            if pickup:
+                _set_facts(self.session, outcome, pickup=pickup)
             self._decide_approval(outcome, "APPROVED", actor)
             self.on_approval_decided(outcome, approved=True, actor=actor)
             return {"applied": True, "action": "approve"}
@@ -1328,6 +1370,11 @@ class AdminDesk:
                 "TEAM": team,
                 "YOUR_TASKS": tasks or facts.get("tasks") or [],
             })
+            pickup = (reading.pickup if reading else "") or (
+                _pickup_from_text(body) if facts.get("agent_category") in _COLLECTABLE else None
+            )
+            if pickup:
+                _set_facts(self.session, outcome, pickup=pickup[:300])
             if reading:
                 note = reading.note.strip() or None
                 if reading.action == "done":
@@ -1482,11 +1529,13 @@ class AdminDesk:
             self._draft_knowledge(outcome, note, actor)
         else:
             team, _ = self._team_of(outcome, actor)
+            collect = self._collect_info(outcome)
             self._order_update(
                 outcome, actor,
                 requester_msg=(
                     f"Good news - {outcome.case_reference} ({outcome.title}) has been taken care of."
                     + (f"\nNote from {team}: {note}" if note else "")
+                    + (f"\nHow to collect: {collect}" if collect and collect.lower() not in (note or "").lower() else "")
                     + f"\n\nIf anything is still not right, just reply \"not fixed\" and I'll reopen it. "
                     f"Otherwise it closes automatically in {days} day{'s' if days != 1 else ''}."
                 ),
@@ -1723,7 +1772,25 @@ class AdminDesk:
         facts = outcome.facts or {}
         team = ", ".join(facts.get("teams") or []) if status == "dispatched" and facts.get("team_groups") else ""
         team = team or facts.get("department_name") or "the team"
-        return f"{outcome.case_reference} ({outcome.title}) is approved and assigned to {team}. I'll update you once it's done."
+        text = f"{outcome.case_reference} ({outcome.title}) is approved and assigned to {team}. I'll update you once it's done."
+        collect = self._collect_info(outcome)
+        if collect:
+            text += f"\nOnce it's ready, you can collect it: {collect}"
+        return text
+
+    def _handover_info(self, facts: dict) -> Optional[str]:
+        """The team's standing pickup instructions from company setup."""
+        try:
+            return route_for_case(self.session, self.tenant_id, facts).handover_info
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _collect_info(self, outcome: Outcome) -> Optional[str]:
+        """Where the requester collects it: what the team said, else the company default."""
+        facts = outcome.facts or {}
+        if facts.get("pickup"):
+            return facts["pickup"]
+        return self._handover_info(facts) if facts.get("agent_category") in _COLLECTABLE else None
 
     def _decide_approval(self, outcome: Outcome, decision: str, actor: str, reason: str = "") -> None:
         for apr in self.session.exec(

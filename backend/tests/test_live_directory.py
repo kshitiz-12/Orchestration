@@ -285,6 +285,83 @@ def test_catering_date_given_later_waits_for_approval_and_is_due_by_the_meal(ses
     assert case.due_at == meal - timedelta(hours=5, minutes=30), "the team's deadline is the meal time, not 12h later"
 
 
+def test_one_mail_many_cases_keeps_the_name_and_one_thread(session: Session, live):
+    tid = live
+    joiner = "kmantri1204@gmail.com"
+    ev = _mail(session, tid, "I am new joiner, need assistance in access card and seating", sender=joiner,
+               subject="Re: stationery request", thread="t-kapil")
+    ev.headers = {"from": "Kapil Mantri <kmantri1204@gmail.com>"}
+    session.add(ev)
+    session.commit()
+    _run(session, tid, ev, _ai(
+        {"type": "new_request", "category": "access_card", "summary": "Access card and ID issuance",
+         "details": {"employee_name": "Kapil Mantri"}, "needs_admin_decision": True},
+        {"type": "new_request", "category": "seating", "summary": "Desk allocation and seating",
+         "details": {"employee_name": "Kapil Mantri", "start_date": "5 Oct"}},
+    ))
+    first = _mails_to(session, joiner)[0]
+    assert first.body.startswith("Hi Kapil,")
+    card = next(o for o in session.exec(select(Outcome)).all() if o.case_reference.startswith("ITS-"))
+    decision = [m for m in _mails_to(session, ADMIN) if card.case_reference in m.subject and 'Reply "approve"' in m.body][-1]
+    _reply(session, tid, "Approve", ADMIN, decision)
+
+    later = [m for m in _mails_to(session, joiner) if m is not first]
+    assert later, "the requester hears that the card was approved"
+    for m in later:
+        assert m.body.startswith("Hi Kapil,"), m.body[:40]
+        assert re.sub(r"^\s*(?:re\s*:\s*)+", "", m.subject, flags=re.I) == re.sub(r"^\s*(?:re\s*:\s*)+", "", first.subject, flags=re.I)
+
+
+def test_flight_and_taxi_details_later_keep_case_numbers_and_right_vendor(session: Session, live):
+    tid = live
+    _run(session, tid, _mail(session, tid, "Pls book the flight ticket for me, I need taxi booking also", sender=EMP,
+                             subject="Travel arrangement", thread="t-trv"), _ai(
+        {"type": "new_request", "category": "travel", "summary": "Book flight ticket", "details": {}},
+        {"type": "new_request", "category": "travel", "summary": "Book taxi / cab", "details": {}},
+    ))
+    flight, taxi = sorted(session.exec(select(Outcome)).all(), key=lambda o: o.case_reference)
+    assert flight.facts["agent_stage"] == taxi.facts["agent_stage"] == "AWAITING_INFO"
+
+    _run(session, tid, _mail(session, tid, "morning flight Delhi to Pune on 10th Oct, 8 to 10.30 am. Sedan taxi at Pune airport for the whole day",
+                             sender=EMP, subject="Re: Travel arrangement", thread="t-trv"), FakeGemini({
+        "intents": [
+            {"type": "update_case", "case_reference": flight.case_reference, "category": "travel",
+             "details": {"travel_date": "10 October 2026", "pickup": "Delhi", "drop": "Pune", "timing": "8:00 AM to 10:30 AM flight"}},
+            {"type": "update_case", "case_reference": taxi.case_reference, "category": "travel",
+             "details": {"travel_date": "10 October 2026", "pickup": "Pune airport", "drop": "Pune airport", "vehicle_type": "sedan"}},
+        ],
+        "reply_to_requester": "Hi,\n\nI have noted the details for your flight [[REF1]] and taxi booking [[REF2]]. "
+                              "I've forwarded these to the Travel Desk.\n\nWorkplace Team",
+        "confidence": 0.9,
+    }))
+    reply = _mails_to(session, EMP)[-1].body
+    assert f"flight {flight.case_reference} and taxi booking {taxi.case_reference}." in reply
+    assert "  " not in reply and " ." not in reply
+
+    flight_order = next(m for m in _orders(session, ADMIN) if flight.case_reference in m.subject)
+    taxi_order = next(m for m in _orders(session, ADMIN) if taxi.case_reference in m.subject)
+    assert "Book flight ticket" in flight_order.body
+    vendor = re.search(r"Preferred vendor: (.+)", flight_order.body)
+    assert not vendor or not re.search(r"cab|taxi|transport", vendor.group(1), re.I)
+    assert taxi_order.body.count("Preferred vendor:") <= 1
+
+
+def test_overdue_alert_tells_the_admin_what_they_can_reply(session: Session, live):
+    tid = live
+    _run(session, tid, _mail(session, tid, "AC not cooling at 4th floor", sender=EMP, subject="AC"), _ai(
+        {"type": "new_request", "category": "hvac", "summary": "AC not cooling", "details": {"location": "4th floor"}},
+    ))
+    from app.agent.desk import AdminDesk
+    from app.services.communication import CommunicationService
+
+    case = _case(session)
+    AdminDesk(session, tid, CommunicationService(session, tid))._notify_admin(
+        case, kind="escalation", headline="SLA missed - Facilities has not closed this")
+    session.commit()
+    alert = [m for m in _mails_to(session, ADMIN) if "ESCALATION" in (m.subject or "")][-1]
+    assert '"assign to <email>"' in alert.body and '"tell requester: <message>"' in alert.body
+
+
 def test_visitor_with_no_security_inbox_goes_to_admin(session: Session, live):
     tid = live
     _run(session, tid, _mail(session, tid, "Visitor Neha Kapoor from Deloitte on 8 Oct 3 PM", sender=EMP, subject="visitor"), _ai(
@@ -342,3 +419,61 @@ def test_team_question_for_requester_is_passed_on(session: Session, live):
     last = _mails_to(session, EMP)[-1]
     assert "armrest or the wheel" in last.body and "Facilities" in last.body
     assert _case(session).facts["agent_stage"] != "RESOLVED"
+
+
+def _set_handover(session, code, info):
+    dept = session.exec(select(Department).where(Department.code == code)).one()
+    dept.handover_info = info
+    session.add(dept)
+    session.commit()
+
+
+def _new_laptop_request(session, tid):
+    _run(session, tid, _mail(session, tid, "my laptop charger stopped working, need a new one", sender=EMP, subject="charger"), _ai(
+        {"type": "new_request", "category": "laptop", "summary": "Laptop charger replacement",
+         "details": {"item": "laptop charger"}},
+    ))
+    return _orders(session, IT)[-1]
+
+
+def test_team_says_where_to_collect_and_the_requester_is_told(session: Session, live):
+    tid = live
+    order = _new_laptop_request(session, tid)
+    assert "where and from whom to collect" in order.body
+    _reply(session, tid, "done, new charger ready. collect from IT desk 3rd floor, ask for Rahul", IT, order, FakeGemini(
+        {"action": "done", "note": "New charger is ready", "pickup": "IT desk, 3rd floor - ask for Rahul", "confidence": 0.9}
+    ))
+    assert _case(session).facts["agent_stage"] == "RESOLVED"
+    assert "How to collect: IT desk, 3rd floor - ask for Rahul" in _mails_to(session, EMP)[-1].body
+
+
+def test_company_default_pickup_is_used_when_the_team_does_not_say(session: Session, live):
+    tid = live
+    _set_handover(session, "IT", "IT helpdesk, 2nd floor, 10 AM - 6 PM")
+    order = _new_laptop_request(session, tid)
+    assert "on file: IT helpdesk, 2nd floor" in order.body
+    _reply(session, tid, "charger replaced", IT, order, _reads("done", "Charger replaced"))
+    assert "How to collect: IT helpdesk, 2nd floor, 10 AM - 6 PM" in _mails_to(session, EMP)[-1].body
+
+
+def test_pickup_found_without_ai_from_the_team_reply(session: Session, live):
+    tid = live
+    order = _new_laptop_request(session, tid)
+    _reply(session, tid, "done - charger ready, pick it up from the IT store room on 1st floor", IT, order)
+    assert "pick it up from the IT store room on 1st floor" in _mails_to(session, EMP)[-1].body
+
+
+def test_approver_can_say_where_to_collect(session: Session, live):
+    tid = live
+    _set_handover(session, "IT", "IT helpdesk, 2nd floor")
+    _run(session, tid, _mail(session, tid, "I lost my access card, please issue a new one", sender=EMP, subject="access card"), _ai(
+        {"type": "new_request", "category": "access_card", "summary": "Replacement access card",
+         "details": {"issue": "lost access card"}},
+    ))
+    case = _case(session)
+    if case.facts["agent_stage"] != "AWAITING_APPROVAL":
+        pytest.skip("access cards are not approval-gated in this setup")
+    decision = [m for m in _mails_to(session, IT) if 'Reply "approve"' in m.body][-1]
+    _reply(session, tid, "approved, collect from reception tomorrow after 11 am", IT, decision)
+    assert _case(session).facts["pickup"] == "collect from reception tomorrow after 11 am"
+    assert "collect from reception tomorrow after 11 am" in _mails_to(session, EMP)[-1].body

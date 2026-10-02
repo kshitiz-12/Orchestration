@@ -165,6 +165,8 @@ Your job for EACH inbound mail:
      Do not open any case.
    - URGENT: say it has been flagged urgent and the team and admin alerted now; add one line of safety advice
      when relevant (e.g. keep away from sparking sockets, use the stairs).
+   - where / from whom to collect something (card, laptop, SIM, supplies): a team's "collect_from" in teams is
+     verified and can be used as the answer.
    - question: answer only from OFFICE_KNOWLEDGE; if not there, say you could not verify it and have passed it to
      the admin team, who will reply on this thread.
    - new_request: acknowledge what you understood. Where the case reference goes write the token [[REF1]] for the
@@ -307,8 +309,11 @@ their part is.
 - blocked: they cannot proceed or need something (a part, approval, access, budget, information, a vendor).
 - message: something to pass to the requester that is not a status (a question for them, instructions, info).
 - unclear: none of the above.
-note: their point in a short clean sentence (no greetings or signatures). Never invent facts.
-Return JSON only: {"action":"done|progress|blocked|message|unclear","note":"","confidence":0.0}"""
+note: their point in a short clean sentence (no greetings or signatures). Keep numbers (card no., asset tag, desk)
+exactly. Never invent facts.
+pickup: if they say where, from whom or when the requester should collect or receive something (place, floor, desk,
+person, timing), copy that exactly; otherwise "".
+Return JSON only: {"action":"done|progress|blocked|message|unclear","note":"","pickup":"","confidence":0.0}"""
 
 TEAM_ACTIONS = {"done", "progress", "blocked", "message", "unclear"}
 
@@ -316,7 +321,13 @@ TEAM_ACTIONS = {"done", "progress", "blocked", "message", "unclear"}
 class TeamReply(BaseModel):
     action: str = "unclear"
     note: str = ""
+    pickup: str = ""
     confidence: float = 0.7
+
+    @field_validator("note", "pickup", mode="before")
+    @classmethod
+    def _text(cls, v: Any) -> str:
+        return str(v or "").strip()
 
     @field_validator("action", mode="before")
     @classmethod

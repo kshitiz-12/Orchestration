@@ -32,6 +32,7 @@ class DepartmentIn(BaseModel):
     spend_approval_limit: Optional[float] = None
     is_active: Optional[bool] = None
     notes: Optional[str] = None
+    handover_info: Optional[str] = None
 
 
 class KnowledgeIn(BaseModel):
@@ -66,6 +67,7 @@ def _dept_out(d: Department) -> dict:
         "spend_approval_limit": d.spend_approval_limit,
         "is_active": d.is_active,
         "notes": d.notes,
+        "handover_info": d.handover_info,
         "needs_setup": not real,
     }
 
@@ -165,6 +167,8 @@ def _apply(dept: Department, body: DepartmentIn) -> None:
         dept.is_active = body.is_active
     if body.notes is not None:
         dept.notes = body.notes
+    if body.handover_info is not None:
+        dept.handover_info = body.handover_info.strip() or None
 
 
 @router.get("/knowledge")

@@ -26,6 +26,8 @@ class Department(TimestampMixin, table=True):
     spend_approval_limit: float = 0.0
     is_active: bool = True
     notes: Optional[str] = Field(default=None, sa_column=Column(Text))
+    # Where / from whom requesters collect what this team hands over, e.g. "IT desk, 3rd floor, 10 AM-6 PM, ask for Rahul"
+    handover_info: Optional[str] = Field(default=None, sa_column=Column(Text))
 
 
 class KnowledgeEntry(TimestampMixin, table=True):

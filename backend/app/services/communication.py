@@ -393,10 +393,15 @@ class CommunicationService:
     def _earlier_mails(self, outcome: Outcome, recipients: list[str]) -> list[Communication]:
         """Mail already sent on this case to exactly these people, oldest first."""
         want = sorted(r.strip().lower() for r in recipients)
+        mine = Communication.outcome_id == outcome.outcome_id
+        if outcome.conversation_id and outcome.case_reference:
+            # One reply can cover several cases from the same mail; it is stored against the first of them.
+            mine = mine | (
+                (Communication.conversation_id == outcome.conversation_id)
+                & Communication.subject.contains(f"[{outcome.case_reference}]")  # type: ignore[attr-defined]
+            )
         rows = self.session.exec(
-            select(Communication)
-            .where(Communication.outcome_id == outcome.outcome_id)
-            .order_by(Communication.created_at)  # type: ignore[arg-type]
+            select(Communication).where(mine).order_by(Communication.created_at)  # type: ignore[arg-type]
         ).all()
         return [m for m in rows if sorted(str(r).strip().lower() for r in (m.recipients or [])) == want]
 
