@@ -17,6 +17,11 @@ services:
         value: "false"
       - key: AUTO_SEED
         value: "true"
+      # Schema comes from Alembic migrations on every deploy (additive; safe to re-run)
+      - key: RUN_MIGRATIONS_ON_STARTUP
+        value: "true"
+      - key: SCHEMA_AUTO_CREATE
+        value: "false"
       - key: PYTHON_VERSION
         value: "3.12.8"
       - key: SECRET_KEY

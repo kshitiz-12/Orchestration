@@ -15,9 +15,26 @@ type Dept = {
   sla_hours: number;
   spend_approval_limit: number;
   handover_info?: string | null;
+  location_id?: string | null;
+  location_name?: string | null;
   is_active: boolean;
   needs_setup: boolean;
 };
+
+type Place = {
+  location_id: string;
+  code: string | null;
+  name: string;
+  type: string;
+  parent_id: string | null;
+  aliases: string;
+  path: string;
+  teams: number;
+  people: number;
+  children: number;
+};
+
+type PlaceList = { total: number; items: Place[]; types: string[] };
 
 type Knowledge = { entry_id: string; key: string; section: string; title: string; content: string; is_active: boolean };
 
@@ -49,6 +66,7 @@ type CostCentre = {
 };
 
 const TABS = [
+  { id: "places", label: "Branches & places" },
   { id: "departments", label: "Departments" },
   { id: "services", label: "Site services & charges" },
   { id: "cost_centres", label: "Cost centres" },
@@ -59,8 +77,9 @@ const TABS = [
 const DELIVERY_MODELS = ["INCLUDED", "CONTRACT", "SUBSIDISED", "CHARGEABLE", "OUTSOURCED"];
 
 const IMPORT_KINDS = [
-  { id: "employees", label: "Employees", hint: "email, name, department, role, manager_email" },
-  { id: "departments", label: "Departments", hint: "code, name, categories, primary_email, backup_emails, approver_email, sla_hours, spend_approval_limit" },
+  { id: "locations", label: "Branches & places", hint: "code, name, type (REGION / CITY / BRANCH / BUILDING / FLOOR ...), parent_code, aliases" },
+  { id: "employees", label: "Employees", hint: "email, name, department, role, manager_email, location (place code or name)" },
+  { id: "departments", label: "Departments", hint: "code, name, categories, primary_email, backup_emails, approver_email, sla_hours, spend_approval_limit, location (blank = whole company)" },
   { id: "resources", label: "Rooms, desks & parking", hint: "name, type (MEETING_ROOM / PARKING_SLOT / DESK / CABIN / LOCKER), capacity, floor, video_conferencing, display, near_department" },
   { id: "vendors", label: "Vendors", hint: "name, category, contact_email, location" },
   { id: "knowledge", label: "Policies & FAQs", hint: "key, section, title, content" },
@@ -71,8 +90,19 @@ const IMPORT_KINDS = [
 const isPlaceholder = (email?: string | null) => !email || email.endsWith("@example.invalid");
 const splitList = (s: string) => s.split(/[,;]/).map((x) => x.trim()).filter(Boolean);
 
+function usePlaces(setMsg: TabProps["setMsg"]) {
+  const [places, setPlaces] = useState<PlaceList>({ total: 0, items: [], types: [] });
+  function load() {
+    api<PlaceList>("/setup/locations?limit=5000").then(setPlaces).catch((e) => setMsg({ text: e.message, tone: "danger" }));
+  }
+  useEffect(() => {
+    load();
+  }, []);
+  return { places, reload: load };
+}
+
 export default function SetupPage() {
-  const [tab, setTab] = useState<(typeof TABS)[number]["id"]>("departments");
+  const [tab, setTab] = useState<(typeof TABS)[number]["id"]>("places");
   const [status, setStatus] = useState<any>(null);
   const [msg, setMsg] = useState<{ text: string; tone: "ok" | "danger" } | null>(null);
 
@@ -108,9 +138,9 @@ export default function SetupPage() {
             )}
           </div>
           <div className="kpi panel">
-            <div className="muted">Employees · Resources · Vendors</div>
+            <div className="muted">Places · Employees · Resources · Vendors</div>
             <strong>
-              {status?.employees ?? "—"} · {status?.resources ?? "—"} · {status?.vendors ?? "—"}
+              {status?.locations ?? "—"} · {status?.employees ?? "—"} · {status?.resources ?? "—"} · {status?.vendors ?? "—"}
             </strong>
           </div>
           <div className="kpi panel">
@@ -142,6 +172,7 @@ export default function SetupPage() {
           </p>
         )}
 
+        {tab === "places" && <PlacesTab onChange={loadStatus} setMsg={setMsg} />}
         {tab === "departments" && <Departments onChange={loadStatus} setMsg={setMsg} />}
         {tab === "services" && <ServicesTab onChange={loadStatus} setMsg={setMsg} />}
         {tab === "cost_centres" && <CostCentresTab onChange={loadStatus} setMsg={setMsg} />}
@@ -154,10 +185,155 @@ export default function SetupPage() {
 
 type TabProps = { onChange: () => void; setMsg: (m: { text: string; tone: "ok" | "danger" } | null) => void };
 
+function PlacesTab({ onChange, setMsg }: TabProps) {
+  const { places, reload } = usePlaces(setMsg);
+  const [q, setQ] = useState("");
+  const [draft, setDraft] = useState<Record<string, any> | null>(null);
+  const shown = places.items.filter((p) =>
+    `${p.code || ""} ${p.name} ${p.aliases} ${p.path}`.toLowerCase().includes(q.trim().toLowerCase()),
+  );
+
+  async function save() {
+    if (!draft) return;
+    const body = { name: draft.name, code: draft.code, type: draft.type, parent_id: draft.parent_id || "", aliases: draft.aliases };
+    try {
+      if (draft.location_id) {
+        await api(`/setup/locations/${draft.location_id}`, { method: "PATCH", body: JSON.stringify(body) });
+      } else {
+        await api("/setup/locations", { method: "POST", body: JSON.stringify(body) });
+      }
+      setMsg({ text: `Saved ${draft.name}`, tone: "ok" });
+      setDraft(null);
+      reload();
+      onChange();
+    } catch (e: any) {
+      setMsg({ text: e.message, tone: "danger" });
+    }
+  }
+
+  async function remove(p: Place) {
+    if (!window.confirm(`Delete ${p.name}?`)) return;
+    try {
+      await api(`/setup/locations/${p.location_id}`, { method: "DELETE" });
+      reload();
+      onChange();
+    } catch (e: any) {
+      setMsg({ text: e.message, tone: "danger" });
+    }
+  }
+
+  return (
+    <div className="panel">
+      <div className="panel-head">
+        <h2>Branches &amp; places</h2>
+        <button
+          className="btn accent"
+          onClick={() => setDraft({ name: "", code: "", type: "BRANCH", parent_id: "", aliases: "" })}
+        >
+          Add place
+        </button>
+      </div>
+      <p className="muted" style={{ marginTop: 0 }}>
+        Your regions, cities, branches and buildings as a tree — as many as you have. A team or admin set on a place
+        covers everything inside it; a branch with no team of its own is handled from the level above, so new branches
+        work straight away. Employees are matched to their branch, and the AI recognises the names and aliases here in
+        requests. For many branches, use Import data → Branches &amp; places.
+      </p>
+      {draft && (
+        <div className="pre" style={{ marginBottom: "1rem", whiteSpace: "normal" }}>
+          <div className="cols-2">
+            <div className="field">
+              <label>Name</label>
+              <input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="Pune Hinjewadi" />
+            </div>
+            <div className="field">
+              <label>Code</label>
+              <input value={draft.code || ""} onChange={(e) => setDraft({ ...draft, code: e.target.value })} placeholder="PUN-HJ" />
+            </div>
+            <div className="field">
+              <label>Type</label>
+              <select value={draft.type} onChange={(e) => setDraft({ ...draft, type: e.target.value })}>
+                {(places.types.length ? places.types : ["REGION", "CITY", "BRANCH", "BUILDING", "FLOOR"]).map((t) => (
+                  <option key={t}>{t}</option>
+                ))}
+              </select>
+            </div>
+            <div className="field">
+              <label>Inside</label>
+              <select value={draft.parent_id || ""} onChange={(e) => setDraft({ ...draft, parent_id: e.target.value })}>
+                <option value="">— top level —</option>
+                {places.items
+                  .filter((p) => p.location_id !== draft.location_id)
+                  .map((p) => (
+                    <option key={p.location_id} value={p.location_id}>{p.path}</option>
+                  ))}
+              </select>
+            </div>
+          </div>
+          <div className="field">
+            <label>Other names people use (separated by ;)</label>
+            <input value={draft.aliases || ""} onChange={(e) => setDraft({ ...draft, aliases: e.target.value })} placeholder="Hinjewadi; Pune office" />
+          </div>
+          <div className="row">
+            <button className="btn accent" onClick={save} disabled={!draft.name?.trim()}>Save</button>
+            <button className="btn secondary" onClick={() => setDraft(null)}>Cancel</button>
+          </div>
+        </div>
+      )}
+      <div className="toolbar">
+        <input className="select" placeholder="Search places" value={q} onChange={(e) => setQ(e.target.value)} />
+        <span className="muted">{shown.length} of {places.total}</span>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Place</th>
+            <th>Type</th>
+            <th>Also called</th>
+            <th>Teams</th>
+            <th>People</th>
+            <th />
+          </tr>
+        </thead>
+        <tbody>
+          {shown.slice(0, 300).map((p) => (
+            <tr key={p.location_id}>
+              <td>
+                <strong>{p.path}</strong>
+                {p.code && <div className="muted mono">{p.code}</div>}
+              </td>
+              <td><span className="badge">{p.type.toLowerCase()}</span></td>
+              <td className="muted" style={{ fontSize: "0.8rem" }}>{p.aliases || "—"}</td>
+              <td>{p.teams || <span className="muted">from above</span>}</td>
+              <td>{p.people}</td>
+              <td>
+                <div className="row" style={{ gap: "0.4rem", justifyContent: "flex-end" }}>
+                  <button className="btn secondary" onClick={() => setDraft({ ...p })}>Edit</button>
+                  {!p.teams && !p.people && !p.children && (
+                    <button className="btn ghost" onClick={() => remove(p)}>Delete</button>
+                  )}
+                </div>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {shown.length > 300 && <p className="muted">Showing the first 300 — search to narrow down.</p>}
+    </div>
+  );
+}
+
 function Departments({ onChange, setMsg }: TabProps) {
   const [rows, setRows] = useState<Dept[]>([]);
   const [editing, setEditing] = useState<Dept | null>(null);
   const [creating, setCreating] = useState(false);
+  const [q, setQ] = useState("");
+  const { places } = usePlaces(setMsg);
+  const shown = rows.filter((d) =>
+    `${d.code} ${d.name} ${d.categories.join(" ")} ${d.location_name || "whole company"}`
+      .toLowerCase()
+      .includes(q.trim().toLowerCase()),
+  );
 
   function load() {
     api<Dept[]>("/setup/departments").then(setRows).catch((e) => setMsg({ text: e.message, tone: "danger" }));
@@ -204,16 +380,23 @@ function Departments({ onChange, setMsg }: TabProps) {
         </button>
       </div>
       <p className="muted" style={{ marginTop: 0 }}>
-        The AI admin routes each request to the department that handles its category. Work orders go to the primary
-        and backup emails; spends above the limit need the approver.
+        The AI admin routes each request to the department that handles its category, at the requester&apos;s branch.
+        A team set to cover a branch, city or region takes that place&apos;s work; teams covering the whole company take
+        everything else. Name branch teams after the main team (FACILITIES_PUNE, ADMIN_PUNE): an ADMIN_ team is that
+        branch&apos;s admin and gets its approvals and alerts. Spends above the limit need the approver.
       </p>
       {(creating || editing) && (
         <DeptForm
           dept={editing}
+          places={places.items}
           onCancel={() => { setEditing(null); setCreating(false); }}
           onSave={save}
         />
       )}
+      <div className="toolbar">
+        <input className="select" placeholder="Search teams or branches" value={q} onChange={(e) => setQ(e.target.value)} />
+        <span className="muted">{shown.length} of {rows.length}</span>
+      </div>
       <table>
         <thead>
           <tr>
@@ -226,11 +409,12 @@ function Departments({ onChange, setMsg }: TabProps) {
           </tr>
         </thead>
         <tbody>
-          {rows.map((d) => (
+          {shown.map((d) => (
             <tr key={d.department_id} style={{ opacity: d.is_active ? 1 : 0.5 }}>
               <td>
                 <strong>{d.name}</strong>
                 <div className="muted mono">{d.code}</div>
+                <div className="muted" style={{ fontSize: "0.75rem" }}>Covers: {d.location_name || "whole company"}</div>
                 {d.handover_info && (
                   <div className="muted" style={{ fontSize: "0.75rem", maxWidth: 220 }}>Collect: {d.handover_info}</div>
                 )}
@@ -261,8 +445,19 @@ function Departments({ onChange, setMsg }: TabProps) {
   );
 }
 
-function DeptForm({ dept, onSave, onCancel }: { dept: Dept | null; onSave: (f: Record<string, any>) => void; onCancel: () => void }) {
+function DeptForm({
+  dept,
+  places,
+  onSave,
+  onCancel,
+}: {
+  dept: Dept | null;
+  places: Place[];
+  onSave: (f: Record<string, any>) => void;
+  onCancel: () => void;
+}) {
   const clean = (e?: string | null) => (isPlaceholder(e) ? "" : e || "");
+  const [locationId, setLocationId] = useState(dept?.location_id || "");
   const [code, setCode] = useState(dept?.code || "");
   const [name, setName] = useState(dept?.name || "");
   const [categories, setCategories] = useState((dept?.categories || []).join(", "));
@@ -286,6 +481,15 @@ function DeptForm({ dept, onSave, onCancel }: { dept: Dept | null; onSave: (f: R
         <div className="field">
           <label>Name</label>
           <input value={name} onChange={(e) => setName(e.target.value)} />
+        </div>
+        <div className="field">
+          <label>Covers</label>
+          <select value={locationId} onChange={(e) => setLocationId(e.target.value)}>
+            <option value="">Whole company</option>
+            {places.map((p) => (
+              <option key={p.location_id} value={p.location_id}>{p.path}</option>
+            ))}
+          </select>
         </div>
         <div className="field">
           <label>Primary email</label>
@@ -339,6 +543,7 @@ function DeptForm({ dept, onSave, onCancel }: { dept: Dept | null; onSave: (f: R
               sla_hours: Number(sla) || 24,
               spend_approval_limit: Number(limit) || 0,
               handover_info: handover,
+              location_id: locationId,
               is_active: active,
             })
           }

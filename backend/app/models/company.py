@@ -17,6 +17,8 @@ class Department(TimestampMixin, table=True):
     tenant_id: str = Field(foreign_key="tenants.tenant_id", index=True)
     code: str = Field(index=True)
     name: str
+    # The place this team covers (with everything below it); None = the whole company
+    location_id: Optional[str] = Field(default=None, index=True)
     # Request categories this team handles, e.g. ["maintenance", "housekeeping"]
     categories: list = Field(default_factory=list, sa_column=Column(JSON))
     primary_email: Optional[str] = None

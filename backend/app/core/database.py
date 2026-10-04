@@ -1,4 +1,5 @@
 from collections.abc import Generator
+from pathlib import Path
 import traceback
 
 from sqlalchemy import event, text
@@ -75,91 +76,35 @@ def check_database() -> None:
         raise RuntimeError(f"Database connection failed: {exc}.{hint}") from exc
 
 
-def run_migrations() -> None:
-    """Apply Alembic migrations to head (production-safe schema path)."""
-    from alembic import command
+BACKEND_DIR = Path(__file__).resolve().parents[2]
+
+
+def alembic_config():
     from alembic.config import Config
 
-    cfg = Config("alembic.ini")
-    command.upgrade(cfg, "head")
+    cfg = Config(str(BACKEND_DIR / "alembic.ini"))
+    cfg.set_main_option("script_location", str(BACKEND_DIR / "alembic"))
+    return cfg
+
+
+def run_migrations() -> None:
+    """Apply Alembic migrations to head (production schema path)."""
+    from alembic import command
+
+    command.upgrade(alembic_config(), "head")
     logger.info("migrations_applied", revision="head")
 
 
 def ensure_schema_compat() -> None:
-    """Add columns introduced after initial create_all (prototype-safe).
+    """Add any tables, columns and indexes the models have and the database lacks (additive, idempotent).
 
-    SQLModel create_all does not ALTER existing tables — without this, CloudMailin
-    ingest fails on production DBs that predate provider_* fields.
+    create_all never alters existing tables; without this a database created by older code breaks on new fields.
     """
-    engine = get_engine()
-    settings = get_settings()
-    statements: list[str]
-    if settings.is_sqlite:
-        statements = [
-            "ALTER TABLE raw_email_events ADD COLUMN provider VARCHAR DEFAULT 'OUTLOOK'",
-            "ALTER TABLE raw_email_events ADD COLUMN provider_message_id VARCHAR",
-            "ALTER TABLE raw_email_events ADD COLUMN provider_conversation_id VARCHAR",
-            "ALTER TABLE communications ADD COLUMN provider_message_id VARCHAR",
-            "ALTER TABLE departments ADD COLUMN handover_info TEXT",
-        ]
-    else:
-        statements = [
-            "ALTER TABLE raw_email_events ADD COLUMN IF NOT EXISTS provider VARCHAR DEFAULT 'OUTLOOK'",
-            "ALTER TABLE raw_email_events ADD COLUMN IF NOT EXISTS provider_message_id VARCHAR",
-            "ALTER TABLE raw_email_events ADD COLUMN IF NOT EXISTS provider_conversation_id VARCHAR",
-            "ALTER TABLE communications ADD COLUMN IF NOT EXISTS provider_message_id VARCHAR",
-            "ALTER TABLE departments ADD COLUMN IF NOT EXISTS handover_info TEXT",
-            """
-            UPDATE raw_email_events
-            SET provider = COALESCE(provider, source, 'OUTLOOK'),
-                provider_message_id = COALESCE(provider_message_id, gmail_message_id),
-                provider_conversation_id = COALESCE(provider_conversation_id, gmail_thread_id)
-            WHERE provider_message_id IS NULL OR provider IS NULL
-            """,
-            """
-            UPDATE communications
-            SET provider_message_id = gmail_message_id
-            WHERE provider_message_id IS NULL AND gmail_message_id IS NOT NULL
-            """,
-        ]
+    from app.core.schema_sync import apply
 
-    with engine.begin() as conn:
-        for stmt in statements:
-            try:
-                conn.execute(text(stmt))
-            except Exception as exc:  # noqa: BLE001
-                # SQLite: duplicate column name — ignore
-                msg = str(exc).lower()
-                if "duplicate column" in msg or "already exists" in msg:
-                    continue
-                logger.warning("schema_compat_stmt_skipped", error=str(exc), stmt=stmt[:80])
-
-    from app.models.company import (
-        CostCentre,
-        Department,
-        KnowledgeEntry,
-        LearningRecord,
-        ServiceTicket,
-        SiteService,
-        VisitorPass,
-    )
-    from app.models.org import RoomBooking
-
-    # Tables added after the initial schema (create_all is checkfirst → idempotent)
-    SQLModel.metadata.create_all(
-        engine,
-        tables=[
-            RoomBooking.__table__,  # type: ignore[attr-defined]
-            Department.__table__,  # type: ignore[attr-defined]
-            KnowledgeEntry.__table__,  # type: ignore[attr-defined]
-            ServiceTicket.__table__,  # type: ignore[attr-defined]
-            VisitorPass.__table__,  # type: ignore[attr-defined]
-            SiteService.__table__,  # type: ignore[attr-defined]
-            CostCentre.__table__,  # type: ignore[attr-defined]
-            LearningRecord.__table__,  # type: ignore[attr-defined]
-        ],
-    )
-    logger.info("schema_compat_ensured")
+    with get_engine().begin() as conn:
+        changes = apply(conn)
+    logger.info("schema_compat_ensured", changes=len(changes.describe()))
 
 
 def init_db() -> None:
@@ -176,7 +121,7 @@ def init_db() -> None:
     else:
         logger.info("schema_bootstrap_skipped", hint="set RUN_MIGRATIONS_ON_STARTUP or SCHEMA_AUTO_CREATE")
 
-    # Always reconcile additive email-provider columns (safe / idempotent)
+    # Catches up anything newer than the last migration (safe / idempotent)
     try:
         ensure_schema_compat()
     except Exception as exc:  # noqa: BLE001

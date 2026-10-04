@@ -331,19 +331,99 @@ def test_flight_and_taxi_details_later_keep_case_numbers_and_right_vendor(sessio
              "details": {"travel_date": "10 October 2026", "pickup": "Pune airport", "drop": "Pune airport", "vehicle_type": "sedan"}},
         ],
         "reply_to_requester": "Hi,\n\nI have noted the details for your flight [[REF1]] and taxi booking [[REF2]]. "
-                              "I've forwarded these to the Travel Desk.\n\nWorkplace Team",
+                              "The flight needs approval first; I'll update you here.\n\nWorkplace Team",
         "confidence": 0.9,
     }))
     reply = _mails_to(session, EMP)[-1].body
     assert f"flight {flight.case_reference} and taxi booking {taxi.case_reference}." in reply
     assert "  " not in reply and " ." not in reply
 
-    flight_order = next(m for m in _orders(session, ADMIN) if flight.case_reference in m.subject)
-    taxi_order = next(m for m in _orders(session, ADMIN) if taxi.case_reference in m.subject)
+    session.refresh(flight)
+    assert flight.facts["agent_stage"] == "AWAITING_APPROVAL"
+    decision = [m for m in _mails_to(session, ADMIN) if 'Reply "approve"' in m.body and flight.case_reference in m.subject][-1]
+    _reply(session, tid, "approve", ADMIN, decision)
+    work = [m for m in _mails_to(session, ADMIN) if "New work order" in m.body]
+    flight_order = next(m for m in work if flight.case_reference in m.subject)
+    taxi_order = next(m for m in work if taxi.case_reference in m.subject)
     assert "Book flight ticket" in flight_order.body
     vendor = re.search(r"Preferred vendor: (.+)", flight_order.body)
     assert not vendor or not re.search(r"cab|taxi|transport", vendor.group(1), re.I)
     assert taxi_order.body.count("Preferred vendor:") <= 1
+
+    # The travel desk answers about the flight on the taxi's work order.
+    _reply(session, tid, "the flight ticket is booked as well, tickets will be shared to him within 2 days", ADMIN, taxi_order,
+           FakeGemini({"action": "done", "note": "Your flight ticket is booked; the tickets will be shared with you within 2 days.",
+                       "case_reference": flight.case_reference, "confidence": 0.9}))
+    session.refresh(flight)
+    session.refresh(taxi)
+    assert flight.facts["agent_stage"] == "RESOLVED"
+    assert taxi.facts["agent_stage"] != "RESOLVED"
+    last = _mails_to(session, EMP)[-1].body
+    assert flight.case_reference in last and "shared with you" in last
+
+
+def test_sibling_cases_get_separate_team_threads_and_one_reply_can_close_both(session: Session, live):
+    tid = live
+    _run(session, tid, _mail(session, tid, "book a flight Delhi to Pune on 10 Oct 8 am and a sedan taxi at Pune airport that day",
+                             sender=EMP, subject="Travel", thread="t-trv2"), _ai(
+        {"type": "new_request", "category": "travel", "summary": "Book flight ticket",
+         "details": {"travel_date": "10 October 2026", "pickup": "Delhi", "drop": "Pune"}},
+        {"type": "new_request", "category": "travel", "summary": "Book taxi / cab",
+         "details": {"travel_date": "10 October 2026", "pickup": "Pune airport", "drop": "Pune airport"}},
+    ))
+    flight, taxi = sorted(session.exec(select(Outcome)).all(), key=lambda o: o.case_reference)
+    assert flight.facts["agent_stage"] == "AWAITING_APPROVAL", "flight bookings need approval"
+    assert taxi.facts["agent_stage"] == "DISPATCHED", "the taxi doesn't inherit the flight's approval rule"
+    decision = [m for m in _mails_to(session, ADMIN) if 'Reply "approve"' in m.body][-1]
+    _reply(session, tid, "approve", ADMIN, decision)
+    session.refresh(flight)
+    assert flight.facts["agent_stage"] == "DISPATCHED"
+    orders = [m for m in _mails_to(session, ADMIN) if "New work order" in m.body or 'Reply "approve"' in m.body]
+    assert len([m for m in orders if "New work order" in m.body]) == 2
+    assert all(m.thread_id != "t-trv2" for m in orders), "each case's team mail starts its own thread"
+    assert all(flight.case_reference in m.subject for m in orders if "Book flight" in m.body)
+    assert all(taxi.case_reference in m.subject for m in orders if "Book taxi" in m.body)
+
+    _reply(session, tid, "cab and flight both booked, details on the day", ADMIN, orders[-1], FakeGemini(
+        {"action": "done", "note": "Your cab and flight are both booked; details will follow on the day.",
+         "case_reference": f"{flight.case_reference}, {taxi.case_reference}", "confidence": 0.9}))
+    session.refresh(flight)
+    session.refresh(taxi)
+    assert flight.facts["agent_stage"] == taxi.facts["agent_stage"] == "RESOLVED"
+
+
+def test_team_note_after_close_does_not_reopen_or_send_good_news(session: Session, live):
+    tid = live
+    order = _new_laptop_request(session, tid)
+    _reply(session, tid, "close this", ADMIN, order)
+    assert _case(session).facts["agent_stage"] == "CLOSED"
+    before = len(_mails_to(session, EMP))
+    _reply(session, tid, "it was delivered on time", ADMIN, order, _reads("done", "It was delivered on time"))
+    case = _case(session)
+    assert case.facts["agent_stage"] == "CLOSED"
+    assert len(_mails_to(session, EMP)) == before
+
+
+def test_pickup_message_after_resolution_reaches_the_requester(session: Session, live):
+    tid = live
+    order = _new_laptop_request(session, tid)
+    _reply(session, tid, "charger replaced", IT, order, _reads("done", "Charger replaced"))
+    assert _case(session).facts["agent_stage"] == "RESOLVED"
+    _reply(session, tid, "all set, he can pick it up from the helpdesk on second floor", IT, order, FakeGemini(
+        {"action": "message", "note": "Everything is set - you can pick it up from the helpdesk on the second floor.",
+         "pickup": "helpdesk on the second floor", "confidence": 0.9}))
+    last = _mails_to(session, EMP)[-1].body
+    assert "helpdesk on the second floor" in last
+    assert not [m for m in _mails_to(session, IT) if "couldn't tell" in m.body]
+
+
+def test_reference_goes_above_the_signature():
+    from app.agent.desk import _before_signoff
+
+    out = _before_signoff("Hi Kapil,\n\nNoted.\n\nWorkplace Team", "Reference: TKT-2026-0001")
+    assert out.endswith("Reference: TKT-2026-0001\n\nWorkplace Team")
+    out = _before_signoff("Hi,\n\nNoted.\n\nBest regards,\nWorkplace Team", "Reference: X")
+    assert out.endswith("Reference: X\n\nBest regards,\nWorkplace Team")
 
 
 def test_overdue_alert_tells_the_admin_what_they_can_reply(session: Session, live):

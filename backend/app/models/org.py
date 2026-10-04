@@ -51,8 +51,11 @@ class Location(TimestampMixin, table=True):
     location_id: str = Field(default_factory=lambda: new_id("loc_"), primary_key=True)
     tenant_id: str = Field(foreign_key="tenants.tenant_id", index=True)
     parent_id: Optional[str] = Field(default=None, foreign_key="locations.location_id")
-    type: str  # SITE/FLOOR/ZONE/ROOM
+    # REGION/CITY/BRANCH/BUILDING/FLOOR/ZONE/ROOM/DESK (SITE kept for older rows); see app.agent.places
+    type: str
     name: str
+    code: Optional[str] = Field(default=None, index=True)
+    # Other names people use for it, separated by ';' (e.g. "BLR WF; Whitefield office")
     alias: Optional[str] = None
     site_id: Optional[str] = Field(default=None, index=True)
 

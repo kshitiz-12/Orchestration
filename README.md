@@ -139,10 +139,32 @@ We intentionally keep **one backend stack**:
 
 **Not using Prisma** — it would split schema ownership across Node and Python and reduce scalability for this product.
 
-Schema path:
-- Models: `app/models/`
-- Migrations: `alembic/` (`alembic upgrade head`)
-- Boot: `SCHEMA_AUTO_CREATE` (prototype) or `RUN_MIGRATIONS_ON_STARTUP` (production)
+## Database
+
+Postgres in production (Supabase), SQLite or local Postgres for development. Use a separate database for
+development; never point a local `.env` at the production database.
+
+| Where | DATABASE_URL | Schema at startup |
+|---|---|---|
+| Production (Render) | Supabase Session pooler URI | `RUN_MIGRATIONS_ON_STARTUP=true`, `SCHEMA_AUTO_CREATE=false` |
+| Local, quick | `sqlite:///./orchestration.db` | `SCHEMA_AUTO_CREATE=true` |
+| Local, like production | `postgresql://postgres:postgres@localhost:5432/orchestration` after `docker compose up -d db` | either |
+
+Tools (run in `backend/`, against whatever `DATABASE_URL` is set):
+
+```bash
+python -m scripts.db status    # which DB, migration revision, what is missing vs the models
+python -m scripts.db check     # same, exits 1 if behind (CI / before deploy)
+python -m scripts.db upgrade   # apply migrations to head
+python -m scripts.seed         # demo company (empty DB only)
+```
+
+Changing the schema:
+- Models live in `app/models/`; every change gets an Alembic migration in `alembic/versions/`
+  (`alembic revision -m "what changed"`, then write the upgrade).
+- `0005_schema_sync` caught every older database up to the models; it only adds tables, columns and indexes, never
+  drops. Startup also runs that additive sync as a safety net, so a missed column never takes the API down.
+- Migrations must be additive or come with a data-safe plan: no dropping/renaming columns the running version still reads.
 
 Health:
 - `GET /health` — liveness

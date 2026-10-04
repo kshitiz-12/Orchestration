@@ -9,12 +9,15 @@ from typing import Any, Callable
 
 from sqlmodel import Session, select
 
+from app.agent.places import PLACE_TYPES
 from app.models.company import CostCentre, Department, KnowledgeEntry, SiteService
-from app.models.org import Person, Resource, Vendor
+from app.models.org import Location, Person, Resource, Vendor
 
 TEMPLATES: dict[str, list[str]] = {
-    "employees": ["email", "name", "department", "role", "manager_email"],
-    "departments": ["code", "name", "categories", "primary_email", "backup_emails", "approver_email", "sla_hours", "spend_approval_limit"],
+    "locations": ["code", "name", "type", "parent_code", "aliases"],
+    "employees": ["email", "name", "department", "role", "manager_email", "location"],
+    "departments": ["code", "name", "categories", "primary_email", "backup_emails", "approver_email", "sla_hours",
+                    "spend_approval_limit", "location"],
     "resources": ["name", "type", "capacity", "floor", "video_conferencing", "display", "near_department"],
     "vendors": ["name", "category", "contact_email", "location"],
     "knowledge": ["key", "section", "title", "content"],
@@ -27,8 +30,10 @@ EXAMPLES: dict[str, list[str]] = {
     "site_services": ["Corporate Office", "high_tea", "High tea / snacks (special menu)", "CHARGEABLE", "CAFETERIA",
                       "per_person", "350", "0", "", "0", "In-house cafeteria"],
     "cost_centres": ["SL-1101", "Sales", "Sales", "Rohan Mehta", "rohan.mehta@yourco.com"],
-    "employees": ["riya.shah@yourco.com", "Riya Shah", "Engineering", "EMPLOYEE", "priya.manager@yourco.com"],
-    "departments": ["FACILITIES", "Facilities & Maintenance", "maintenance; hvac; electrical", "facilities@yourco.com", "", "", "8", "0"],
+    "locations": ["PUN", "Pune Hinjewadi", "BRANCH", "WEST", "Hinjewadi; Pune office"],
+    "employees": ["riya.shah@yourco.com", "Riya Shah", "Engineering", "EMPLOYEE", "priya.manager@yourco.com", "PUN"],
+    "departments": ["FACILITIES_PUN", "Facilities - Pune", "maintenance; hvac; electrical", "facilities.pune@yourco.com",
+                    "", "", "8", "0", "PUN"],
     "resources": ["Board Room 1", "MEETING_ROOM", "12", "3", "yes", "yes", "Sales"],
     "vendors": ["QuickRide Corporate Cabs", "transport", "bookings@quickride.com", "Gurugram"],
     "knowledge": ["faq_canteen", "faq", "Canteen timings", "Canteen is open 8:30 AM - 6 PM on weekdays."],
@@ -84,15 +89,59 @@ def _num(value: str, default: float = 0.0) -> float:
         return default
 
 
+def location_by_ref(session: Session, tid: str, ref: str) -> Location | None:
+    """A place by its code (preferred) or exact name."""
+    ref = (ref or "").strip()
+    if not ref:
+        return None
+    rows = session.exec(select(Location).where(Location.tenant_id == tid)).all()
+    by_code = [p for p in rows if (p.code or "").lower() == ref.lower()]
+    if by_code:
+        return by_code[0]
+    by_name = [p for p in rows if p.name.lower() == ref.lower()]
+    if len(by_name) > 1:
+        raise ValueError(f"more than one place is called '{ref}' - use its code")
+    return by_name[0] if by_name else None
+
+
+def _location_or_error(session: Session, tid: str, ref: str) -> Location | None:
+    if not (ref or "").strip():
+        return None
+    place = location_by_ref(session, tid, ref)
+    if place is None:
+        raise ValueError(f"unknown location '{ref}' - import locations first")
+    return place
+
+
+def _parents_first(rows: list[dict[str, str]]) -> list[tuple[int, dict[str, str]]]:
+    """A locations sheet can list children before their parents; import parents first."""
+    numbered = list(enumerate(rows, start=2))
+    codes = {(r.get("code") or "").strip().lower(): r for _, r in numbered if (r.get("code") or "").strip()}
+
+    def depth(row: dict[str, str]) -> int:
+        d, seen = 0, set()
+        parent = (row.get("parent_code") or "").strip().lower()
+        while parent in codes and parent not in seen:
+            seen.add(parent)
+            d += 1
+            parent = (codes[parent].get("parent_code") or "").strip().lower()
+        return d
+
+    return sorted(numbered, key=lambda item: depth(item[1]))
+
+
 def run_import(session: Session, tenant_id: str, kind: str, rows: list[dict[str, str]], *, commit: bool) -> dict:
     if kind not in TEMPLATES:
         raise ValueError(f"Unknown import type: {kind}")
     handler: Callable = globals()[f"_import_{kind}"]
     created, updated, errors = 0, 0, []
     preview = []
-    for i, row in enumerate(rows, start=2):
+    ordered = _parents_first(rows) if kind == "locations" else list(enumerate(rows, start=2))
+    # Locations must exist during a preview too, so later rows can find their parent.
+    apply = commit or kind == "locations"
+    for i, row in ordered:
         try:
-            action, label = handler(session, tenant_id, row, apply=commit)
+            action, label = handler(session, tenant_id, row, apply=apply)
         except ValueError as exc:
             errors.append({"row": i, "error": str(exc)})
             continue
@@ -104,7 +153,36 @@ def run_import(session: Session, tenant_id: str, kind: str, rows: list[dict[str,
         session.commit()
     else:
         session.rollback()
+    preview.sort(key=lambda p: p["row"])
     return {"kind": kind, "committed": commit, "new": created, "updated": updated, "errors": errors, "preview": preview, "total": len(rows)}
+
+
+def _import_locations(session: Session, tid: str, row: dict, *, apply: bool) -> tuple[str, str]:
+    code = (row.get("code") or "").strip().upper()
+    name = (row.get("name") or "").strip()
+    ptype = (row.get("type") or "BRANCH").strip().upper()
+    if not code or not name:
+        raise ValueError("code and name are required")
+    if ptype not in PLACE_TYPES:
+        raise ValueError(f"type must be one of {', '.join(sorted(PLACE_TYPES))} (got '{ptype}')")
+    parent = None
+    if (row.get("parent_code") or "").strip():
+        parent = location_by_ref(session, tid, row["parent_code"])
+        if parent is None:
+            raise ValueError(f"unknown parent_code '{row['parent_code']}'")
+    place = session.exec(select(Location).where(Location.tenant_id == tid, Location.code == code)).first()
+    action = "update" if place else "new"
+    if parent is not None and place is not None and parent.location_id == place.location_id:
+        raise ValueError("a place can't be its own parent")
+    if apply:
+        place = place or Location(tenant_id=tid, code=code, name=name, type=ptype)
+        place.name, place.type = name, ptype
+        place.parent_id = parent.location_id if parent else None
+        if row.get("aliases") is not None and row.get("aliases") != "":
+            place.alias = "; ".join(_list(row["aliases"]))
+        session.add(place)
+        session.flush()
+    return action, f"{ptype} {code} - {name}" + (f" (in {parent.name})" if parent else "")
 
 
 def _import_employees(session: Session, tid: str, row: dict, *, apply: bool) -> tuple[str, str]:
@@ -114,6 +192,7 @@ def _import_employees(session: Session, tid: str, row: dict, *, apply: bool) -> 
     name = row.get("name") or ""
     if not name:
         raise ValueError("name is required")
+    place = _location_or_error(session, tid, row.get("location") or "")
     person = session.exec(select(Person).where(Person.email == email)).first()
     action = "update" if person else "new"
     manager = None
@@ -126,9 +205,11 @@ def _import_employees(session: Session, tid: str, row: dict, *, apply: bool) -> 
         person.role = (row.get("role") or person.role or "EMPLOYEE").upper()
         if manager:
             person.manager_id = manager.person_id
+        if place:
+            person.site_id = place.location_id
         session.add(person)
         session.flush()
-    return action, f"{name} <{email}>"
+    return action, f"{name} <{email}>" + (f" @ {place.name}" if place else "")
 
 
 def _import_departments(session: Session, tid: str, row: dict, *, apply: bool) -> tuple[str, str]:
@@ -138,6 +219,7 @@ def _import_departments(session: Session, tid: str, row: dict, *, apply: bool) -
     for field in ("primary_email", "approver_email"):
         if row.get(field) and not _EMAIL.match(row[field].lower()):
             raise ValueError(f"invalid {field} '{row[field]}'")
+    place = _location_or_error(session, tid, row.get("location") or "")
     dept = session.exec(select(Department).where(Department.tenant_id == tid, Department.code == code)).first()
     action = "update" if dept else "new"
     if apply:
@@ -155,9 +237,11 @@ def _import_departments(session: Session, tid: str, row: dict, *, apply: bool) -
             dept.sla_hours = int(_num(row["sla_hours"], 24))
         if row.get("spend_approval_limit"):
             dept.spend_approval_limit = _num(row["spend_approval_limit"])
+        if place:
+            dept.location_id = place.location_id
         session.add(dept)
         session.flush()
-    return action, f"{code} - {row['name']}"
+    return action, f"{code} - {row['name']}" + (f" @ {place.name}" if place else "")
 
 
 def _import_resources(session: Session, tid: str, row: dict, *, apply: bool) -> tuple[str, str]:

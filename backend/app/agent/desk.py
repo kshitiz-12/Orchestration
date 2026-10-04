@@ -27,6 +27,7 @@ from app.agent.directory import (
 )
 from app.agent.learning import add_correction, similar_verified
 from app.agent.learning import record_closure as save_learning_record
+from app.agent.places import path_label, place_for_request
 from app.agent.playbooks import (
     LEGACY_CATEGORIES,
     RiskVerdict,
@@ -306,10 +307,13 @@ _SIGNOFF_RE = re.compile(r"^\s*(?:best|kind|warm)?\s*(?:regards|thanks|thank you
 def _before_signoff(draft: str, block: str) -> str:
     """Put an extra block above the sign-off ("Best regards, / Workplace Team"), not under it."""
     lines = draft.rstrip().split("\n")
-    for i in range(len(lines) - 1, max(-1, len(lines) - 5), -1):
-        if _SIGNOFF_RE.match(lines[i]):
-            head = "\n".join(lines[:i]).rstrip()
-            return f"{head}\n\n{block}\n\n" + "\n".join(lines[i:])
+    signature = (get_settings().mail_signature or "").strip().split("\n")[0].strip().lower()
+    tail = range(max(0, len(lines) - 4), len(lines))
+    starts = [i for i in tail if _SIGNOFF_RE.match(lines[i]) or (signature and lines[i].strip().lower() == signature)]
+    if starts and starts[0] > 0:
+        i = starts[0]
+        head = "\n".join(lines[:i]).rstrip()
+        return f"{head}\n\n{block}\n\n" + "\n".join(lines[i:])
     return f"{draft.rstrip()}\n\n{block}"
 
 
@@ -534,13 +538,15 @@ class AdminDesk:
         extra_facts: Optional[dict] = None,
     ) -> dict:
         category = normalize_category(intent.category)
-        route = route_for(self.session, self.tenant_id, category)
         details = _normalize_details(intent.details)
         requester = (event.sender or "").lower()
         person = self.session.exec(select(Person).where(Person.email == requester)).first()
+        raw = strip_for_ai(event.body_text or "")
+        place = place_for_request(self.session, self.tenant_id, details=details, person=person, text=raw)
+        location_id = place.location_id if place else None
+        route = route_for(self.session, self.tenant_id, category, location_id)
         ref = self.engine.next_case_reference(case_prefix(category))
         title = (intent.summary or label_for(category))[:200]
-        raw = strip_for_ai(event.body_text or "")
         verdict = infer_priority(f"{intent.summary}\n{raw}\n{details}", intent.priority)
         sla = sla_hours_for(verdict.priority, route.sla_hours)
         # Later updates only see the case, not this mail's From header - keep the name we greeted them with.
@@ -566,6 +572,8 @@ class AdminDesk:
                 "details": details,
                 "department_code": route.department_code,
                 "department_name": route.department_name,
+                "location_id": location_id,
+                "location_name": path_label(self.session, self.tenant_id, location_id),
                 "priority_reason": verdict.reason or None,
                 "sla_hours": sla,
                 "raw_request": raw[:2000],
@@ -603,7 +611,7 @@ class AdminDesk:
             category=category,
             title=title,
             description=str(details.get("description") or details.get("issue") or title)[:2000],
-            location=str(details.get("location") or details.get("office") or "")[:200] or None,
+            location=str(details.get("location") or details.get("office") or (place.name if place else ""))[:200] or None,
             priority=verdict.priority,
             department_code=route.department_code,
             requester_email=requester,
@@ -665,9 +673,12 @@ class AdminDesk:
             self._ticket_status(outcome, "OPEN")
             return {"intent": intent, "status": "awaiting_info", "outcome": outcome, "missing": missing}
 
+        own = f"{outcome.title}\n{' '.join(facts.get('tasks') or [])}\n{details}"
+        # When one mail asked for several things, its words (a flight, an amount) belong to only one of the cases.
+        split = sum(1 for i in decision.intents if i.type in {"new_request", "update_case"}) > 1 or bool(self._sibling_cases(outcome))
         risk = assess_risk(
             category=category,
-            text=f"{text}\n{details}",
+            text=own if split else f"{facts.get('raw_request') or ''}\n{text}\n{own}",
             details=details,
             agent_flag=intent.needs_admin_decision,
             agent_reason=intent.decision_reason,
@@ -718,7 +729,7 @@ class AdminDesk:
         if action == "fan_out":
             book = playbook_for(category)
             cats = [book.category, *book.fan_out]
-            routes = [route] + [route_for(self.session, self.tenant_id, c) for c in book.fan_out]
+            routes = [route] + [route_for(self.session, self.tenant_id, c, facts.get("location_id")) for c in book.fan_out]
             per_team = split_tasks(book.category, facts.get("tasks") or [], cats, facts.get("details"))
             by_inbox: dict[tuple[str, ...], list[Route]] = {}
             inbox_cats: dict[tuple[str, ...], list[str]] = {}
@@ -992,6 +1003,8 @@ class AdminDesk:
             lines += ["YOUR TASKS:" if kind == "work" else "Requested:", *[f"{i}. {t}" for i, t in enumerate(tasks, 1)], ""]
         lines.append(f"Requester: {name} <{outcome.requester_email}>" if name not in {"there", "team"} else f"Requester: {outcome.requester_email}")
         lines.append(f"Type: {facts.get('category_label') or label_for(facts.get('agent_category'))}")
+        if facts.get("location_name"):
+            lines.append(f"Location: {facts['location_name']}")
         working = [g["label"] for g in facts.get("team_groups") or [] if not g.get("raised_by_team")]
         if working:
             lines.append(f"Teams working on it: {', '.join(working)}")
@@ -1100,6 +1113,11 @@ class AdminDesk:
     def _notify_admin(self, outcome: Outcome, *, kind: str, headline: str, route: Optional[Route] = None) -> None:
         admin = self._admin()
         recipients = [admin] if admin else []
+        if route is None and kind != "decision":
+            route = route_for_case(self.session, self.tenant_id, outcome.facts or {})
+        for local in (route.local_admins if route else []):
+            if local not in recipients:
+                recipients.append(local)
         if kind == "decision" and route and route.approver and route.approver not in recipients:
             recipients.append(route.approver)
         if not recipients:
@@ -1150,7 +1168,7 @@ class AdminDesk:
             draft = re.sub(r"[ \t]+([.,;:!?])", r"\1", re.sub(r"[ \t]{2,}", " ", draft))
             missing_refs = [r for r in refs if r not in draft]
             if missing_refs:
-                draft += "\n\nReference: " + ", ".join(missing_refs)
+                draft = _before_signoff(draft, "Reference: " + ", ".join(missing_refs))
             for r in results:
                 if r.get("day1") and r["day1"].split(" for ")[0] not in draft:
                     draft = _before_signoff(draft, r["day1"])
@@ -1361,31 +1379,25 @@ class AdminDesk:
             self._close(outcome, f"Closed by {actor}", closure="administrative")
             self._tell_requester(outcome, f"{outcome.case_reference} ({outcome.title}) is now closed. Reply here if you need anything else.")
             return {"applied": True, "action": "close"}
-        if not re.match(r"^\s*cancel", low) and facts.get("agent_stage") != "RESOLVED":
+        if not re.match(r"^\s*cancel", low):
             team, tasks = self._team_of(outcome, actor)
+            siblings = self._sibling_cases(outcome)
             reading = self.agent.read_team_reply(body, {
                 "CASE": f"{outcome.case_reference} - {outcome.title}",
                 "TYPE": facts.get("category_label") or facts.get("agent_category"),
                 "STAGE": facts.get("agent_stage"),
                 "TEAM": team,
                 "YOUR_TASKS": tasks or facts.get("tasks") or [],
+                "OTHER_OPEN_CASES": [f"{s.case_reference} - {s.title}" for s in siblings],
             })
-            pickup = (reading.pickup if reading else "") or (
-                _pickup_from_text(body) if facts.get("agent_category") in _COLLECTABLE else None
-            )
-            if pickup:
-                _set_facts(self.session, outcome, pickup=pickup[:300])
+            named = {r.upper() for r in re.findall(r"[A-Z]{2,5}-\d{4}-\d{3,}", (reading.case_reference if reading else ""), re.I)}
+            targets = [o for o in [outcome, *siblings] if o.case_reference.upper() in named] or [outcome]
             if reading:
-                note = reading.note.strip() or None
-                if reading.action == "done":
-                    return self._team_done(outcome, body, actor, files, note=note)
-                if reading.action == "progress":
-                    return self._team_progress(outcome, body, actor, note=note)
-                if reading.action == "blocked":
-                    return self._team_blocked(outcome, body, actor, note=note)
-                if reading.action == "message" and note:
-                    self._tell_requester(outcome, f"Message about {outcome.case_reference} ({outcome.title}) from {team}: {note}")
-                    return {"applied": True, "action": "message"}
+                results = [r for r in (self._apply_reading(t, reading, body, actor, files) for t in targets) if r]
+                if results:
+                    return {**results[-1], "cases": [t.case_reference for t in targets]}
+            elif facts.get("agent_category") in _COLLECTABLE and _pickup_from_text(body):
+                _set_facts(self.session, outcome, pickup=_pickup_from_text(body))
         if _TEAM_ISSUE_RE.match(body):
             return self._team_blocked(outcome, body, actor)
         if _TEAM_PROGRESS_RE.match(body):
@@ -1461,12 +1473,77 @@ class AdminDesk:
         )
         return {"applied": True, "action": "in_progress"}
 
+    def _apply_reading(self, outcome: Outcome, reading: Any, body: str, actor: str, files: list[str]) -> Optional[dict]:
+        """Act on the AI's reading of a team reply for one case; None when it gives nothing to act on."""
+        facts = outcome.facts or {}
+        team, _ = self._team_of(outcome, actor)
+        pickup = reading.pickup or (_pickup_from_text(body) if facts.get("agent_category") in _COLLECTABLE else None)
+        if pickup:
+            _set_facts(self.session, outcome, pickup=pickup[:300])
+        if facts.get("agent_stage") in {"RESOLVED", "CLOSED"}:
+            return self._note_on_finished_case(outcome, reading, body, actor, files, team, pickup)
+        note = reading.note.strip() or None
+        if reading.action == "done":
+            return self._team_done(outcome, body, actor, files, note=note)
+        if reading.action == "progress":
+            return self._team_progress(outcome, body, actor, note=note)
+        if reading.action == "blocked":
+            return self._team_blocked(outcome, body, actor, note=note)
+        if reading.action == "message" and note:
+            self._tell_requester(outcome, f"Message about {outcome.case_reference} ({outcome.title}) from {team}: {note}")
+            return {"applied": True, "action": "message"}
+        return None
+
+    def _sibling_cases(self, outcome: Outcome) -> list[Outcome]:
+        """The requester's other open desk cases from the same mail thread (e.g. the flight next to the taxi)."""
+        if not outcome.conversation_id:
+            return []
+        return [
+            o for o in self.session.exec(
+                select(Outcome).where(
+                    Outcome.tenant_id == self.tenant_id,
+                    Outcome.conversation_id == outcome.conversation_id,
+                    Outcome.requester_email == outcome.requester_email,
+                    Outcome.outcome_id != outcome.outcome_id,
+                    Outcome.template_code == SERVICE_TEMPLATE,
+                )
+            ).all()
+            if (o.facts or {}).get("agent_stage") not in {"CLOSED", "CANCELLED"}
+        ]
+
+    def _note_on_finished_case(self, outcome: Outcome, reading: Any, body: str, actor: str, files: list[str],
+                               team: str, pickup: Optional[str]) -> dict:
+        """A team writing after the case is resolved or closed: keep their note, pass on anything the requester needs."""
+        facts = outcome.facts or {}
+        note = reading.note.strip()
+        if reading.action == "done" and facts.get("agent_stage") == "RESOLVED" and facts.get("evidence_status") == "missing":
+            return self._add_evidence(outcome, note or body, actor, files)
+        if note or files:
+            self._record_evidence(outcome, note or body, actor, files)
+        if reading.action == "done" and not pickup:
+            # Already told the requester it's finished; a confirmation adds nothing for them.
+            if note:
+                _set_facts(self.session, outcome, resolution_note=note[:400])
+            return {"applied": True, "action": "noted"}
+        if not note and not pickup:
+            return {"applied": False, "action": "unknown"}
+        self._tell_requester(
+            outcome,
+            f"Message about {outcome.case_reference} ({outcome.title}) from {team}: {note}"
+            + (f"\nHow to collect: {pickup}" if pickup and pickup.lower() not in note.lower() else ""),
+        )
+        return {"applied": True, "action": "message"}
+
     def _team_done(self, outcome: Outcome, body: str, actor: str, files: Optional[list[str]] = None,
                    note: Optional[str] = None) -> dict:
         facts = outcome.facts or {}
         files = files or []
         note = note or re.sub(r"^\s*(?:it'?s\s+|all\s+)?(?:done|fixed|resolved|completed|closed)\b[\s,.:\-]*", "", body,
                               flags=re.I).strip()
+        if facts.get("agent_stage") == "CLOSED":
+            if note or files:
+                self._record_evidence(outcome, note, actor, files)
+            return {"applied": True, "action": "noted"}
         if facts.get("agent_stage") == "RESOLVED":
             return self._add_evidence(outcome, note or body, actor, files)
         groups = [dict(g) for g in facts.get("team_groups") or []]
@@ -1660,7 +1737,7 @@ class AdminDesk:
         if new == old:
             return {"applied": False, "action": "recategorise", "note": "already that type"}
         before = route_for_case(self.session, self.tenant_id, facts)
-        route = route_for(self.session, self.tenant_id, new)
+        route = route_for(self.session, self.tenant_id, new, facts.get("location_id"))
         _set_facts(self.session, outcome, agent_category=new, category_label=label_for(new),
                    department_code=route.department_code, department_name=route.department_name,
                    department_override=None)
@@ -1677,7 +1754,7 @@ class AdminDesk:
 
     def _reroute(self, outcome: Outcome, value: str, actor: str) -> dict:
         facts = outcome.facts or {}
-        dept = find_department(self.session, self.tenant_id, value)
+        dept = find_department(self.session, self.tenant_id, value, facts.get("location_id"))
         if dept is None:
             return {"applied": False, "action": "reroute", "note": f"no team called {value}"}
         before = route_for_case(self.session, self.tenant_id, facts)

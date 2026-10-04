@@ -14,7 +14,8 @@ from app.agent.company_seed import is_placeholder
 from app.agent.importer import TEMPLATES, read_rows, run_import, template_csv
 from app.api.deps import SessionDep, TenantDep, UserDep
 from app.models.company import CostCentre, Department, KnowledgeEntry, ServiceTicket, SiteService, VisitorPass
-from app.models.org import Person, Resource, Vendor, utcnow
+from app.agent.places import PLACE_TYPES, chain_ids, path_label
+from app.models.org import Location, Person, Resource, Vendor, utcnow
 
 router = APIRouter(prefix="/setup", tags=["setup"])
 
@@ -33,6 +34,16 @@ class DepartmentIn(BaseModel):
     is_active: Optional[bool] = None
     notes: Optional[str] = None
     handover_info: Optional[str] = None
+    # "" clears it (team covers the whole company)
+    location_id: Optional[str] = None
+
+
+class LocationIn(BaseModel):
+    code: Optional[str] = None
+    name: Optional[str] = None
+    type: Optional[str] = None
+    parent_id: Optional[str] = None
+    aliases: Optional[str] = None
 
 
 class KnowledgeIn(BaseModel):
@@ -52,13 +63,15 @@ def _clean_email(value: Optional[str]) -> Optional[str]:
     return v
 
 
-def _dept_out(d: Department) -> dict:
+def _dept_out(d: Department, labels: Optional[dict[str, str]] = None) -> dict:
     emails = [d.primary_email, *(d.backup_emails or [])]
     real = [e for e in emails if e and not is_placeholder(e)]
     return {
         "department_id": d.department_id,
         "code": d.code,
         "name": d.name,
+        "location_id": d.location_id,
+        "location_name": (labels or {}).get(d.location_id or "") if d.location_id else None,
         "categories": d.categories or [],
         "primary_email": d.primary_email,
         "backup_emails": d.backup_emails or [],
@@ -89,6 +102,7 @@ def setup_status(session: SessionDep, tenant_id: TenantDep, _: UserDep):
         "departments": len(active),
         "departments_needing_setup": pending,
         "employees": count(Person, Person.tenant_id == tenant_id),
+        "locations": count(Location, Location.tenant_id == tenant_id),
         "resources": count(Resource, Resource.tenant_id == tenant_id),
         "vendors": count(Vendor, Vendor.tenant_id == tenant_id),
         "knowledge_entries": count(KnowledgeEntry, KnowledgeEntry.tenant_id == tenant_id),
@@ -103,7 +117,8 @@ def setup_status(session: SessionDep, tenant_id: TenantDep, _: UserDep):
 @router.get("/departments")
 def list_departments(session: SessionDep, tenant_id: TenantDep, _: UserDep):
     rows = session.exec(select(Department).where(Department.tenant_id == tenant_id).order_by(Department.code)).all()
-    return [_dept_out(d) for d in rows]
+    labels = _place_labels(session, tenant_id)
+    return [_dept_out(d, labels) for d in rows]
 
 
 @router.post("/departments")
@@ -115,11 +130,11 @@ def create_department(body: DepartmentIn, session: SessionDep, tenant_id: Tenant
     if exists:
         raise HTTPException(status_code=409, detail=f"Department {code} already exists")
     dept = Department(tenant_id=tenant_id, code=code, name=body.name.strip())
-    _apply(dept, body)
+    _apply(dept, body, session, tenant_id)
     session.add(dept)
     session.commit()
     session.refresh(dept)
-    return _dept_out(dept)
+    return _dept_out(dept, _place_labels(session, tenant_id))
 
 
 @router.patch("/departments/{department_id}")
@@ -129,12 +144,12 @@ def update_department(department_id: str, body: DepartmentIn, session: SessionDe
         raise HTTPException(status_code=404, detail="Department not found")
     if body.name is not None and body.name.strip():
         dept.name = body.name.strip()
-    _apply(dept, body)
+    _apply(dept, body, session, tenant_id)
     dept.updated_at = utcnow()
     session.add(dept)
     session.commit()
     session.refresh(dept)
-    return _dept_out(dept)
+    return _dept_out(dept, _place_labels(session, tenant_id))
 
 
 @router.delete("/departments/{department_id}")
@@ -150,7 +165,15 @@ def deactivate_department(department_id: str, session: SessionDep, tenant_id: Te
     return {"ok": True}
 
 
-def _apply(dept: Department, body: DepartmentIn) -> None:
+def _apply(dept: Department, body: DepartmentIn, session, tenant_id: str) -> None:
+    if body.location_id is not None:
+        if body.location_id.strip():
+            place = session.get(Location, body.location_id.strip())
+            if place is None or place.tenant_id != tenant_id:
+                raise HTTPException(status_code=422, detail="Unknown location")
+            dept.location_id = place.location_id
+        else:
+            dept.location_id = None
     if body.categories is not None:
         dept.categories = [c.strip().lower().replace(" ", "_") for c in body.categories if c.strip()]
     if body.primary_email is not None:
@@ -169,6 +192,141 @@ def _apply(dept: Department, body: DepartmentIn) -> None:
         dept.notes = body.notes
     if body.handover_info is not None:
         dept.handover_info = body.handover_info.strip() or None
+
+
+def _place_labels(session, tenant_id: str) -> dict[str, str]:
+    rows = session.exec(select(Location).where(Location.tenant_id == tenant_id)).all()
+    return {p.location_id: path_label(session, tenant_id, p.location_id) or p.name for p in rows}
+
+
+def _location_out(p: Location, labels: dict[str, str], counts: dict[str, dict[str, int]]) -> dict:
+    return {
+        "location_id": p.location_id,
+        "code": p.code,
+        "name": p.name,
+        "type": p.type,
+        "parent_id": p.parent_id,
+        "aliases": p.alias or "",
+        "path": labels.get(p.location_id, p.name),
+        "teams": counts.get("teams", {}).get(p.location_id, 0),
+        "people": counts.get("people", {}).get(p.location_id, 0),
+        "children": counts.get("children", {}).get(p.location_id, 0),
+    }
+
+
+def _location_counts(session, tenant_id: str) -> dict[str, dict[str, int]]:
+    teams = session.exec(
+        select(Department.location_id, func.count()).where(Department.tenant_id == tenant_id, Department.is_active == True)  # noqa: E712
+        .group_by(Department.location_id)
+    ).all()
+    people = session.exec(
+        select(Person.site_id, func.count()).where(Person.tenant_id == tenant_id).group_by(Person.site_id)
+    ).all()
+    children = session.exec(
+        select(Location.parent_id, func.count()).where(Location.tenant_id == tenant_id).group_by(Location.parent_id)
+    ).all()
+    return {
+        "teams": {k: n for k, n in teams if k},
+        "people": {k: n for k, n in people if k},
+        "children": {k: n for k, n in children if k},
+    }
+
+
+@router.get("/locations")
+def list_locations(
+    session: SessionDep,
+    tenant_id: TenantDep,
+    _: UserDep,
+    include_rooms: bool = False,
+    q: Optional[str] = None,
+    limit: int = Query(500, le=5000),
+    offset: int = 0,
+):
+    from app.agent.places import ROUTABLE_TYPES
+
+    stmt = select(Location).where(Location.tenant_id == tenant_id)
+    if not include_rooms:
+        stmt = stmt.where(Location.type.in_(sorted(ROUTABLE_TYPES)))
+    rows = list(session.exec(stmt).all())
+    labels = _place_labels(session, tenant_id)
+    if q and q.strip():
+        want = q.strip().lower()
+        rows = [p for p in rows if want in f"{p.code or ''} {p.name} {p.alias or ''} {labels.get(p.location_id, '')}".lower()]
+    rows.sort(key=lambda p: labels.get(p.location_id, p.name).lower())
+    counts = _location_counts(session, tenant_id)
+    return {
+        "total": len(rows),
+        "items": [_location_out(p, labels, counts) for p in rows[offset: offset + limit]],
+        "types": sorted(PLACE_TYPES),
+    }
+
+
+def _apply_location(p: Location, body: LocationIn, session, tenant_id: str) -> None:
+    if body.name is not None and body.name.strip():
+        p.name = body.name.strip()
+    if body.type is not None and body.type.strip():
+        ptype = body.type.strip().upper()
+        if ptype not in PLACE_TYPES:
+            raise HTTPException(status_code=422, detail=f"type must be one of {', '.join(sorted(PLACE_TYPES))}")
+        p.type = ptype
+    if body.code is not None:
+        code = body.code.strip().upper() or None
+        if code:
+            clash = session.exec(select(Location).where(Location.tenant_id == tenant_id, Location.code == code)).first()
+            if clash is not None and clash.location_id != p.location_id:
+                raise HTTPException(status_code=409, detail=f"Code {code} is already used by {clash.name}")
+        p.code = code
+    if body.aliases is not None:
+        p.alias = "; ".join(a.strip() for a in body.aliases.replace(",", ";").split(";") if a.strip()) or None
+    if body.parent_id is not None:
+        parent_id = body.parent_id.strip() or None
+        if parent_id:
+            parent = session.get(Location, parent_id)
+            if parent is None or parent.tenant_id != tenant_id:
+                raise HTTPException(status_code=422, detail="Unknown parent location")
+            if p.location_id in chain_ids(session, tenant_id, parent_id):
+                raise HTTPException(status_code=422, detail="A place can't sit inside itself")
+        p.parent_id = parent_id
+
+
+@router.post("/locations")
+def create_location(body: LocationIn, session: SessionDep, tenant_id: TenantDep, _: UserDep):
+    if not (body.name or "").strip():
+        raise HTTPException(status_code=422, detail="name is required")
+    place = Location(tenant_id=tenant_id, name=body.name.strip(), type=(body.type or "BRANCH").strip().upper())
+    _apply_location(place, body, session, tenant_id)
+    session.add(place)
+    session.commit()
+    session.refresh(place)
+    return _location_out(place, _place_labels(session, tenant_id), _location_counts(session, tenant_id))
+
+
+@router.patch("/locations/{location_id}")
+def update_location(location_id: str, body: LocationIn, session: SessionDep, tenant_id: TenantDep, _: UserDep):
+    place = session.get(Location, location_id)
+    if not place or place.tenant_id != tenant_id:
+        raise HTTPException(status_code=404, detail="Location not found")
+    _apply_location(place, body, session, tenant_id)
+    place.updated_at = utcnow()
+    session.add(place)
+    session.commit()
+    session.refresh(place)
+    return _location_out(place, _place_labels(session, tenant_id), _location_counts(session, tenant_id))
+
+
+@router.delete("/locations/{location_id}")
+def delete_location(location_id: str, session: SessionDep, tenant_id: TenantDep, _: UserDep):
+    place = session.get(Location, location_id)
+    if not place or place.tenant_id != tenant_id:
+        raise HTTPException(status_code=404, detail="Location not found")
+    counts = _location_counts(session, tenant_id)
+    used = {k: counts[k].get(location_id, 0) for k in ("children", "teams", "people")}
+    if any(used.values()):
+        detail = ", ".join(f"{n} {k}" for k, n in used.items() if n)
+        raise HTTPException(status_code=409, detail=f"{place.name} still has {detail} - move them first")
+    session.delete(place)
+    session.commit()
+    return {"ok": True}
 
 
 @router.get("/knowledge")

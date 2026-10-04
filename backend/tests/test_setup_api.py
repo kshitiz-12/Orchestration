@@ -84,7 +84,7 @@ def test_knowledge_upsert_and_delete(client, auth_headers):
 def test_template_download(client, auth_headers):
     resp = client.get(f"{BASE}/templates/employees", headers=auth_headers)
     assert resp.status_code == 200
-    assert resp.text.splitlines()[0] == "email,name,department,role,manager_email"
+    assert resp.text.splitlines()[0] == "email,name,department,role,manager_email,location"
     assert client.get(f"{BASE}/templates/nope", headers=auth_headers).status_code == 404
 
 

@@ -304,16 +304,22 @@ TEAM_REPLY_INSTRUCTION = """You read a reply from an office team (IT, facilities
 to a work order and decide what it means for the case. Judge by meaning, not keywords; use YOUR_TASKS to see what
 their part is.
 - done: their part is finished or ready ("desk is ready", "laptop handed over", "all set", "good to go",
-  "arranged everything, will hand it over when he arrives" - the work is ready even if a hand-over is still to happen).
+  "arranged everything, will hand it over when he arrives", "cab booked, will share the driver's number on the day"
+  - the work is done even if a hand-over or details are still to follow).
 - progress: acknowledged or started but not finished ("on it", "ETA 4 pm", "scheduled for tomorrow", "will do today").
 - blocked: they cannot proceed or need something (a part, approval, access, budget, information, a vendor).
 - message: something to pass to the requester that is not a status (a question for them, instructions, info).
 - unclear: none of the above.
-note: their point in a short clean sentence (no greetings or signatures). Keep numbers (card no., asset tag, desk)
+note: their point in a short clean sentence (no greetings or signatures), written to be read by the REQUESTER: call
+the requester "you" (not "him", "her" or "the employee"); name anyone else. Keep numbers (card no., asset tag, desk)
 exactly. Never invent facts.
 pickup: if they say where, from whom or when the requester should collect or receive something (place, floor, desk,
 person, timing), copy that exactly; otherwise "".
-Return JSON only: {"action":"done|progress|blocked|message|unclear","note":"","pickup":"","confidence":0.0}"""
+case_reference: teams often hit reply on whichever mail is last, so the reply may be about a sibling job. If it is
+clearly about one of OTHER_OPEN_CASES rather than CASE (e.g. CASE is the taxi and they say "the flight ticket is
+booked"), give that case's reference. If it covers several (e.g. "cab and flight both booked"), list them comma
+separated, including CASE. Otherwise "".
+Return JSON only: {"action":"done|progress|blocked|message|unclear","note":"","pickup":"","case_reference":"","confidence":0.0}"""
 
 TEAM_ACTIONS = {"done", "progress", "blocked", "message", "unclear"}
 
@@ -322,9 +328,10 @@ class TeamReply(BaseModel):
     action: str = "unclear"
     note: str = ""
     pickup: str = ""
+    case_reference: str = ""
     confidence: float = 0.7
 
-    @field_validator("note", "pickup", mode="before")
+    @field_validator("note", "pickup", "case_reference", mode="before")
     @classmethod
     def _text(cls, v: Any) -> str:
         return str(v or "").strip()

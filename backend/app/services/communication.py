@@ -465,6 +465,11 @@ class CommunicationService:
         requester = (outcome.requester_email or "").strip().lower()
         if outcome.template_code == "SERVICE_REQUEST":
             earlier = self._earlier_mails(outcome, recipients)
+            if [r.strip().lower() for r in recipients] != [requester]:
+                # Team mail never hangs off the requester's mail: sibling cases from one request would merge into a
+                # single thread, and a reply couldn't tell them apart. Each case gets its own thread per team.
+                in_reply_to = None
+                thread_id = None
             if earlier:
                 # Same subject and a reply chain, so every update for this case lands in one conversation.
                 subject = re.sub(r"^\s*(?:re\s*:\s*)+", "", earlier[0].subject or "", flags=re.I) or subject
@@ -473,7 +478,7 @@ class CommunicationService:
                     in_reply_to = ids[-1]
                     if [r.strip().lower() for r in recipients] != [requester]:
                         thread_id = ids[0]
-            elif label not in {"WORK ORDER", "DONE"} and outcome.title:
+            if not earlier and label not in {"WORK ORDER", "DONE"} and outcome.title:
                 # This subject heads the whole thread, so use the case title rather than this one update's headline.
                 subject = short_case_subject(
                     case_reference=outcome.case_reference or "", action_label=label, summary=outcome.title, title=outcome.title,
