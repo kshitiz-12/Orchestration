@@ -88,6 +88,9 @@ class ProcessingPipeline:
         admin_result = self._maybe_handle_admin_reply(event)
         if admin_result is not None:
             return admin_result
+        ignored = self._ignore_unknown_sender(event)
+        if ignored is not None:
+            return ignored
 
         event.processing_stage = ProcessingStage.AI_INTERPRETATION.value
         self.session.add(event)
@@ -437,6 +440,49 @@ class ProcessingPipeline:
             "case_reference": outcome.case_reference,
             "decision_id": decision.decision_id,
         }
+
+    def _is_known_sender(self, addr: str) -> bool:
+        from app.agent.directory import base_mailbox, department_emails
+        from app.models.org import Person, Vendor
+        from app.services.site_services import cost_centre_approver_emails
+
+        if not addr:
+            return False
+        person = self.session.exec(
+            select(Person).where(Person.tenant_id == self.tenant_id, Person.email == addr)
+        ).first()
+        if person is not None and person.is_active:
+            return True
+        if is_admin_sender(addr):
+            return True
+        if {addr, base_mailbox(addr)} & department_emails(self.session, self.tenant_id):
+            return True
+        approvers = {
+            *cost_centre_approver_emails(self.session, self.tenant_id),
+            (self.settings.approval_manager_email or "").strip().lower(),
+            (self.settings.approval_finance_email or "").strip().lower(),
+        }
+        if addr in approvers:
+            return True
+        vendor = self.session.exec(
+            select(Vendor).where(Vendor.tenant_id == self.tenant_id, Vendor.contact_email == addr)
+        ).first()
+        return vendor is not None
+
+    def _ignore_unknown_sender(self, event: RawEmailEvent) -> Optional[dict]:
+        """Outsiders get no reply and no case - answering would confirm the mailbox to spammers and let anyone
+        raise work orders. The mail stays stored for audit."""
+        if (self.settings.accept_requests_from or "").strip().lower() == "anyone":
+            return None
+        addr = sender_address(event.sender)
+        if self._is_known_sender(addr):
+            return None
+        event.processing_stage = ProcessingStage.COMPLETED.value
+        event.safety_flags = {**(event.safety_flags or {}), "ignored_unknown_sender": True}
+        self.session.add(event)
+        self.session.commit()
+        logger.info("unknown_sender_ignored", event_id=event.event_id, sender=addr)
+        return {"status": "ignored_unknown_sender", "event_id": event.event_id, "sender": addr}
 
     def _maybe_handle_admin_reply(self, event: RawEmailEvent) -> Optional[dict]:
         """Ops mailbox and department replies are commands on an existing case, not requester mail."""

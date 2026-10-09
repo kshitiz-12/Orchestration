@@ -1,11 +1,10 @@
-"""Build the manual-test company on the current DATABASE_URL.
+"""Build the manual-test / single-company production seed on the current DATABASE_URL.
 
-    python -m scripts.load_test_company --wipe     clear EVERYTHING, then build the test company
-    python -m scripts.load_test_company            build on top of what is there (idempotent)
+    python -m scripts.load_test_company --wipe     clear EVERYTHING, then build
+    python -m scripts.load_test_company            build on top (idempotent)
 
-Every team uses a Gmail sub-address of one of the five real test inboxes (flexxftw12+pune@gmail.com lands in
-flexxftw12@gmail.com), so work orders for different teams/branches are real, visible and still easy to tell apart by
-the To: line. The plain addresses are employees at different branches, so you can send requests from them.
+Sized for one company with 30+ branches. Teams use Gmail plus-addresses of the five real test
+inboxes so work orders stay real and easy to tell apart by the To: line.
 """
 
 from __future__ import annotations
@@ -38,29 +37,78 @@ def sub(addr: str, tag: str) -> str:
     return f"{local}+{tag}@{domain}"
 
 
+# Regions and cities with enough branches for a 30+ site company.
 # code, name, type, parent code, aliases
-PLACES = [
+_CORE_PLACES = [
     ("WEST", "West", "REGION", None, ""),
     ("SOUTH", "South", "REGION", None, ""),
     ("NORTH", "North", "REGION", None, ""),
+    ("EAST", "East", "REGION", None, ""),
     ("MUM", "Mumbai", "CITY", "WEST", "Bombay"),
-    ("MUM-BKC", "Mumbai BKC", "BRANCH", "MUM", "BKC; Bandra Kurla Complex; Mumbai office"),
     ("PUN", "Pune", "CITY", "WEST", ""),
-    ("PUN-HJ", "Pune Hinjewadi", "BRANCH", "PUN", "Hinjewadi; Pune office"),
+    ("AHM", "Ahmedabad", "CITY", "WEST", ""),
     ("BLR", "Bengaluru", "CITY", "SOUTH", "Bangalore"),
-    # BLR-HQ is the seed's existing site (with its floors and meeting rooms), re-parented here.
     ("CHN", "Chennai", "CITY", "SOUTH", "Madras"),
-    ("CHN-OMR", "Chennai OMR", "BRANCH", "CHN", "OMR; Chennai office"),
+    ("HYD", "Hyderabad", "CITY", "SOUTH", ""),
+    ("COK", "Kochi", "CITY", "SOUTH", "Cochin"),
     ("GGN", "Gurugram", "CITY", "NORTH", "Gurgaon"),
-    ("GGN-CC", "Gurugram Cyber City", "BRANCH", "GGN", "Cyber City; Gurgaon office; Gurugram office"),
+    ("DEL", "Delhi", "CITY", "NORTH", "New Delhi"),
+    ("NOI", "Noida", "CITY", "NORTH", ""),
+    ("CHD", "Chandigarh", "CITY", "NORTH", ""),
+    ("KOL", "Kolkata", "CITY", "EAST", "Calcutta"),
+    ("BBI", "Bhubaneswar", "CITY", "EAST", ""),
 ]
 
-# Company-wide teams (codes from the default catalogue): mailbox, approver, spend limit, where to collect
+# branch code, name, city parent, aliases
+_BRANCHES = [
+    ("MUM-BKC", "Mumbai BKC", "MUM", "BKC; Bandra Kurla Complex; Mumbai office"),
+    ("MUM-AND", "Mumbai Andheri", "MUM", "Andheri; Mumbai Andheri"),
+    ("MUM-POW", "Mumbai Powai", "MUM", "Powai"),
+    ("PUN-HJ", "Pune Hinjewadi", "PUN", "Hinjewadi; Pune office"),
+    ("PUN-KM", "Pune Kharadi", "PUN", "Kharadi"),
+    ("PUN-SB", "Pune Baner", "PUN", "Baner"),
+    ("AHM-SG", "Ahmedabad SG Highway", "AHM", "SG Highway; Ahmedabad office"),
+    ("AHM-CG", "Ahmedabad CG Road", "AHM", "CG Road"),
+    # BLR-HQ comes from seed site, not listed here
+    ("BLR-WF", "Bengaluru Whitefield", "BLR", "Whitefield"),
+    ("BLR-EC", "Bengaluru Electronic City", "BLR", "Electronic City; E-City"),
+    ("BLR-MG", "Bengaluru MG Road", "BLR", "MG Road"),
+    ("CHN-OMR", "Chennai OMR", "CHN", "OMR; Chennai office"),
+    ("CHN-GU", "Chennai Guindy", "CHN", "Guindy"),
+    ("CHN-TAM", "Chennai T Nagar", "CHN", "T Nagar; T. Nagar"),
+    ("HYD-HIT", "Hyderabad HITEC City", "HYD", "HITEC; Hitec City; Hyderabad office"),
+    ("HYD-GAC", "Hyderabad Gachibowli", "HYD", "Gachibowli"),
+    ("HYD-SEC", "Hyderabad Secunderabad", "HYD", "Secunderabad"),
+    ("COK-INF", "Kochi Infopark", "COK", "Infopark; Kochi office"),
+    ("GGN-CC", "Gurugram Cyber City", "GGN", "Cyber City; Gurgaon office; Gurugram office"),
+    ("GGN-SEC", "Gurugram Sector 54", "GGN", "Sector 54"),
+    ("DEL-CP", "Delhi Connaught Place", "DEL", "CP; Connaught Place; Delhi office"),
+    ("DEL-SK", "Delhi Saket", "DEL", "Saket"),
+    ("NOI-SEC", "Noida Sector 62", "NOI", "Sector 62; Noida office"),
+    ("NOI-GNO", "Greater Noida", "NOI", "Greater Noida"),
+    ("CHD-IT", "Chandigarh IT Park", "CHD", "IT Park; Chandigarh office"),
+    ("KOL-SP", "Kolkata Salt Lake", "KOL", "Salt Lake; Sector V; Kolkata office"),
+    ("KOL-PR", "Kolkata Park Street", "KOL", "Park Street"),
+    ("BBI-INF", "Bhubaneswar Infocity", "BBI", "Infocity; Bhubaneswar office"),
+    ("BBI-JK", "Bhubaneswar Jaydev Vihar", "BBI", "Jaydev Vihar"),
+]
+
+
+def _places() -> list[tuple[str, str, str, str | None, str]]:
+    return [*_CORE_PLACES, *( (c, n, "BRANCH", city, a) for c, n, city, a in _BRANCHES )]
+
+
+# Company-wide teams: every seed catalogue code gets a real plus-address (no .invalid in production seed)
 COMPANY_TEAMS = {
     "ADMIN": (ADMIN, ADMIN, 0.0, None),
     "FACILITIES": (sub(FAC, "facilities"), ADMIN, 1000.0, None),
+    "HOUSEKEEPING": (sub(FAC, "hk"), ADMIN, 0.0, None),
     "IT": (sub(IT, "it"), ADMIN, 0.0, "IT desk, 2nd floor, Bengaluru HQ, 10 AM - 6 PM"),
+    "SECURITY": (sub(ADMIN, "security"), ADMIN, 0.0, None),
+    "TRAVEL": (sub(ADMIN, "travel"), ADMIN, 0.0, None),
     "HR": (sub(HR, "hr"), ADMIN, 0.0, None),
+    "FINANCE": (sub(ADMIN, "finance"), ADMIN, 0.0, None),
+    "PROCUREMENT": (sub(ADMIN, "procure"), ADMIN, 0.0, None),
     "CAFETERIA": (sub(CAF, "cafeteria"), ADMIN, 0.0, None),
 }
 
@@ -75,33 +123,23 @@ BRANCH_TEAMS = [
                                         "asset"], sub(IT, "north"), "NORTH", None,
      "IT room, 5th floor, Gurugram Cyber City"),
     ("ADMIN_SOUTH", "Admin - South", [], sub(ADMIN, "south"), "SOUTH", sub(ADMIN, "south"), None),
+    ("ADMIN_EAST", "Admin - East", [], sub(ADMIN, "east"), "EAST", sub(ADMIN, "east"), None),
+    ("FACILITIES_WEST", "Facilities - West", ["maintenance", "furniture", "electrical", "plumbing", "hvac",
+                                              "pest_control"], sub(FAC, "west"), "WEST", None, None),
 ]
 
-# Real inboxes as employees: email, name, department, role, branch
 REAL_EMPLOYEES = [
     (HR, "Kshitiz Vishwakarma", "People", "HR", "MUM-BKC"),
     (CAF, "Ananya Rao", "Sales", "EMPLOYEE", "PUN-HJ"),
     (FAC, "Vikram Shetty", "Engineering", "EMPLOYEE", "CHN-OMR"),
     (IT, "Neha Kapoor", "Finance", "EMPLOYEE", "GGN-CC"),
+    ("kmantri1204@gmail.com", "Kapil Mantri", "Operations", "EMPLOYEE", "BLR-HQ"),
 ]
 
 FIRST = ["Aarav", "Diya", "Kabir", "Isha", "Rohan", "Meera", "Arjun", "Sana", "Dev", "Tara", "Karan", "Riya",
          "Aditya", "Pooja", "Nikhil", "Sneha", "Varun", "Kavya", "Siddharth", "Anjali"]
 LAST = ["Sharma", "Iyer", "Gupta", "Nair", "Patel", "Reddy", "Mehta", "Khan", "Das", "Joshi"]
 DEPTS = ["Engineering", "Sales", "Finance", "Operations", "Marketing", "People", "Technology", "Legal"]
-FAKE_BRANCHES = ["MUM-BKC", "PUN-HJ", "BLR-HQ", "CHN-OMR", "GGN-CC"]
-
-KNOWLEDGE = {
-    "offices": ("office", "Our offices",
-                "Mumbai BKC (West) - registered office, 9:30 AM - 6:30 PM.\n"
-                "Pune Hinjewadi (West) - Phase 1, 9:30 AM - 6 PM; admin desk on the ground floor.\n"
-                "Bengaluru HQ (South) - 3 floors, meeting rooms F1-R1 to F3-R3; IT desk on the 2nd floor.\n"
-                "Chennai OMR (South) - 9 AM - 6 PM; handled by the South admin team.\n"
-                "Gurugram Cyber City (North) - 9:30 AM - 6:30 PM; IT room on the 5th floor."),
-    "canteen_by_branch": ("office", "Canteen timings by branch",
-                          "Bengaluru HQ and Mumbai BKC: 8:30 AM - 6 PM. Pune Hinjewadi: 9 AM - 4 PM. "
-                          "Chennai OMR and Gurugram: pantry only (tea/coffee), lunch via the empanelled caterer."),
-}
 
 
 def wipe() -> None:
@@ -134,7 +172,7 @@ def build(session: Session) -> str:
     by_code: dict[str, Location] = {
         p.code: p for p in session.exec(select(Location).where(Location.tenant_id == tid)).all() if p.code
     }
-    for code, name, ptype, parent, aliases in PLACES:
+    for code, name, ptype, parent, aliases in _places():
         place = by_code.get(code) or Location(tenant_id=tid, code=code, name=name, type=ptype)
         place.name, place.type, place.alias = name, ptype, aliases or None
         place.parent_id = by_code[parent].location_id if parent else None
@@ -152,13 +190,15 @@ def build(session: Session) -> str:
         session.flush()
         by_code["BLR-HQ"] = hq
 
+    branch_codes = [c for c, p in by_code.items() if (p.type or "").upper() == "BRANCH"]
+
     depts = {d.code: d for d in session.exec(select(Department).where(Department.tenant_id == tid)).all()}
     for code, (mailbox, approver, limit, collect) in COMPANY_TEAMS.items():
         d = depts[code]
         d.primary_email, d.approver_email, d.backup_emails = mailbox, approver, []
         d.spend_approval_limit, d.location_id = limit, None
         d.handover_info = collect
-        d.notes = "Test company"
+        d.notes = "Production seed - replace mailboxes in Company setup if needed"
         session.add(d)
     for code, name, cats, mailbox, covers, approver, collect in BRANCH_TEAMS:
         d = depts.get(code) or Department(tenant_id=tid, code=code, name=name)
@@ -166,7 +206,7 @@ def build(session: Session) -> str:
         d.approver_email, d.handover_info, d.is_active = approver, collect, True
         d.location_id = by_code[covers].location_id
         d.sla_hours = 8
-        d.notes = "Test company"
+        d.notes = "Production seed"
         session.add(d)
     session.flush()
 
@@ -185,17 +225,33 @@ def build(session: Session) -> str:
         people[email].manager_id = hr_person.person_id if hr_person else None
         session.add(people[email])
 
-    for i in range(60):
+    # ~4 people per branch so the directory looks real at 30+ sites
+    n_people = max(120, len(branch_codes) * 4)
+    for i in range(n_people):
         first, last = FIRST[i % len(FIRST)], LAST[(i * 7) % len(LAST)]
         email = f"{first}.{last}{i:02d}@acme.example".lower()
         p = people.get(email) or Person(tenant_id=tid, email=email, name=f"{first} {last}")
         p.department = DEPTS[i % len(DEPTS)]
         p.role = "MANAGER" if i % 10 == 0 else "EMPLOYEE"
-        p.site_id = by_code[FAKE_BRANCHES[i % len(FAKE_BRANCHES)]].location_id
+        p.site_id = by_code[branch_codes[i % len(branch_codes)]].location_id
+        p.is_active = True
         session.add(p)
     session.flush()
 
-    for key, (section, title, content) in KNOWLEDGE.items():
+    office_lines = []
+    for code in sorted(branch_codes):
+        p = by_code[code]
+        office_lines.append(f"{p.name} ({code})")
+    knowledge = {
+        "offices": ("office", "Our offices",
+                    f"Acme has {len(branch_codes)} branches across West, South, North and East.\n"
+                    + "\n".join(f"- {line}" for line in office_lines)
+                    + "\n\nStandard hours 9:30 AM - 6:30 PM unless the branch admin says otherwise."),
+        "canteen_by_branch": ("office", "Canteen timings by branch",
+                              "Bengaluru HQ and Mumbai BKC: 8:30 AM - 6 PM. Pune Hinjewadi: 9 AM - 4 PM. "
+                              "Other branches: pantry (tea/coffee); lunch via the empanelled caterer where contracted."),
+    }
+    for key, (section, title, content) in knowledge.items():
         entry = session.exec(
             select(KnowledgeEntry).where(KnowledgeEntry.tenant_id == tid, KnowledgeEntry.key == key)
         ).first() or KnowledgeEntry(tenant_id=tid, key=key, title=title, content=content)
@@ -208,17 +264,22 @@ def build(session: Session) -> str:
 
 
 def summary(session: Session, tid: str) -> None:
+    from app.agent.directory import catalogue
     from app.agent.places import path_label
 
-    print("\nBranches:")
-    for p in session.exec(select(Location).where(Location.tenant_id == tid, Location.code.is_not(None))).all():
-        if p.type == "BRANCH":
-            print(f"  {p.code:8} {path_label(session, tid, p.location_id)}")
+    branches = [p for p in session.exec(select(Location).where(Location.tenant_id == tid)).all()
+                if (p.type or "").upper() == "BRANCH"]
+    people = session.exec(select(Person).where(Person.tenant_id == tid, Person.is_active == True)).all()  # noqa: E712
+    print(f"\nBranches: {len(branches)}")
+    for p in sorted(branches, key=lambda x: x.code or ""):
+        print(f"  {p.code:10} {path_label(session, tid, p.location_id)}")
+    print(f"\nEmployees: {len(people)}")
+    print(f"AI catalogue lines (folded): {len(catalogue(session, tid))}")
     print("\nTeams with a real inbox:")
     for d in session.exec(select(Department).where(Department.tenant_id == tid).order_by(Department.code)).all():
         if d.primary_email and not d.primary_email.endswith("invalid"):
             where = path_label(session, tid, d.location_id) if d.location_id else "whole company"
-            print(f"  {d.code:15} {d.primary_email:42} covers {where}")
+            print(f"  {d.code:18} {d.primary_email:42} covers {where}")
     print("\nSend requests from (employee, branch):")
     for email, name, _, _, branch in REAL_EMPLOYEES:
         print(f"  {email:36} {name:22} {branch}")
@@ -242,6 +303,7 @@ def main() -> None:
         tid = build(session)
         summary(session, tid)
     print("\nAdmin login: admin@prototype.local")
+    print("ACCEPT_REQUESTS_FROM=employees (outsiders get no reply)")
 
 
 if __name__ == "__main__":

@@ -76,6 +76,43 @@ Durations assume the current team pace and are rough; each phase ends with somet
 - Visitor management, transport rosters, guest house.
 - Learning engine suggestions → draft rules for admin approval.
 
+## V1 strengtheners (from the enterprise F&A blueprint)
+
+Keep V1 scope. Borrow only what makes the email desk harder to break and easier to sell.
+
+| Blueprint idea | What we take into V1 | Why |
+|---|---|---|
+| Ask all missing details in one mail | Already the desk pattern; enforce for office + catering time | Stops fragmented back-and-forth |
+| Employees only as requesters | `ACCEPT_REQUESTS_FROM=employees` | Stops outsiders opening work orders |
+| Eligibility / grade later → for V1: employee must exist | Gate before AI | Cheap control with high trust |
+| Approval dimensions (place, amount, category) | Policy engine Phase 3; until then playbooks + risk | Same path as doc 02 |
+| SLA + reminder + escalation | Already in lifecycle sweep | Matches blueprint service delivery |
+| Thin vendor master | Preferred vendor on work orders (exists) | Don't build P2P yet |
+| Subject = task + one ticket | Work-order and update subjects name the task | Stops "same subject for different jobs" |
+| No ghost tickets from old threads | Ignore empty/placeholder updates to dead case numbers | Old Gmail threads must not invent work |
+| Vague cancel closes waiting asks | "I don't want it" cancels all AWAITING_INFO cases on that thread | Matches how people write |
+
+**Explicitly out of V1** (keep for after pilot): full vendor onboarding, rate cards, PO/GRN/3-way match, leases, ESG, BMS/IoT, asset registers, washroom masters, insurance claims.
+
+## Single-company production bar (this pilot)
+
+Ready to run **one** company with **30+ branches** when all of these are true:
+
+- [x] Place tree + nearest-scope team routing (any depth)
+- [x] Branch / region admin fallback
+- [x] AI catalogue folded (prompt size stable at 30 or 300 branches)
+- [x] Employees-only inbound gate
+- [x] Office asked when place unknown; catering asks date + time
+- [x] Subjects name the task; no ghost tickets from old threads
+- [x] Every catalogue team has a real mailbox (no `.invalid` in the seed)
+- [x] Seed / wipe script loads 30+ branches for manual and automated tests
+- [ ] Code deployed to Render (push required)
+- [ ] Policy engine as data (Phase 3) — limits/approvals still partly hard-coded
+- [ ] Manager approval chains
+- [ ] True multi-tenant isolation (Phase 1) — not needed for a one-company pilot
+
+For a one-company pilot, the open items above are follow-ups, not blockers, as long as ops accept admin-based approvals and playbook limits.
+
 ## Demo company (used for sales and tests)
 
 **"Acme Financial Services"** — 1,200 employees, 3 regions, 8 cities, 12 branches (Mumbai HQ with 2 buildings,

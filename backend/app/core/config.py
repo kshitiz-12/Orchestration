@@ -69,6 +69,9 @@ class Settings(BaseSettings):
     approval_finance_email: str = ""
     # strict = admin replies must pass SPF for the admin domain or thread onto our ops mail
     admin_sender_verification: str = "strict"
+    # employees = mail from anyone outside the employee list (and admin, team inboxes, approvers, vendors)
+    # is stored but never answered; anyone = every sender is served
+    accept_requests_from: str = "employees"
     # Proposed-room holds: release after N hours, remind requester after M hours
     proposal_hold_hours: float = 24.0
     proposal_reminder_hours: float = 12.0

@@ -285,7 +285,7 @@ def test_catering_date_given_later_waits_for_approval_and_is_due_by_the_meal(ses
     assert case.due_at == meal - timedelta(hours=5, minutes=30), "the team's deadline is the meal time, not 12h later"
 
 
-def test_one_mail_many_cases_keeps_the_name_and_one_thread(session: Session, live):
+def test_one_mail_many_cases_keeps_the_name_and_says_which_case(session: Session, live):
     tid = live
     joiner = "kmantri1204@gmail.com"
     ev = _mail(session, tid, "I am new joiner, need assistance in access card and seating", sender=joiner,
@@ -309,8 +309,7 @@ def test_one_mail_many_cases_keeps_the_name_and_one_thread(session: Session, liv
     assert later, "the requester hears that the card was approved"
     for m in later:
         assert m.body.startswith("Hi Kapil,"), m.body[:40]
-        assert re.sub(r"^\s*(?:re\s*:\s*)+", "", m.subject, flags=re.I) == re.sub(r"^\s*(?:re\s*:\s*)+", "", first.subject, flags=re.I)
-
+        assert m.subject == f"Access card and ID issuance [{card.case_reference}]", "an update names only its own request"
 
 def test_flight_and_taxi_details_later_keep_case_numbers_and_right_vendor(session: Session, live):
     tid = live

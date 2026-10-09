@@ -27,7 +27,7 @@ from app.agent.directory import (
 )
 from app.agent.learning import add_correction, similar_verified
 from app.agent.learning import record_closure as save_learning_record
-from app.agent.places import path_label, place_for_request
+from app.agent.places import offices, path_label, place_for_request
 from app.agent.playbooks import (
     LEGACY_CATEGORIES,
     RiskVerdict,
@@ -66,7 +66,13 @@ from app.models.company import ServiceTicket, VisitorPass
 from app.models.intake import Conversation, RawEmailEvent
 from app.models.org import Person, Resource, Vendor, utcnow
 from app.models.outcome import Approval, Evidence, Outcome
-from app.services.communication import CommunicationService, humanize_email_local, resolve_requester_name
+from app.services.communication import (
+    CommunicationService,
+    humanize_email_local,
+    resolve_requester_name,
+    subject_refs,
+    without_refs,
+)
 from app.services.email_utils import strip_for_ai
 
 logger = get_logger(__name__)
@@ -74,6 +80,11 @@ logger = get_logger(__name__)
 SERVICE_TEMPLATE = "SERVICE_REQUEST"
 _CLOSED = {OutcomeStatus.CLOSED.value, OutcomeStatus.CANCELLED.value, OutcomeStatus.ADMINISTRATIVELY_CLOSED.value}
 _CASE_REF = re.compile(r"\b([A-Z]{2,5}-\d{4}-\d{3,})\b")
+# Unanswered template lines like "- Car parking (PRK-…):" or "[VISITOR NAME, …]"
+_PLACEHOLDER_UPDATE = re.compile(
+    r"\[[A-Z][A-Z0-9 ,/_-]{2,80}\]|^\s*[-*•]\s*.{0,80}:\s*(?:\[[^\]]+\]\s*)?$",
+    re.I | re.M,
+)
 # Travel bookings a cab company can't fulfil.
 _NOT_A_CAB_RE = re.compile(r"\b(?:flight|air\s*ticket|airline|train|rail|hotel|visa|bus\s+ticket)s?\b", re.I)
 
@@ -172,6 +183,18 @@ def _identity(details: dict, text: str = "") -> tuple[set[str], set[str]]:
         if v := label_value(text, k):
             ids |= _norm_values(v)
     return people, ids
+
+
+def _empty_or_placeholder_update(intent: AgentIntent, text: str) -> bool:
+    """True when an 'update' has no real details - usually an unanswered template pasted into an old thread."""
+    details = {k: v for k, v in (intent.details or {}).items() if v not in (None, "", [], {})}
+    if details:
+        return False
+    raw = text or ""
+    if _PLACEHOLDER_UPDATE.search(raw):
+        return True
+    # Named a dead ticket number but added nothing new.
+    return bool(intent.case_reference)
 
 
 def _about_someone_else(intent: AgentIntent, target: Outcome, text: str) -> bool:
@@ -378,6 +401,19 @@ class AdminDesk:
         mine, legacy = self._split(decision, current, cases, f"{event.subject or ''}\n{text}")
         self.handoff_categories = {normalize_category(i.category) for i in legacy} if self.agent.can_reason else set()
         if not mine:
+            # Empty/placeholder updates to dead ticket numbers must not fall through to the legacy path
+            # (that used to invent a GENERAL case titled like the old subject).
+            if self._dead_template_updates(decision, f"{event.subject or ''}\n{text}"):
+                body = (
+                    f"{'Hi ' + name.split()[0] + ',' if name and name not in {'there', 'team'} else 'Hi,'}\n\n"
+                    "Those older request numbers aren't open anymore, so I haven't opened new tickets from that "
+                    "template. Send a fresh mail for anything you still need and I'll take it from there.\n\n"
+                    f"{self.settings.mail_signature}\n"
+                )
+                self._send_reply(event, conversation, None, body, [])
+                self.session.commit()
+                return {"status": "agent_handled", "intents": ["ignored_dead_refs"], "replied": True,
+                        "decision_source": decision.source}
             return None
 
         results = [self._execute(intent, event, conversation, current, cases, decision) for intent in mine]
@@ -466,11 +502,19 @@ class AdminDesk:
                 elif target is not None and is_service_case(target):
                     mine.append(intent)
                 elif target is None and intent.type == "update_case" and cat not in LEGACY_CATEGORIES | {"legacy", "general"}:
+                    # Don't invent tickets from dead case numbers / empty templates in old subjects.
+                    if _empty_or_placeholder_update(intent, text):
+                        continue
                     intent.type = "new_request"
                     mine.append(intent)
                 else:
                     legacy.append(intent)
         return mine, legacy
+
+    @staticmethod
+    def _dead_template_updates(decision: AgentDecision, text: str) -> bool:
+        updates = [i for i in decision.intents if i.type == "update_case"]
+        return bool(updates) and all(_empty_or_placeholder_update(i, text) for i in updates)
 
     # ------------------------------------------------------------ execution
     def _execute(
@@ -496,6 +540,24 @@ class AdminDesk:
         if target is None:
             return None
         if intent.type == "cancel":
+            # Vague "I don't want / cancel" → every open ask still waiting on the requester.
+            body = strip_for_ai(event.body_text or "")
+            vague = not intent.case_reference or bool(
+                re.search(
+                    r"\b(?:i\s+don'?t\s+want|no\s+thanks|not\s+needed|forget\s+it|cancel\s+(?:all|them|these|both))\b",
+                    body,
+                    re.I,
+                )
+            )
+            waiting = [
+                c for c in cases
+                if (c.facts or {}).get("agent_stage") == "AWAITING_INFO" and c.status not in _CLOSED
+            ]
+            if vague and len(waiting) > 1:
+                last = None
+                for c in waiting:
+                    last = self._cancel(c, intent)
+                return last
             return self._cancel(target, intent)
         if intent.type == "close":
             return self._close(target, "Requester confirmed it is done.", closure="verified_by_requester")
@@ -658,6 +720,8 @@ class AdminDesk:
             if ticket:
                 ticket.details = details
                 self.session.add(ticket)
+        route, which_office = self._settle_place(outcome, route, text)
+        facts = outcome.facts or {}
         missing = list(dict.fromkeys(intent.missing))
         if details.get("parking_type") == "employee_permanent":
             missing = [q for q in missing if not re.search(r"\b(?:date|day|when)\b", q, re.I)]
@@ -666,6 +730,8 @@ class AdminDesk:
             for question in missing_questions(category, details):
                 if question not in missing:
                     missing.append(question)
+        if which_office:
+            missing.append(which_office)
         urgent = outcome.priority == "URGENT"
         if missing and not urgent:
             _set_facts(self.session, outcome, agent_stage="AWAITING_INFO", missing=missing,
@@ -801,6 +867,41 @@ class AdminDesk:
             headline = "High-priority work order"
         self._work_order(outcome, route, headline=headline, final=False)
         return {"intent": intent, "status": "dispatched", "outcome": outcome, "team": route.department_name}
+
+    def _settle_place(self, outcome: Outcome, route: Route, text: str) -> tuple[Route, Optional[str]]:
+        """Which office the work is at. Named late (an answer to our question) -> re-route to that office's team.
+        Still unknown in a company with several offices -> the question to ask, once; after that the
+        company-wide team takes it rather than holding the work up."""
+        facts = outcome.facts or {}
+        category = facts.get("agent_category") or "general"
+        if facts.get("location_id") or not playbook_for(category).on_site:
+            return route, None
+        details = facts.get("details") or {}
+        place = place_for_request(
+            self.session, self.tenant_id, details=details, text=f"{details.get('requester_note') or ''}\n{text}",
+        )
+        if place is not None:
+            route = route_for(self.session, self.tenant_id, category, place.location_id)
+            _set_facts(
+                self.session, outcome, location_id=place.location_id,
+                location_name=path_label(self.session, self.tenant_id, place.location_id),
+                department_code=route.department_code, department_name=route.department_name,
+            )
+            ticket = self._ticket(outcome)
+            if ticket:
+                ticket.location = (f"{place.name}, {ticket.location}" if ticket.location else place.name)[:200]
+                ticket.department_code = route.department_code
+                self.session.add(ticket)
+            return route, None
+        choices = offices(self.session, self.tenant_id)
+        if len(choices) < 2 or facts.get("office_asked"):
+            return route, None
+        _set_facts(self.session, outcome, office_asked=True)
+        if len(choices) <= 12:
+            sample = ", ".join(p.name for p in choices)
+        else:
+            sample = ", ".join(p.name for p in choices[:8]) + f", … ({len(choices)} offices — reply with the branch name)"
+        return route, f"Which office is this at ({sample})?"
 
     def _start_clock(self, outcome: Outcome) -> None:
         """SLA runs from when the team gets the work, not from when we were still asking or waiting for approval."""
@@ -1263,13 +1364,17 @@ class AdminDesk:
     def _send_reply(
         self, event: RawEmailEvent, conversation: Conversation, outcome: Optional[Outcome], body: str, results: list[dict]
     ) -> None:
-        subject = (event.subject or "").strip() or "Your request"
-        if not re.match(r"^\s*re\s*:", subject, re.I):
-            subject = f"Re: {subject}"
-        refs = [r["outcome"].case_reference for r in results if r.get("outcome") is not None]
-        for ref in dict.fromkeys(refs):
-            if f"[{ref}]" not in subject:
-                subject = f"{subject} [{ref}]"
+        cases = list({r["outcome"].case_reference: r["outcome"] for r in results if r.get("outcome") is not None}.values())
+        refs = [c.case_reference for c in cases]
+        old_refs = subject_refs(event.subject)
+        # Old ticket numbers in the subject belong to the thread, not to this reply.
+        base = re.sub(r"^\s*(?:re\s*:\s*)+", "", without_refs(event.subject), flags=re.I).strip()
+        if old_refs and len(cases) == 1 and cases[0].case_reference not in old_refs and cases[0].title:
+            # A new request typed into an old thread: name it, or it reads like the old one.
+            base = cases[0].title[:90]
+        subject = f"Re: {base or 'Your request'}"
+        for ref in refs:
+            subject = f"{subject} [{ref}]"
         self.comms.send(
             communication_type=CommunicationType.INFORMATION_ONLY.value,
             recipients=[(event.sender or "").lower()],

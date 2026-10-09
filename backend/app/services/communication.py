@@ -17,6 +17,16 @@ from app.services.intake import IdempotentActionService
 
 logger = get_logger(__name__)
 
+_REF_TAG = re.compile(r"\s*\[([A-Z]{2,5}-\d{4}-\d+)\]", re.I)
+
+
+def subject_refs(subject: Optional[str]) -> list[str]:
+    return [m.upper() for m in _REF_TAG.findall(subject or "")]
+
+
+def without_refs(subject: Optional[str]) -> str:
+    return re.sub(r"\s{2,}", " ", _REF_TAG.sub("", subject or "")).strip()
+
 
 def _rfc_message_id(provider_id: Optional[str]) -> Optional[str]:
     """The Message-ID recipients see: CloudMailin's API hands back a bare id that goes out as <id@cloudmta.net>."""
@@ -470,18 +480,27 @@ class CommunicationService:
                 # single thread, and a reply couldn't tell them apart. Each case gets its own thread per team.
                 in_reply_to = None
                 thread_id = None
-            if earlier:
+            ref = (outcome.case_reference or "").upper()
+            shared = bool(earlier) and any(r != ref for r in subject_refs(earlier[0].subject))
+            if earlier and shared and outcome.title:
+                # The first reply covered several requests; each one's updates must say which request they are about.
+                subject = f"{outcome.title[:90]} [{ref}]"
+            elif earlier:
                 # Same subject and a reply chain, so every update for this case lands in one conversation.
                 subject = re.sub(r"^\s*(?:re\s*:\s*)+", "", earlier[0].subject or "", flags=re.I) or subject
+            if earlier:
                 ids = [i for i in (_rfc_message_id(m.provider_message_id or m.gmail_message_id) for m in earlier) if i]
                 if ids:
                     in_reply_to = ids[-1]
                     if [r.strip().lower() for r in recipients] != [requester]:
                         thread_id = ids[0]
-            if not earlier and label not in {"WORK ORDER", "DONE"} and outcome.title:
-                # This subject heads the whole thread, so use the case title rather than this one update's headline.
+            if not earlier and outcome.title:
+                # This subject heads the whole thread, so name the task rather than this one update's headline.
+                hint = outcome.title
+                if re.match(r"\s*urgent\b", subject_hint or "", re.I):
+                    hint = f"URGENT: {hint}"
                 subject = short_case_subject(
-                    case_reference=outcome.case_reference or "", action_label=label, summary=outcome.title, title=outcome.title,
+                    case_reference=outcome.case_reference or "", action_label=label, summary=hint, title=outcome.title,
                 )
         key_suffix = suppress_fingerprint or event_id or hash(body)
         polish = None

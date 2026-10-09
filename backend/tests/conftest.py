@@ -13,6 +13,8 @@ os.environ["SECRET_KEY"] = "test-secret"
 os.environ["APP_ENV"] = "prototype"
 os.environ["EMAIL_PROVIDER"] = "cloudmailin"
 os.environ["CLOUDMAILIN_WEBHOOK_SECRET"] = ""
+# Most tests mail from made-up requesters; the employees-only gate has its own tests.
+os.environ["ACCEPT_REQUESTS_FROM"] = "anyone"
 # Tests must never reach a real mailbox, whatever backend/.env holds.
 for _key in (
     "CLOUDMAILIN_SMTP_URL",

@@ -32,6 +32,8 @@ class Playbook:
     department: str = "ADMIN"
     # Optional details worth asking for alongside the blocking ones (never hold the work up)
     nice_to_have: tuple[str, ...] = ()
+    # Done at a particular office, so a company with several branches must know which one before dispatching
+    on_site: bool = True
 
 
 _WHERE = ("location", "floor", "area", "room", "desk", "office", "cabin", "wing", "seat")
@@ -116,7 +118,8 @@ PLAYBOOKS: tuple[Playbook, ...] = (
     # ---- cafeteria & events
     Playbook(
         "catering", "Catering", prefix="CAT", auto_spend_limit=5000.0, department="CAFETERIA",
-        required=((_WHEN, "For which date and time?"),
+        required=((_WHEN, "For which date?"),
+                  (("time", "start_time", "meal_time", "slot"), "What time should it be ready?"),
                   (("headcount", "attendees", "quantity", "people", "pax"), "For how many people?")),
         aliases=("food", "snacks", "lunch_order", "high_tea", "refreshments"),
         nice_to_have=("Veg / non-veg split and any allergies?", "Cost centre for the spend?"),
@@ -157,15 +160,16 @@ PLAYBOOKS: tuple[Playbook, ...] = (
         aliases=("parcel", "dispatch", "mailroom", "post", "package", "inward_courier", "outward_courier"),
     ),
     Playbook("purchase", "Purchase request", prefix="SUP", sensitive=True, department="PROCUREMENT",
-             aliases=("procurement", "buy", "quotation")),
+             aliases=("procurement", "buy", "quotation"), on_site=False),
     Playbook("vendor", "Vendor management", prefix="VND", sensitive=True, department="PROCUREMENT",
-             aliases=("vendor_onboarding", "new_vendor", "vendor_issue", "amc", "contract_renewal")),
+             aliases=("vendor_onboarding", "new_vendor", "vendor_issue", "amc", "contract_renewal"), on_site=False),
     # ---- travel & transport
     Playbook(
         "travel", "Travel / cab", prefix="TRV", department="TRAVEL",
         required=((("travel_date", "visit_date", "pickup_time", "date"), "When do you need to travel (date and time)?"),
                   (("pickup", "from", "route", "destination", "to", "drop"), "From where to where?")),
         aliases=("cab", "taxi", "airport_transfer", "hotel", "flight", "train", "visa", "airport_pickup"),
+        on_site=False,
     ),
     Playbook(
         "employee_transport", "Employee transport", prefix="TRN", department="TRAVEL",
@@ -193,7 +197,7 @@ PLAYBOOKS: tuple[Playbook, ...] = (
     Playbook("offboarding", "Employee exit", prefix="EXT", sensitive=True, action="fan_out", department="HR",
              fan_out=("it_support", "access_card"), aliases=("exit", "last_working_day", "relieving")),
     Playbook("hr_query", "HR query", prefix="HRQ", sensitive=True, department="HR",
-             aliases=("hr", "leave", "payslip", "attendance")),
+             aliases=("hr", "leave", "payslip", "attendance"), on_site=False),
     # ---- IT
     Playbook("it_support", "IT support", prefix="ITS", department="IT",
              required=((_WHAT, "What's the problem (and any error message)?"),),
@@ -202,13 +206,14 @@ PLAYBOOKS: tuple[Playbook, ...] = (
     Playbook("network", "Network / Wi-Fi", prefix="ITS", department="IT", aliases=("wifi", "internet", "lan")),
     Playbook("software", "Software / licence", prefix="ITS", department="IT",
              required=((("software", "item", "name", "description"), "Which software / licence do you need?"),),
-             aliases=("licence", "license", "software_install", "subscription", "application_access")),
+             aliases=("licence", "license", "software_install", "subscription", "application_access"), on_site=False),
     Playbook("phone_sim", "Phone / SIM", prefix="ITS", department="IT", aliases=("sim", "mobile", "phone", "data_card")),
     Playbook("asset", "Asset movement / return", prefix="AST", department="IT",
              aliases=("asset_return", "asset_transfer", "asset_tagging", "asset_allocation")),
     # ---- finance
-    Playbook("payment", "Payment", sensitive=True, department="FINANCE"),
-    Playbook("reimbursement", "Reimbursement", sensitive=True, department="FINANCE", aliases=("expense", "claim")),
+    Playbook("payment", "Payment", sensitive=True, department="FINANCE", on_site=False),
+    Playbook("reimbursement", "Reimbursement", sensitive=True, department="FINANCE", aliases=("expense", "claim"),
+             on_site=False),
     Playbook("general", "General admin request", department="ADMIN", aliases=("other", "misc", "admin")),
 )
 
@@ -264,6 +269,10 @@ _LOCATION_IN_TEXT = re.compile(
     r"near\s+(?:the\s+)?\w+)",
     re.I,
 )
+_TIME_IN_TEXT = re.compile(
+    r"\b(?:[01]?\d|2[0-3])(?::[0-5]\d)?\s*(?:a\.?m\.?|p\.?m\.?)\b|\b(?:noon|midnight|morning|afternoon|evening)\b",
+    re.I,
+)
 
 
 def label_value(text: str, key: str) -> Optional[str]:
@@ -285,6 +294,15 @@ def fill_required(category: str, details: dict[str, Any], text: str = "") -> dic
             value = next((v for k in keys if (v := label_value(text, k))), None)
         if value is not None:
             out[main] = value
+    # "Monday 1 PM" already answers both date and time
+    if out.get("time") in (None, "", [], {}) and _TIME_IN_TEXT.search(
+        " ".join(str(v) for v in out.values() if isinstance(v, str)) + "\n" + (text or "")
+    ):
+        m = _TIME_IN_TEXT.search(
+            " ".join(str(v) for v in out.values() if isinstance(v, str)) + "\n" + (text or "")
+        )
+        if m:
+            out["time"] = m.group(0).strip()
     return out
 
 
@@ -295,6 +313,8 @@ def missing_questions(category: str, details: dict[str, Any]) -> list[str]:
         if any(details.get(k) not in (None, "", [], {}) for k in keys):
             continue
         if keys == _WHERE and _LOCATION_IN_TEXT.search(text):
+            continue
+        if keys and keys[0] == "time" and _TIME_IN_TEXT.search(text):
             continue
         out.append(question)
     return out

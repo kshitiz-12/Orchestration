@@ -63,6 +63,16 @@ def routable_places(session: Session, tenant_id: str) -> list[Location]:
     return [p for p in rows if (p.type or "").upper() in ROUTABLE_TYPES]
 
 
+def offices(session: Session, tenant_id: str) -> list[Location]:
+    """The places a requester would call 'my office' - branches, sites and campuses, else cities."""
+    rows = routable_places(session, tenant_id)
+    for kinds in ({"BRANCH", "SITE", "CAMPUS"}, {"CITY"}):
+        found = [p for p in rows if (p.type or "").upper() in kinds]
+        if found:
+            return sorted(found, key=lambda p: p.name.lower())
+    return []
+
+
 def find_place(session: Session, tenant_id: str, text: str, places: Optional[list[Location]] = None) -> Optional[Location]:
     """The place a piece of text names. Exact name/code/alias first, then a whole-word mention.
 

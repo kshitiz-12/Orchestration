@@ -63,6 +63,14 @@ admins:
 
 Pricing is out of scope for now.
 
+## D9. V1 is the email desk wedge; blueprint is the north star
+
+The enterprise Facilities & Administration catalogue (vendors, P2P, leases, ESG, assets, …) is the long-term map.
+V1 stays the multi-branch email admin desk. We only pull blueprint items that harden that wedge (employee gate,
+one-shot missing info, clean subjects, no ghost tickets, place-aware routing, policy engine next).
+
+*Would change if:* a paying pilot requires a specific commercial module (e.g. vendor invoices) as a go-live condition.
+
 ## Open questions for the founder
 
 - Is the first target market (D4) right, or is there a particular industry to start with?
