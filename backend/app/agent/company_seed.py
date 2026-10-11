@@ -1,8 +1,7 @@
-"""Sample company data so the AI admin has something real to work with.
+"""Default department catalogue stubs. Real company data is uploaded from Setup (CSV/Excel).
 
-Everything here is a placeholder the company replaces from the dashboard or by bulk upload.
-Department mailboxes use the reserved `.invalid` domain: mail for them is redirected to the
-main admin (ADMIN_OPS_EMAIL) until a real address is entered.
+Department mailboxes use the reserved `.invalid` domain until a real address is entered —
+work for those teams is redirected to ADMIN_OPS_EMAIL until then.
 """
 
 from __future__ import annotations
@@ -10,7 +9,7 @@ from __future__ import annotations
 from sqlmodel import Session, select
 
 from app.models.company import Department, KnowledgeEntry
-from app.models.org import Person, Vendor
+from app.models.org import Person, Vendor  # noqa: F401 — kept for SAMPLE_* reference data below
 
 PLACEHOLDER_DOMAIN = "example.invalid"
 
@@ -148,7 +147,7 @@ def is_placeholder(email: str | None) -> bool:
 
 
 def ensure_company_seed(session: Session, tenant_id: str) -> None:
-    """Idempotent: only adds rows that are missing, never overwrites what the company edited."""
+    """Idempotent department catalogue stubs only. Company data comes from Setup import — no sample people/vendors/knowledge."""
     have_depts = {d.code for d in session.exec(select(Department).where(Department.tenant_id == tenant_id)).all()}
     for spec in DEFAULT_DEPARTMENTS:
         if spec["code"] in have_depts:
@@ -162,26 +161,7 @@ def ensure_company_seed(session: Session, tenant_id: str) -> None:
                 primary_email=placeholder_email(spec["code"]),
                 sla_hours=spec.get("sla_hours", 24),
                 spend_approval_limit=float(spec.get("spend_approval_limit", 0)),
-                notes="Sample data - replace the placeholder email from Company setup.",
+                notes="Set the real mailbox in Company setup or import a departments sheet.",
             )
         )
-
-    have_kb = {k.key for k in session.exec(select(KnowledgeEntry).where(KnowledgeEntry.tenant_id == tenant_id)).all()}
-    for spec in DEFAULT_KNOWLEDGE:
-        if spec["key"] not in have_kb:
-            session.add(KnowledgeEntry(tenant_id=tenant_id, **spec))
-
-    have_people = {p.email for p in session.exec(select(Person).where(Person.tenant_id == tenant_id)).all()}
-    for email, name, role, dept in SAMPLE_EMPLOYEES:
-        if email not in have_people:
-            session.add(Person(tenant_id=tenant_id, email=email, name=name, role=role, department=dept))
-
-    have_vendors = {v.name for v in session.exec(select(Vendor).where(Vendor.tenant_id == tenant_id)).all()}
-    for name, category, email in SAMPLE_VENDORS:
-        if name not in have_vendors:
-            session.add(Vendor(tenant_id=tenant_id, name=name, category=category, contact_email=email))
     session.flush()
-
-    from app.services.site_services import ensure_site_services
-
-    ensure_site_services(session, tenant_id)

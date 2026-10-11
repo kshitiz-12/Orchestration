@@ -6,12 +6,20 @@ The main admin mailbox stays in env (ADMIN_OPS_EMAIL); everything else lives her
 from typing import Optional
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel
 from sqlmodel import func, select
 
 from app.agent.company_seed import is_placeholder
-from app.agent.importer import TEMPLATES, read_rows, run_import, template_csv
+from app.agent.importer import (
+    TEMPLATES,
+    company_workbook_bytes,
+    prepare_company_import,
+    read_rows,
+    run_bundle_import,
+    run_import,
+    template_csv,
+)
 from app.api.deps import SessionDep, TenantDep, UserDep
 from app.models.company import CostCentre, Department, KnowledgeEntry, ServiceTicket, SiteService, VisitorPass
 from app.agent.places import PLACE_TYPES, chain_ids, path_label
@@ -502,15 +510,48 @@ def upsert_cost_centre(body: CostCentreIn, session: SessionDep, tenant_id: Tenan
     return {"ok": True, "code": row.code}
 
 
+@router.get("/templates/company")
+def download_company_template(_: UserDep):
+    """Multi-sheet Excel: locations, departments, employees, rooms, … in one file."""
+    return Response(
+        company_workbook_bytes(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="company_template.xlsx"'},
+    )
+
+
 @router.get("/templates/{kind}", response_class=PlainTextResponse)
 def download_template(kind: str, _: UserDep):
     if kind not in TEMPLATES:
-        raise HTTPException(status_code=404, detail=f"Unknown type. Use one of: {', '.join(TEMPLATES)}")
+        raise HTTPException(status_code=404, detail=f"Unknown type. Use one of: {', '.join(TEMPLATES)} or company")
     return PlainTextResponse(
         template_csv(kind),
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{kind}_template.csv"'},
     )
+
+
+@router.post("/import/company")
+async def import_company(
+    session: SessionDep,
+    tenant_id: TenantDep,
+    _: UserDep,
+    file: UploadFile = File(...),
+    commit: bool = Query(False, description="False = preview only, True = save"),
+):
+    """One file for the whole company: multi-sheet template, or a freeform dump AI maps into the same tables."""
+    content = await file.read()
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="File too large (max 5 MB)")
+    try:
+        bundles, source = prepare_company_import(file.filename or "", content)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Could not read the file: {exc}") from exc
+    if not bundles:
+        raise HTTPException(status_code=422, detail="The file has no importable company data")
+    return run_bundle_import(session, tenant_id, bundles, commit=commit, source=source)
 
 
 @router.post("/import/{kind}")

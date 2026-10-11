@@ -899,6 +899,7 @@ function KnowledgeTab({ onChange, setMsg }: TabProps) {
 
 function ImportTab({ onChange, setMsg }: TabProps) {
   const [kind, setKind] = useState(IMPORT_KINDS[0].id);
+  const [mode, setMode] = useState<"company" | "single">("company");
   const [file, setFile] = useState<File | null>(null);
   const [result, setResult] = useState<any>(null);
   const [busy, setBusy] = useState(false);
@@ -908,10 +909,15 @@ function ImportTab({ onChange, setMsg }: TabProps) {
     if (!file) return;
     setBusy(true);
     try {
-      const res = await apiUpload(`/setup/import/${kind}?commit=${commit}`, file);
+      const path =
+        mode === "company"
+          ? `/setup/import/company?commit=${commit}`
+          : `/setup/import/${kind}?commit=${commit}`;
+      const res = await apiUpload(path, file);
       setResult(res);
       if (commit) {
-        setMsg({ text: `Imported ${res.new} new and updated ${res.updated} ${selected.label.toLowerCase()}`, tone: "ok" });
+        const label = mode === "company" ? "company rows" : selected.label.toLowerCase();
+        setMsg({ text: `Imported ${res.new} new and updated ${res.updated} ${label}`, tone: "ok" });
         onChange();
       }
     } catch (e: any) {
@@ -922,70 +928,152 @@ function ImportTab({ onChange, setMsg }: TabProps) {
   }
 
   return (
-    <div className="panel">
-      <h2>Import company data</h2>
-      <p className="muted">
-        Upload a CSV or Excel file. You&apos;ll see a preview first; nothing is saved until you confirm. Existing rows
-        are matched by email, code, name or key and updated.
-      </p>
-      <div className="toolbar">
-        <select className="select" value={kind} onChange={(e) => { setKind(e.target.value); setResult(null); }}>
-          {IMPORT_KINDS.map((k) => <option key={k.id} value={k.id}>{k.label}</option>)}
-        </select>
-        <button
-          className="btn secondary"
-          onClick={() => apiDownload(`/setup/templates/${kind}`, `${kind}_template.csv`).catch((e) => setMsg({ text: e.message, tone: "danger" }))}
-        >
-          Download template
-        </button>
-        <input
-          type="file"
-          accept=".csv,.xlsx,.xlsm"
-          onChange={(e) => { setFile(e.target.files?.[0] || null); setResult(null); }}
-        />
-      </div>
-      <div className="muted mono" style={{ marginBottom: "0.9rem" }}>Columns: {selected.hint}</div>
-      <div className="row">
-        <button className="btn secondary" disabled={!file || busy} onClick={() => run(false)}>Preview</button>
-        <button
-          className="btn accent"
-          disabled={!file || busy || !result || result.committed || result.new + result.updated === 0}
-          onClick={() => run(true)}
-        >
-          Confirm import
-        </button>
-      </div>
-
-      {result && (
-        <div style={{ marginTop: "1rem" }}>
-          <div className="row" style={{ marginBottom: "0.6rem" }}>
-            <span className="badge accent">{result.total} rows</span>
-            <span className="badge ok">{result.new} new</span>
-            <span className="badge">{result.updated} updates</span>
-            {result.errors.length > 0 && <span className="badge danger">{result.errors.length} with problems</span>}
-            {result.committed && <span className="badge ok">Saved</span>}
-          </div>
-          {result.errors.length > 0 && (
-            <div className="pre" style={{ marginBottom: "0.6rem" }}>
-              {result.errors.map((e: any) => `Row ${e.row}: ${e.error}`).join("\n")}
-            </div>
+    <div className="stack">
+      <div className="panel">
+        <h2>Upload whole company (one file)</h2>
+        <p className="muted">
+          Prefer the multi-sheet Excel template (branches, teams, employees, rooms in one workbook). A freeform dump
+          is mapped by AI into the same tables, then validated — nothing saves until you confirm.
+        </p>
+        <div className="toolbar">
+          <button
+            className={`btn ${mode === "company" ? "accent" : "secondary"}`}
+            onClick={() => { setMode("company"); setResult(null); }}
+          >
+            One file
+          </button>
+          <button
+            className={`btn ${mode === "single" ? "accent" : "secondary"}`}
+            onClick={() => { setMode("single"); setResult(null); }}
+          >
+            Single sheet
+          </button>
+          {mode === "company" && (
+            <button
+              className="btn secondary"
+              onClick={() =>
+                apiDownload("/setup/templates/company", "company_template.xlsx").catch((e) =>
+                  setMsg({ text: e.message, tone: "danger" })
+                )
+              }
+            >
+              Download company template
+            </button>
           )}
-          <table>
-            <thead>
-              <tr><th>Row</th><th>Action</th><th>Item</th></tr>
-            </thead>
-            <tbody>
-              {result.preview.map((p: any) => (
-                <tr key={p.row}>
-                  <td>{p.row}</td>
-                  <td><span className={`badge ${p.action === "new" ? "ok" : ""}`}>{p.action}</span></td>
-                  <td>{p.item}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
         </div>
-      )}
+        {mode === "company" ? (
+          <>
+            <div className="muted mono" style={{ marginBottom: "0.9rem" }}>
+              Sheets: locations, departments, employees, resources, vendors, knowledge, site_services, cost_centres
+            </div>
+            <input
+              type="file"
+              accept=".csv,.xlsx,.xlsm,.json,.txt"
+              onChange={(e) => {
+                setFile(e.target.files?.[0] || null);
+                setResult(null);
+              }}
+            />
+          </>
+        ) : (
+          <>
+            <div className="toolbar" style={{ marginTop: "0.75rem" }}>
+              <select
+                className="select"
+                value={kind}
+                onChange={(e) => {
+                  setKind(e.target.value);
+                  setResult(null);
+                }}
+              >
+                {IMPORT_KINDS.map((k) => (
+                  <option key={k.id} value={k.id}>
+                    {k.label}
+                  </option>
+                ))}
+              </select>
+              <button
+                className="btn secondary"
+                onClick={() =>
+                  apiDownload(`/setup/templates/${kind}`, `${kind}_template.csv`).catch((e) =>
+                    setMsg({ text: e.message, tone: "danger" })
+                  )
+                }
+              >
+                Download template
+              </button>
+              <input
+                type="file"
+                accept=".csv,.xlsx,.xlsm"
+                onChange={(e) => {
+                  setFile(e.target.files?.[0] || null);
+                  setResult(null);
+                }}
+              />
+            </div>
+            <div className="muted mono" style={{ marginBottom: "0.9rem" }}>
+              Columns: {selected.hint}
+            </div>
+          </>
+        )}
+        <div className="row" style={{ marginTop: "0.75rem" }}>
+          <button className="btn secondary" disabled={!file || busy} onClick={() => run(false)}>
+            Preview
+          </button>
+          <button
+            className="btn accent"
+            disabled={!file || busy || !result || result.committed || result.new + result.updated === 0}
+            onClick={() => run(true)}
+          >
+            Confirm import
+          </button>
+        </div>
+
+        {result && (
+          <div style={{ marginTop: "1rem" }}>
+            <div className="row" style={{ marginBottom: "0.6rem" }}>
+              <span className="badge accent">{result.total} rows</span>
+              <span className="badge ok">{result.new} new</span>
+              <span className="badge">{result.updated} updates</span>
+              {result.source && <span className="badge">{result.source}</span>}
+              {result.kinds && <span className="badge">{result.kinds.join(", ")}</span>}
+              {result.errors?.length > 0 && (
+                <span className="badge danger">{result.errors.length} with problems</span>
+              )}
+              {result.committed && <span className="badge ok">Saved</span>}
+            </div>
+            {result.errors?.length > 0 && (
+              <div className="pre" style={{ marginBottom: "0.6rem" }}>
+                {result.errors
+                  .map((e: any) => `${e.kind ? e.kind + " " : ""}Row ${e.row}: ${e.error}`)
+                  .join("\n")}
+              </div>
+            )}
+            <table>
+              <thead>
+                <tr>
+                  {mode === "company" && <th>Kind</th>}
+                  <th>Row</th>
+                  <th>Action</th>
+                  <th>Item</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(result.preview || []).map((p: any, i: number) => (
+                  <tr key={`${p.kind || ""}-${p.row}-${i}`}>
+                    {mode === "company" && <td className="mono">{p.kind || ""}</td>}
+                    <td>{p.row}</td>
+                    <td>
+                      <span className={`badge ${p.action === "new" ? "ok" : ""}`}>{p.action}</span>
+                    </td>
+                    <td>{p.item}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

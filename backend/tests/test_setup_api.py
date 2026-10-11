@@ -1,4 +1,5 @@
 import io
+import json
 
 from openpyxl import Workbook
 from sqlmodel import select
@@ -16,7 +17,7 @@ def test_status_shows_env_admin_and_placeholder_departments(client, auth_headers
     assert body["admin_email_source"].startswith("env")
     assert body["departments"] >= 10
     assert "FACILITIES" in body["departments_needing_setup"]
-    assert body["knowledge_entries"] > 0
+    assert body["knowledge_entries"] >= 0
 
 
 def test_setup_requires_login(client):
@@ -126,3 +127,85 @@ def test_department_xlsx_import_updates_existing(client, auth_headers):
 def test_empty_upload_rejected(client, auth_headers):
     files = {"file": ("empty.csv", b"email,name\n", "text/csv")}
     assert client.post(f"{BASE}/import/employees", files=files, headers=auth_headers).status_code == 422
+
+
+def test_company_workbook_preview_and_commit(client, auth_headers):
+    wb = Workbook()
+    loc = wb.active
+    loc.title = "locations"
+    loc.append(["code", "name", "type", "parent_code", "aliases"])
+    loc.append(["WEST", "West", "REGION", "", ""])
+    loc.append(["PUN", "Pune", "CITY", "WEST", ""])
+    loc.append(["PUN-HJ", "Pune Hinjewadi", "BRANCH", "PUN", "Hinjewadi"])
+    dept = wb.create_sheet("departments")
+    dept.append(["code", "name", "categories", "primary_email", "backup_emails", "approver_email", "sla_hours",
+                 "spend_approval_limit", "location"])
+    dept.append(["ADMIN_PUN", "Admin - Pune", "supplies; seating", "skcbsa1221@gmail.com", "",
+                 "skcbsa1221@gmail.com", "8", "0", "PUN"])
+    emp = wb.create_sheet("employees")
+    emp.append(["email", "name", "department", "role", "manager_email", "location"])
+    emp.append(["riya.shah@acmecorp.com", "Riya Shah", "Engineering", "EMPLOYEE", "", "PUN-HJ"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    files = {"file": ("company.xlsx", buf.getvalue(),
+                      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
+
+    preview = client.post(f"{BASE}/import/company", files=files, headers=auth_headers).json()
+    assert preview["committed"] is False
+    assert preview["source"] == "workbook"
+    assert set(preview["kinds"]) == {"locations", "departments", "employees"}
+    assert preview["new"] >= 4
+    before = client.get(f"{BASE}/status", headers=auth_headers).json()["employees"]
+
+    files = {"file": ("company.xlsx", buf.getvalue(),
+                      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
+    done = client.post(f"{BASE}/import/company?commit=true", files=files, headers=auth_headers).json()
+    assert done["committed"] is True
+    assert client.get(f"{BASE}/status", headers=auth_headers).json()["employees"] == before + 1
+    admin_pun = next(
+        d for d in client.get(f"{BASE}/departments", headers=auth_headers).json() if d["code"] == "ADMIN_PUN"
+    )
+    assert admin_pun["primary_email"] == "skcbsa1221@gmail.com"
+
+
+def test_company_ai_json_dump_import(client, auth_headers):
+    payload = {
+        "locations": [
+            {"code": "BLR", "name": "Bengaluru", "type": "CITY", "parent_code": "", "aliases": "Bangalore"},
+            {"code": "BLR-HQ", "name": "Bengaluru HQ", "type": "BRANCH", "parent_code": "BLR", "aliases": "HQ"},
+        ],
+        "departments": [
+            {
+                "code": "ADMIN_BLR",
+                "name": "Admin - Bengaluru",
+                "categories": "meeting_room; supplies",
+                "primary_email": "flexxftw12@gmail.com",
+                "backup_emails": "",
+                "approver_email": "flexxftw12@gmail.com",
+                "sla_hours": "8",
+                "spend_approval_limit": "0",
+                "location": "BLR",
+            }
+        ],
+        "employees": [
+            {
+                "email": "kshitiz.vishwakarma2003@gmail.com",
+                "name": "Kshitiz Vishwakarma",
+                "department": "People",
+                "role": "EMPLOYEE",
+                "manager_email": "",
+                "location": "BLR-HQ",
+            }
+        ],
+    }
+    files = {"file": ("org.json", json.dumps(payload).encode(), "application/json")}
+    done = client.post(f"{BASE}/import/company?commit=true", files=files, headers=auth_headers).json()
+    assert done["committed"] is True
+    assert done["source"] == "ai"
+    assert "ADMIN_BLR" in {d["code"] for d in client.get(f"{BASE}/departments", headers=auth_headers).json()}
+
+
+def test_company_template_download(client, auth_headers):
+    resp = client.get(f"{BASE}/templates/company", headers=auth_headers)
+    assert resp.status_code == 200
+    assert "spreadsheetml" in resp.headers.get("content-type", "")

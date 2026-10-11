@@ -1,11 +1,17 @@
-"""Bulk company data import (CSV or Excel) with a preview before anything is saved."""
+"""Bulk company data import (CSV or Excel) with a preview before anything is saved.
+
+One-file modes:
+- Excel workbook with sheets named after each kind (locations, employees, …)
+- Freeform CSV/Excel/text: AI maps it into the same kinds, then the same validators run
+"""
 
 from __future__ import annotations
 
 import csv
 import io
+import json
 import re
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from sqlmodel import Session, select
 
@@ -25,6 +31,18 @@ TEMPLATES: dict[str, list[str]] = {
                       "premium_triggers", "premium_rate", "provider"],
     "cost_centres": ["code", "name", "department", "approver_name", "approver_email"],
 }
+
+# Parents / places before teams / people that reference them.
+IMPORT_ORDER = [
+    "locations",
+    "departments",
+    "employees",
+    "resources",
+    "vendors",
+    "knowledge",
+    "site_services",
+    "cost_centres",
+]
 
 EXAMPLES: dict[str, list[str]] = {
     "site_services": ["Corporate Office", "high_tea", "High tea / snacks (special menu)", "CHARGEABLE", "CAFETERIA",
@@ -50,24 +68,105 @@ def template_csv(kind: str) -> str:
     return buf.getvalue()
 
 
+def company_workbook_bytes() -> bytes:
+    """Multi-sheet Excel template: one sheet per import kind with header + example row."""
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    first = True
+    for kind in IMPORT_ORDER:
+        ws = wb.active if first else wb.create_sheet(kind)
+        if first:
+            ws.title = kind
+            first = False
+        ws.append(TEMPLATES[kind])
+        ws.append(EXAMPLES[kind])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _sheet_rows(rows: list[tuple]) -> list[dict[str, str]]:
+    if not rows:
+        return []
+    header = [_key(h) for h in rows[0]]
+    return [
+        {header[i]: ("" if v is None else str(v).strip()) for i, v in enumerate(r) if i < len(header) and header[i]}
+        for r in rows[1:]
+        if any(v not in (None, "") for v in r)
+    ]
+
+
 def read_rows(filename: str, content: bytes) -> list[dict[str, str]]:
     name = (filename or "").lower()
     if name.endswith((".xlsx", ".xlsm")):
         from openpyxl import load_workbook
 
         wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
-        rows = list(wb.active.iter_rows(values_only=True))
-        if not rows:
-            return []
-        header = [_key(h) for h in rows[0]]
-        return [
-            {header[i]: ("" if v is None else str(v).strip()) for i, v in enumerate(r) if i < len(header) and header[i]}
-            for r in rows[1:]
-            if any(v not in (None, "") for v in r)
-        ]
+        return _sheet_rows(list(wb.active.iter_rows(values_only=True)))
     text = content.decode("utf-8-sig", errors="replace")
     reader = csv.DictReader(io.StringIO(text))
     return [{_key(k): (v or "").strip() for k, v in row.items() if k} for row in reader if any((v or "").strip() for v in row.values())]
+
+
+def read_workbook_bundles(filename: str, content: bytes) -> dict[str, list[dict[str, str]]]:
+    """Map sheet names (or a single CSV with a `kind` column) to template kinds."""
+    name = (filename or "").lower()
+    if name.endswith((".xlsx", ".xlsm")):
+        from openpyxl import load_workbook
+
+        wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+        out: dict[str, list[dict[str, str]]] = {}
+        for sheet in wb.worksheets:
+            kind = _match_kind(sheet.title)
+            if not kind:
+                continue
+            rows = _sheet_rows(list(sheet.iter_rows(values_only=True)))
+            if rows:
+                out[kind] = rows
+        return out
+
+    rows = read_rows(filename, content)
+    if not rows:
+        return {}
+    if any("kind" in r for r in rows):
+        out = {}
+        for row in rows:
+            kind = _match_kind(row.get("kind") or "")
+            if not kind:
+                continue
+            clean = {k: v for k, v in row.items() if k != "kind"}
+            out.setdefault(kind, []).append(clean)
+        return out
+    # Single-kind file: guess from headers
+    headers = set(rows[0].keys())
+    for kind, cols in TEMPLATES.items():
+        needed = set(cols[:2])  # code+name or email+name etc.
+        if needed <= headers:
+            return {kind: rows}
+    return {}
+
+
+def _match_kind(label: str) -> Optional[str]:
+    raw = _key(label)
+    if raw in TEMPLATES:
+        return raw
+    aliases = {
+        "places": "locations",
+        "branches": "locations",
+        "offices": "locations",
+        "people": "employees",
+        "staff": "employees",
+        "teams": "departments",
+        "depts": "departments",
+        "rooms": "resources",
+        "faqs": "knowledge",
+        "policies": "knowledge",
+        "services": "site_services",
+        "cost_centers": "cost_centres",
+        "costcentres": "cost_centres",
+    }
+    return aliases.get(raw)
 
 
 def _key(value: Any) -> str:
@@ -130,31 +229,179 @@ def _parents_first(rows: list[dict[str, str]]) -> list[tuple[int, dict[str, str]
     return sorted(numbered, key=lambda item: depth(item[1]))
 
 
-def run_import(session: Session, tenant_id: str, kind: str, rows: list[dict[str, str]], *, commit: bool) -> dict:
-    if kind not in TEMPLATES:
-        raise ValueError(f"Unknown import type: {kind}")
+def _import_kind_rows(
+    session: Session, tenant_id: str, kind: str, rows: list[dict[str, str]], *, apply: bool
+) -> dict:
     handler: Callable = globals()[f"_import_{kind}"]
     created, updated, errors = 0, 0, []
     preview = []
     ordered = _parents_first(rows) if kind == "locations" else list(enumerate(rows, start=2))
-    # Locations must exist during a preview too, so later rows can find their parent.
-    apply = commit or kind == "locations"
     for i, row in ordered:
         try:
             action, label = handler(session, tenant_id, row, apply=apply)
         except ValueError as exc:
-            errors.append({"row": i, "error": str(exc)})
+            errors.append({"row": i, "kind": kind, "error": str(exc)})
             continue
         created += action == "new"
         updated += action == "update"
         if len(preview) < 50:
-            preview.append({"row": i, "action": action, "item": label})
+            preview.append({"row": i, "kind": kind, "action": action, "item": label})
+    preview.sort(key=lambda p: p["row"])
+    return {
+        "kind": kind,
+        "new": created,
+        "updated": updated,
+        "errors": errors,
+        "preview": preview,
+        "total": len(rows),
+    }
+
+
+def run_import(session: Session, tenant_id: str, kind: str, rows: list[dict[str, str]], *, commit: bool) -> dict:
+    if kind not in TEMPLATES:
+        raise ValueError(f"Unknown import type: {kind}")
+    # Locations must exist during a preview too, so later rows can find their parent.
+    apply = commit or kind == "locations"
+    result = _import_kind_rows(session, tenant_id, kind, rows, apply=apply)
     if commit:
         session.commit()
     else:
         session.rollback()
-    preview.sort(key=lambda p: p["row"])
-    return {"kind": kind, "committed": commit, "new": created, "updated": updated, "errors": errors, "preview": preview, "total": len(rows)}
+    return {**result, "committed": commit}
+
+
+def run_bundle_import(
+    session: Session, tenant_id: str, bundles: dict[str, list[dict[str, str]]], *, commit: bool, source: str = "structured"
+) -> dict:
+    """Import several kinds in dependency order. Always applies mid-flight so later sheets can resolve places; rolls back if not committing."""
+    parts: list[dict] = []
+    for kind in IMPORT_ORDER:
+        rows = bundles.get(kind) or []
+        if not rows:
+            continue
+        parts.append(_import_kind_rows(session, tenant_id, kind, rows, apply=True))
+    if commit:
+        session.commit()
+    else:
+        session.rollback()
+    errors = [e for p in parts for e in p["errors"]]
+    preview = [row for p in parts for row in p["preview"]][:80]
+    return {
+        "mode": "company",
+        "source": source,
+        "committed": commit,
+        "parts": parts,
+        "kinds": [p["kind"] for p in parts],
+        "new": sum(p["new"] for p in parts),
+        "updated": sum(p["updated"] for p in parts),
+        "errors": errors,
+        "preview": preview,
+        "total": sum(p["total"] for p in parts),
+    }
+
+
+def _file_text_for_ai(filename: str, content: bytes) -> str:
+    name = (filename or "").lower()
+    if name.endswith((".xlsx", ".xlsm")):
+        from openpyxl import load_workbook
+
+        wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+        chunks: list[str] = []
+        for sheet in wb.worksheets:
+            rows = list(sheet.iter_rows(values_only=True))
+            if not rows:
+                continue
+            buf = io.StringIO()
+            writer = csv.writer(buf)
+            for r in rows:
+                writer.writerow(["" if v is None else v for v in r])
+            chunks.append(f"### sheet: {sheet.title}\n{buf.getvalue().strip()}")
+        return "\n\n".join(chunks)
+    return content.decode("utf-8-sig", errors="replace")
+
+
+def _normalize_bundles(raw: dict) -> dict[str, list[dict[str, str]]]:
+    out: dict[str, list[dict[str, str]]] = {}
+    for key, rows in (raw or {}).items():
+        kind = _match_kind(str(key))
+        if not kind or not isinstance(rows, list):
+            continue
+        cols = TEMPLATES[kind]
+        cleaned: list[dict[str, str]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            item = {c: str(row.get(c, "") if row.get(c) is not None else "").strip() for c in cols}
+            # Also accept close aliases from the model
+            for src, dst in list(row.items()):
+                k = _key(src)
+                if k in cols and not item.get(k):
+                    item[k] = "" if dst is None else str(dst).strip()
+            if any(item.values()):
+                cleaned.append(item)
+        if cleaned:
+            out[kind] = cleaned
+    return out
+
+
+def structure_freeform_with_ai(filename: str, content: bytes) -> dict[str, list[dict[str, str]]]:
+    """Ask the AI to map a messy org dump into our template kinds. Validators still own the write."""
+    from app.ai.gemini import GeminiProvider, HeuristicProvider
+    from app.core.config import get_settings
+
+    text = _file_text_for_ai(filename, content).strip()
+    if not text:
+        raise ValueError("The file has no readable text")
+
+    # Already-structured JSON dump
+    if text.lstrip().startswith("{"):
+        try:
+            parsed = json.loads(text)
+            bundles = _normalize_bundles(parsed if isinstance(parsed, dict) else {})
+            if bundles:
+                return bundles
+        except json.JSONDecodeError:
+            pass
+
+    schema_hint = {kind: TEMPLATES[kind] for kind in IMPORT_ORDER}
+    system = (
+        "You convert company org / admin desk data into a JSON object for database import. "
+        "Return ONLY JSON with optional keys: "
+        + ", ".join(IMPORT_ORDER)
+        + ". Each key maps to an array of objects. Use exactly these fields per key: "
+        + json.dumps(schema_hint)
+        + ". Use place codes in location / parent_code / department location fields. "
+        "Infer BRANCH/CITY/REGION types when obvious. Leave unknown fields as empty strings. "
+        "Do not invent employee emails. Categories are semicolon-separated lowercase tokens."
+    )
+    payload = {"filename": filename or "upload", "raw_text": text[:120_000]}
+
+    settings = get_settings()
+    if settings.gemini_api_key or settings.gemini_api_key_secondary:
+        data, _meta = GeminiProvider().generate_json(system_instruction=system, payload=payload, temperature=0.1)
+    else:
+        data, _meta = HeuristicProvider().generate_json(system_instruction=system, payload=payload, temperature=0.1)
+
+    bundles = _normalize_bundles(data)
+    if not bundles:
+        raise ValueError(
+            "Could not map this file into company data. Use the multi-sheet company template, "
+            "or a clearer dump of branches, teams and employees."
+        )
+    return bundles
+
+
+def prepare_company_import(filename: str, content: bytes) -> tuple[dict[str, list[dict[str, str]]], str]:
+    """Structured workbook/CSV first; AI only when sheets/headers are not already in template shape."""
+    name = (filename or "").lower()
+    head = content.lstrip()[:1]
+    if name.endswith(".json") or head == b"{":
+        return structure_freeform_with_ai(filename, content), "ai"
+    bundles = read_workbook_bundles(filename, content)
+    if bundles:
+        source = "workbook" if name.endswith((".xlsx", ".xlsm")) else "structured"
+        return bundles, source
+    return structure_freeform_with_ai(filename, content), "ai"
 
 
 def _import_locations(session: Session, tid: str, row: dict, *, apply: bool) -> tuple[str, str]:

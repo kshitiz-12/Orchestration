@@ -130,15 +130,14 @@ def init_db() -> None:
 
 
 def ensure_seeded() -> None:
-    """Idempotent seed so Render/Postgres boots with demo data."""
+    """Boot with an empty company shell (login + dept stubs). Company data is uploaded from Setup."""
     settings = get_settings()
     if not settings.auto_seed:
         return
     from sqlmodel import select
 
-    from app.engine.meeting_scenario import ensure_meeting_room_resources, ensure_meeting_room_template
+    from app.engine.meeting_scenario import ensure_meeting_room_template
     from app.models.org import Tenant
-    from scripts.seed import seed
 
     with Session(get_engine()) as session:
         existing = session.exec(select(Tenant)).first()
@@ -146,13 +145,14 @@ def ensure_seeded() -> None:
             from app.agent.company_seed import ensure_company_seed
 
             ensure_meeting_room_template(session, existing.tenant_id)
-            ensure_meeting_room_resources(session, existing.tenant_id)
             ensure_company_seed(session, existing.tenant_id)
             session.commit()
             logger.info("seed_skipped_tenant_exists", tenant_id=existing.tenant_id)
             return
-        tid = seed(session)
-        logger.info("seed_completed", tenant_id=tid)
+        from scripts.bootstrap_empty_company import bootstrap_empty
+
+        tid = bootstrap_empty(session)
+        logger.info("empty_company_bootstrapped", tenant_id=tid)
 
 
 def get_session() -> Generator[Session, None, None]:

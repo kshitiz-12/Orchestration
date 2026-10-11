@@ -414,6 +414,24 @@ class HeuristicProvider(LLMProvider):
     def healthcheck(self) -> bool:
         return True
 
+    def generate_json(
+        self,
+        *,
+        system_instruction: str,
+        payload: dict,
+        temperature: float = 0.2,
+    ) -> tuple[dict, dict]:
+        """Parse a JSON org dump from payload.raw_text when Gemini is off (tests / offline)."""
+        text = str((payload or {}).get("raw_text") or "").strip()
+        if text.startswith("{"):
+            try:
+                data = json.loads(text)
+                if isinstance(data, dict):
+                    return data, {"label": "heuristic", "model": "heuristic"}
+            except json.JSONDecodeError:
+                pass
+        return {}, {"label": "heuristic", "model": "heuristic"}
+
     def extract(
         self,
         *,
