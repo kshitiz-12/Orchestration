@@ -1391,11 +1391,19 @@ class AdminDesk:
         facts = outcome.facts or {}
         if (facts.get("agent_category") or "") != "travel":
             return
-        if flight_options_are_usable(facts.get("flight_options")):
+        refresh = bool(
+            re.search(
+                r"\b(?:show|refresh|update|new|again|correct|latest)\b.{0,40}\b(?:flight|fare|option)s?\b|"
+                r"\b(?:flight|fare|option)s?\b.{0,40}\b(?:again|wrong|refresh|update)\b",
+                text or "",
+                re.I,
+            )
+        )
+        if flight_options_are_usable(facts.get("flight_options")) and not refresh:
             return
         details = facts.get("details") or {}
         blob = f"{facts.get('raw_request') or ''}\n{text}\n{details}\n{outcome.title}"
-        if not wants_flight(blob):
+        if not wants_flight(blob) and not refresh:
             return
         origin = (
             details.get("from")

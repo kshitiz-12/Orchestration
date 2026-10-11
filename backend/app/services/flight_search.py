@@ -95,6 +95,7 @@ class FlightOption:
     destination: str = ""
     cabin: str = "Economy"
     source: str = ""
+    fare_note: str = ""  # e.g. bags / basic fare disclaimer
     summary: str = ""  # one-line for logs / legacy
 
     def __post_init__(self) -> None:
@@ -249,11 +250,109 @@ def _airline_name(code: str, fallback: str = "") -> str:
 
 # --- SerpAPI Google Flights -------------------------------------------------
 
+_IN_AIRPORTS = set(_CITY_IATA.values())  # domestic India codes we know
+
+
+def _collect_prices(node: Any, out: list[float]) -> None:
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k in {"price", "total_price", "fare"} and v is not None:
+                try:
+                    out.append(float(v))
+                except (TypeError, ValueError):
+                    pass
+            else:
+                _collect_prices(v, out)
+    elif isinstance(node, list):
+        for item in node:
+            _collect_prices(item, out)
+
+
+def _median(vals: list[float]) -> float:
+    s = sorted(vals)
+    mid = len(s) // 2
+    if len(s) % 2:
+        return s[mid]
+    return (s[mid - 1] + s[mid]) / 2
+
+
+def _serpapi_booking_prices(client: httpx.Client, key: str, booking_token: str) -> list[float]:
+    """Bookable agent/airline totals for one itinerary (not the teaser card price)."""
+    if not booking_token:
+        return []
+    try:
+        resp = client.get(
+            "https://serpapi.com/search.json",
+            params={
+                "engine": "google_flights",
+                "booking_token": booking_token,
+                "api_key": key,
+                "currency": "INR",
+                "gl": "in",
+                "hl": "en",
+            },
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("flight_serpapi_booking_failed", error=str(exc)[:160])
+        return []
+    prices: list[float] = []
+    _collect_prices(data.get("booking_options") or data, prices)
+    # Ignore junk / placeholder zeros
+    return sorted({p for p in prices if p and p >= 500})
+
+
+def _pick_realistic_fare(
+    *,
+    list_price: Optional[float],
+    booking_prices: list[float],
+    typical_low: Optional[float],
+    typical_high: Optional[float],
+    domestic_in: bool,
+) -> tuple[Optional[float], str]:
+    """Prefer real bookable totals; drop teaser list fares far below market."""
+    floor = None
+    if typical_low:
+        floor = float(typical_low) * 0.9
+    elif domestic_in:
+        # Near-term India domestic one-way teaser cards often show ~5–6k while
+        # bookable IndiGo/Air India is 12k+. Don't surface those teasers as the fare.
+        floor = 10000.0
+
+    if booking_prices:
+        usable = [p for p in booking_prices if floor is None or p >= floor]
+        if not usable:
+            usable = booking_prices
+        # Upper-half median ≈ what airline/OTA checkouts show (not the cheapest bait).
+        usable = sorted(usable)
+        upper = usable[len(usable) // 2 :]
+        fare = _median(upper)
+        note = "bookable total (Google Flights India checkout)"
+        if list_price is not None and float(list_price) + 1 < fare * 0.85:
+            note += f"; card listed {_money(list_price, 'INR')} (basic/teaser — ignored)"
+        return fare, note
+
+    if list_price is None:
+        return None, ""
+    lp = float(list_price)
+    if floor is not None and lp < floor:
+        # No bookable confirmation and card is below market — skip this row
+        return None, "below_market_teaser"
+    note = "listed on Google Flights (IN)"
+    if typical_high and lp < float(typical_high):
+        note += f"; typical up to {_money(typical_high, 'INR')}"
+    return lp, note
+
+
 def _serpapi_flights(origin: str, dest: str, day: str, *, max_options: int) -> list[FlightOption]:
     settings = get_settings()
     key = (settings.serpapi_api_key or "").strip()
     if not key:
         return []
+    domestic = origin in _IN_AIRPORTS and dest in _IN_AIRPORTS
+    # Match google.co.in/travel/flights (deep_search + gl=in). no_cache avoids stale cheap cards.
     params = {
         "engine": "google_flights",
         "departure_id": origin,
@@ -261,79 +360,151 @@ def _serpapi_flights(origin: str, dest: str, day: str, *, max_options: int) -> l
         "outbound_date": day,
         "currency": "INR",
         "hl": "en",
+        "gl": "in",
         "api_key": key,
         "type": "2",  # one-way
+        "travel_class": "1",
+        "adults": "1",
+        "deep_search": "true",
+        "show_hidden": "true",
+        "sort_by": "1",
+        "no_cache": "true",
     }
     try:
-        with httpx.Client(timeout=25.0) as client:
+        with httpx.Client(timeout=60.0) as client:
             resp = client.get("https://serpapi.com/search.json", params=params)
             resp.raise_for_status()
             data = resp.json()
+            if data.get("error"):
+                logger.warning("flight_serpapi_error", error=str(data.get("error"))[:200])
+                return []
+
+            insights = data.get("price_insights") or {}
+            typ = insights.get("typical_price_range") or []
+            typical_low = float(typ[0]) if len(typ) >= 1 and typ[0] is not None else None
+            typical_high = float(typ[1]) if len(typ) >= 2 and typ[1] is not None else None
+            if typical_low is None and insights.get("lowest_price") is not None:
+                # lowest alone is often the teaser; bump floor if insights look inflated elsewhere
+                try:
+                    typical_low = float(insights["lowest_price"])
+                except (TypeError, ValueError):
+                    typical_low = None
+
+            buckets: list[dict] = []
+            for key_name in ("best_flights", "other_flights"):
+                buckets.extend(data.get(key_name) or [])
+            # Non-stop first for short domestic hops (BLR–IXR etc.)
+            buckets.sort(key=lambda r: (len(r.get("flights") or []) > 1, r.get("price") or 0))
+
+            options: list[FlightOption] = []
+            for row in buckets:
+                legs = row.get("flights") or []
+                if not legs:
+                    continue
+                first, last = legs[0], legs[-1]
+                airlines = []
+                numbers = []
+                for leg in legs:
+                    airlines.append(leg.get("airline") or _airline_name(leg.get("airline_code") or ""))
+                    fn = (leg.get("flight_number") or "").strip()
+                    if fn:
+                        numbers.append(
+                            fn if re.search(r"[A-Z]", fn) else f"{leg.get('airline_code', '')}{fn}".strip()
+                        )
+                layovers = row.get("layovers") or []
+                if len(legs) <= 1 and not layovers:
+                    stops = "Non-stop"
+                else:
+                    bits = []
+                    for lay in layovers:
+                        name = lay.get("name") or lay.get("id") or "stop"
+                        dur = lay.get("duration")
+                        bits.append(f"{name}, {_fmt_minutes(dur)}" if dur is not None else str(name))
+                    stops = f"{len(legs) - 1} stop" + ("s" if len(legs) > 2 else "")
+                    if bits:
+                        stops += f" ({'; '.join(bits)})"
+                dep = first.get("departure_airport") or {}
+                arr = last.get("arrival_airport") or {}
+
+                def _when(airport: dict) -> str:
+                    raw = (airport.get("time") or "").strip()
+                    if re.match(r"20\d{2}-\d{2}-\d{2}", raw):
+                        return _fmt_iso_local(raw.replace(" ", "T", 1) if "T" not in raw else raw)
+                    if raw:
+                        return f"{datetime.strptime(day, '%Y-%m-%d').strftime('%d %b')} {raw}"
+                    return "—"
+
+                list_price = row.get("price")
+                try:
+                    list_f = float(list_price) if list_price is not None else None
+                except (TypeError, ValueError):
+                    list_f = None
+
+                booking_prices = _serpapi_booking_prices(client, key, row.get("booking_token") or "")
+                fare, fare_note = _pick_realistic_fare(
+                    list_price=list_f,
+                    booking_prices=booking_prices,
+                    typical_low=typical_low,
+                    typical_high=typical_high,
+                    domestic_in=domestic,
+                )
+                if fare is None:
+                    logger.info(
+                        "flight_skip_teaser",
+                        list_price=list_f,
+                        booking=booking_prices[:5],
+                        typical_low=typical_low,
+                    )
+                    continue
+
+                total_mins = row.get("total_duration")
+                airline = " / ".join(dict.fromkeys(a for a in airlines if a)) or "Airline"
+                cabin = (first.get("travel_class") or "Economy").title()
+                fare_note = f"{fare_note}; searched {day} {origin}→{dest} one-way"
+                exts = [str(x) for x in (row.get("extensions") or []) if x]
+                if exts:
+                    fare_note += "; " + "; ".join(exts[:2])
+
+                options.append(
+                    FlightOption(
+                        airline=airline,
+                        flight_numbers=" + ".join(numbers) or "—",
+                        depart_at=_when(dep),
+                        arrive_at=_when(arr),
+                        duration=_fmt_minutes(total_mins) if total_mins is not None else "—",
+                        stops=stops,
+                        price=_money(fare, "INR"),
+                        origin=origin,
+                        destination=dest,
+                        cabin=cabin,
+                        source="serpapi",
+                        fare_note=fare_note,
+                    )
+                )
+                if len(options) >= max_options:
+                    break
+
+            if options and (typical_low or typical_high):
+                tip = "Market check: "
+                if typical_low and typical_high:
+                    tip += f"typical {_money(typical_low, 'INR')} – {_money(typical_high, 'INR')}"
+                elif typical_low:
+                    tip += f"from about {_money(typical_low, 'INR')}"
+                options[0].fare_note = (options[0].fare_note + " | " if options[0].fare_note else "") + tip
+
+            logger.info(
+                "flight_serpapi_ok",
+                origin=origin,
+                dest=dest,
+                day=day,
+                options=len(options),
+                typical_low=typical_low,
+                typical_high=typical_high,
+            )
+            return options
     except Exception as exc:  # noqa: BLE001
         logger.warning("flight_serpapi_failed", error=str(exc)[:200])
         return []
-
-    buckets = []
-    for key_name in ("best_flights", "other_flights"):
-        buckets.extend(data.get(key_name) or [])
-    options: list[FlightOption] = []
-    for row in buckets:
-        legs = row.get("flights") or []
-        if not legs:
-            continue
-        first, last = legs[0], legs[-1]
-        airlines = []
-        numbers = []
-        for leg in legs:
-            airlines.append(leg.get("airline") or _airline_name(leg.get("airline_code") or ""))
-            fn = leg.get("flight_number") or ""
-            if fn:
-                numbers.append(fn if re.search(r"[A-Z]", fn) else f"{leg.get('airline_code', '')}{fn}".strip())
-        layovers = row.get("layovers") or []
-        if len(legs) <= 1 and not layovers:
-            stops = "Non-stop"
-        else:
-            bits = []
-            for lay in layovers:
-                name = lay.get("name") or lay.get("id") or "stop"
-                dur = lay.get("duration")
-                if dur is not None:
-                    bits.append(f"{name}, {_fmt_minutes(dur)}")
-                else:
-                    bits.append(str(name))
-            stops = f"{len(legs) - 1} stop" + ("s" if len(legs) > 2 else "")
-            if bits:
-                stops += f" ({'; '.join(bits)})"
-        dep = first.get("departure_airport") or {}
-        arr = last.get("arrival_airport") or {}
-        dep_t = f"{day[8:10]} {datetime.strptime(day, '%Y-%m-%d').strftime('%b')} {dep.get('time', '')}".strip()
-        # SerpAPI often gives time as "6:00 AM" without date
-        if dep.get("time") and not re.search(r"\d{1,2}\s+[A-Z][a-z]{2}", dep_t):
-            dep_t = f"{datetime.strptime(day, '%Y-%m-%d').strftime('%d %b')} {dep.get('time')}"
-        arr_t = arr.get("time") or ""
-        if arr_t and not re.search(r"\d{1,2}\s+[A-Z][a-z]{2}", arr_t):
-            arr_t = f"{datetime.strptime(day, '%Y-%m-%d').strftime('%d %b')} {arr_t}"
-        total_mins = row.get("total_duration")
-        duration = _fmt_minutes(total_mins) if total_mins is not None else ""
-        price = _money(row.get("price"), "INR") if row.get("price") is not None else "Price on request"
-        airline = " / ".join(dict.fromkeys(a for a in airlines if a)) or "Airline"
-        options.append(
-            FlightOption(
-                airline=airline,
-                flight_numbers=" + ".join(numbers) or "—",
-                depart_at=dep_t or "—",
-                arrive_at=arr_t or "—",
-                duration=duration or "—",
-                stops=stops,
-                price=price,
-                origin=origin,
-                destination=dest,
-                source="serpapi",
-            )
-        )
-        if len(options) >= max_options:
-            break
-    return options
 
 
 # --- Amadeus ----------------------------------------------------------------
@@ -375,6 +546,10 @@ def _amadeus_flights(origin: str, dest: str, day: str, *, max_options: int) -> l
         return []
     settings = get_settings()
     base = (settings.amadeus_hostname or "https://test.api.amadeus.com").rstrip("/")
+    # Sandbox fares are fictional (often ~5–6k) — never show them as live quotes.
+    if "test.api.amadeus.com" in base:
+        logger.warning("flight_amadeus_test_skipped", hint="test.api.amadeus.com fares are not real market prices")
+        return []
     params = {
         "originLocationCode": origin,
         "destinationLocationCode": dest,
@@ -494,7 +669,9 @@ def format_flight_options_for_mail(options: list[FlightOption] | list[dict]) -> 
             "Reply with preferred airline / time window and I'll ask Travel Desk to quote exact options."
         )
     lines = [
-        "Here are live flight options (reply with the option number you prefer, or say a different date/time):",
+        "Here are live one-way flight options from Google Flights (India).",
+        "Fares are adult economy; checked bags / seats can add cost on airline sites (so OTA totals may look higher).",
+        "Reply with the option number you prefer, or say a different date/time / round-trip:",
         "",
     ]
     for i, opt in enumerate(options, start=1):
@@ -507,16 +684,20 @@ def format_flight_options_for_mail(options: list[FlightOption] | list[dict]) -> 
             stops = opt.get("stops") or ""
             price = opt.get("price") or opt.get("price_hint") or ""
             cabin = opt.get("cabin") or "Economy"
+            fare_note = opt.get("fare_note") or ""
         else:
             airline, numbers = opt.airline, opt.flight_numbers
             depart, arrive = opt.depart_at, opt.arrive_at
             duration, stops, price = opt.duration, opt.stops, opt.price
             cabin = opt.cabin or "Economy"
+            fare_note = opt.fare_note or ""
         lines.append(f"{i}. {airline} {numbers}".strip())
         lines.append(f"   Depart: {depart}")
         lines.append(f"   Arrive: {arrive}")
         lines.append(f"   Duration: {duration}  |  {stops}")
         lines.append(f"   Fare: {price}  ({cabin})")
+        if fare_note:
+            lines.append(f"   Note: {fare_note}")
         lines.append("")
     lines.append("Once you pick one, I'll send it to the Travel Desk to book (manager approval if required).")
     return "\n".join(lines).rstrip()

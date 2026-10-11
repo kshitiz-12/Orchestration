@@ -86,6 +86,30 @@ def test_old_link_flight_options_are_not_usable():
     )
 
 
+def test_pick_realistic_fare_ignores_india_teaser_list_price():
+    from app.services.flight_search import _pick_realistic_fare
+
+    fare, note = _pick_realistic_fare(
+        list_price=5499,
+        booking_prices=[12490, 13200, 15800],
+        typical_low=12000,
+        typical_high=18000,
+        domestic_in=True,
+    )
+    assert fare is not None and fare >= 12000
+    assert "teaser" in note.lower() or "bookable" in note.lower()
+
+    skipped, reason = _pick_realistic_fare(
+        list_price=5499,
+        booking_prices=[],
+        typical_low=12000,
+        typical_high=18000,
+        domestic_in=True,
+    )
+    assert skipped is None
+    assert reason == "below_market_teaser"
+
+
 
 def test_department_autocode_from_name_and_place(session: Session):
     tid = session.exec(select(Tenant)).first().tenant_id
