@@ -108,6 +108,39 @@ def _detail_texts(details: Optional[dict[str, Any]]) -> Iterable[str]:
             yield value
 
 
+_PLACE_HINT_STOP = {
+    "office", "sector", "road", "park", "city", "floor", "tower", "campus", "branch",
+    "north", "south", "east", "west", "region", "building", "desk", "room", "gate",
+}
+
+
+def _text_hints_other_place(
+    session: Session,
+    tenant_id: str,
+    text: str,
+    home: Location,
+    places: list[Location],
+) -> bool:
+    """True when the mail names another city/branch (e.g. 'Delhi office') than the employee's home."""
+    low = (text or "").lower()
+    if not low.strip():
+        return False
+    home_blob = " ".join(_names(home)).lower()
+    home_ids = set(chain_ids(session, tenant_id, home.location_id))
+    for p in places:
+        if p.location_id in home_ids:
+            continue
+        if (p.type or "").upper() not in {"CITY", "BRANCH", "SITE", "CAMPUS"}:
+            continue
+        for name in _names(p):
+            for token in re.findall(r"[a-z]{4,}", name.lower()):
+                if token in _PLACE_HINT_STOP or token in home_blob:
+                    continue
+                if re.search(rf"(?<![\w-]){re.escape(token)}(?![\w-])", low):
+                    return True
+    return False
+
+
 def place_for_request(
     session: Session,
     tenant_id: str,
@@ -116,7 +149,7 @@ def place_for_request(
     person: Optional[Person] = None,
     text: str = "",
 ) -> Optional[Location]:
-    """Where the work is: a place named in the request details, else the requester's base, else one named in the mail."""
+    """Where the work is: place named in details/mail, else home — unless the mail hints a different office."""
     places = routable_places(session, tenant_id)
     if not places:
         return None
@@ -124,8 +157,10 @@ def place_for_request(
         found = find_place(session, tenant_id, value, places)
         if found is not None:
             return found
-    if person is not None and person.site_id:
-        home = get_place(session, tenant_id, person.site_id)
-        if home is not None:
-            return home
-    return find_place(session, tenant_id, text, places) if text else None
+    text_place = find_place(session, tenant_id, text, places) if text else None
+    if text_place is not None:
+        return text_place
+    home = get_place(session, tenant_id, person.site_id) if person is not None and person.site_id else None
+    if home is not None and text and _text_hints_other_place(session, tenant_id, text, home, places):
+        return None
+    return home
