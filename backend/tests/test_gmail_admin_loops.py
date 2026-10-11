@@ -69,9 +69,21 @@ def test_parse_travel_date_and_iata():
 
     assert resolve_iata("Bengaluru") == "BLR"
     assert resolve_iata("Delhi") == "DEL"
+    assert resolve_iata("Ranchi hotel") == "IXR"
     assert parse_travel_date("20 Oct 2026") == "2026-10-20"
     assert parse_travel_date("2026-11-05") == "2026-11-05"
-    assert parse_travel_date("next Monday", today=date(2026, 10, 11))  # Sunday → 19 Oct
+    assert parse_travel_date("next Monday", today=date(2026, 10, 11))  # Sunday → 12 Oct
+
+
+def test_old_link_flight_options_are_not_usable():
+    from app.services.flight_search import flight_options_are_usable
+
+    assert not flight_options_are_usable(
+        [{"summary": "Compare live fares", "url": "https://www.google.com/travel/flights", "source": "google_flights"}]
+    )
+    assert flight_options_are_usable(
+        [{"airline": "IndiGo", "depart_at": "20 Oct 06:15", "price": "INR 4299", "flight_numbers": "6E1"}]
+    )
 
 
 

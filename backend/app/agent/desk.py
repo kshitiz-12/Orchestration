@@ -75,6 +75,7 @@ from app.services.communication import (
 )
 from app.services.email_utils import strip_for_ai
 from app.services.flight_search import (
+    flight_options_are_usable,
     format_flight_options_for_mail,
     options_as_dicts,
     search_flights,
@@ -1386,11 +1387,11 @@ class AdminDesk:
         return "\n".join(lines).strip() + "\n"
 
     def _attach_flight_options(self, outcome: Outcome, text: str) -> None:
-        """When travel involves a flight and we know route/date, search the web and store options on the case."""
+        """When travel involves a flight and we know route/date, search live offers and store on the case."""
         facts = outcome.facts or {}
         if (facts.get("agent_category") or "") != "travel":
             return
-        if facts.get("flight_options"):
+        if flight_options_are_usable(facts.get("flight_options")):
             return
         details = facts.get("details") or {}
         blob = f"{facts.get('raw_request') or ''}\n{text}\n{details}\n{outcome.title}"
@@ -1403,8 +1404,22 @@ class AdminDesk:
             or details.get("route")
             or ""
         )
-        destination = details.get("to") or details.get("destination") or details.get("drop") or ""
-        # "Delhi to Bangalore" in a single route field
+        destination = (
+            details.get("to")
+            or details.get("destination")
+            or details.get("arrival_city")
+            or details.get("drop")
+            or ""
+        )
+        # Title often has the air sector: "Flight from BLR to Ranchi and cab..."
+        if m := re.search(
+            r"\b(?:flight|fly)\s+from\s+(.+?)\s+to\s+(.+?)(?:\s+and\b|,|$)",
+            outcome.title or "",
+            re.I,
+        ):
+            origin = origin or m.group(1).strip()
+            # Prefer city from title over "Ranchi hotel" drop for the flight search
+            destination = m.group(2).strip() or destination
         if (not origin or not destination) and details.get("route"):
             parts = re.split(r"\bto\b|->|→", str(details.get("route")), maxsplit=1, flags=re.I)
             if len(parts) == 2:
@@ -1416,9 +1431,6 @@ class AdminDesk:
             or details.get("pickup_time")
             or ""
         )
-        if isinstance(day, str) and " " in day and not re.search(r"\d{4}", day):
-            # keep date-ish token only when possible
-            day = day.split()[0]
         if not origin or not destination:
             return
         options = search_flights(str(origin), str(destination), str(day))
@@ -1437,7 +1449,8 @@ class AdminDesk:
             if not opts:
                 continue
             block = format_flight_options_for_mail(opts)
-            if block and "Flight options I found" not in draft:
+            already = ("Flight options I found" in draft) or ("Here are live flight options" in draft)
+            if block and not already:
                 draft = _before_signoff(draft, block)
         return draft
 

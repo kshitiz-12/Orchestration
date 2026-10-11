@@ -59,6 +59,8 @@ _CITY_IATA: dict[str, str] = {
     "LKO": "LKO",
     "CHANDIGARH": "IXC",
     "IXC": "IXC",
+    "RANCHI": "IXR",
+    "IXR": "IXR",
     "GURGAON": "DEL",
     "GURUGRAM": "DEL",
     "NOIDA": "DEL",
@@ -109,9 +111,30 @@ def wants_flight(text: str) -> bool:
 
 def _city(raw: Optional[str]) -> str:
     text = (raw or "").strip()
-    text = re.sub(r"\b(?:from|to|airport|office|hq)\b", " ", text, flags=re.I)
+    text = re.sub(
+        r"\b(?:from|to|airport|office|hq|hotel|stay|guest\s*house)\b",
+        " ",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(r"[()]", " ", text)
     text = re.sub(r"\s+", " ", text).strip(" ,.-")
     return text[:80]
+
+
+def flight_options_are_usable(options: Any) -> bool:
+    """True when stored options have real fare/time fields (not old compare-link stubs)."""
+    if not options or not isinstance(options, list):
+        return False
+    for opt in options:
+        if not isinstance(opt, dict):
+            continue
+        if opt.get("price") and opt.get("depart_at") and opt.get("airline"):
+            return True
+        # Old link-only shape
+        if opt.get("url") or opt.get("source") in {"google_flights", "kayak", "web"}:
+            continue
+    return False
 
 
 def resolve_iata(place: str) -> Optional[str]:
