@@ -5,34 +5,18 @@ import { usePathname, useRouter } from "next/navigation";
 import { clearToken, getToken, api } from "@/lib/api";
 import { useEffect, useState } from "react";
 
-const GROUPS = [
-  {
-    label: "Start here",
-    links: [{ href: "/", label: "Home" }],
-  },
-  {
-    label: "Daily work",
-    links: [
-      { href: "/reviews", label: "Needs your decision" },
-      { href: "/outcomes", label: "All requests" },
-      { href: "/tasks", label: "Team tasks" },
-    ],
-  },
-  {
-    label: "Email",
-    links: [{ href: "/email", label: "Email intake" }],
-  },
-  {
-    label: "More",
-    links: [
-      { href: "/resources", label: "Resources" },
-      { href: "/invoices", label: "Invoices" },
-      { href: "/learning", label: "AI learning" },
-      { href: "/failures", label: "Problems" },
-      { href: "/setup", label: "Company setup" },
-      { href: "/config", label: "Settings" },
-    ],
-  },
+const PRIMARY = [
+  { href: "/", label: "Overview" },
+  { href: "/outcomes", label: "Requests" },
+  { href: "/reviews", label: "Needs a decision" },
+  { href: "/setup", label: "Company data" },
+  { href: "/email", label: "Mail inbox" },
+];
+
+const MORE = [
+  { href: "/tasks", label: "Team tasks" },
+  { href: "/resources", label: "Rooms & assets" },
+  { href: "/config", label: "Preferences" },
 ];
 
 export function AppShell({
@@ -51,6 +35,7 @@ export function AppShell({
   const [ready, setReady] = useState(false);
   const [open, setOpen] = useState(false);
   const [mailin, setMailin] = useState<any>(null);
+  const [showMore, setShowMore] = useState(false);
 
   useEffect(() => {
     if (!getToken() && pathname !== "/login") {
@@ -74,8 +59,9 @@ export function AppShell({
   if (pathname === "/login") return <>{children}</>;
   if (!ready) {
     return (
-      <div className="login-wrap" style={{ gridTemplateColumns: "1fr" }}>
-        <div className="empty">Loading console…</div>
+      <div className="boot-screen">
+        <div className="boot-mark">Desk</div>
+        <p className="muted">Opening your workplace console…</p>
       </div>
     );
   }
@@ -85,41 +71,49 @@ export function AppShell({
     return pathname === href || pathname.startsWith(`${href}/`);
   }
 
+  const mailReady = Boolean(mailin?.can_send_replies || mailin?.smtp_configured);
+
   return (
     <div className="shell">
       <div className={`nav-backdrop ${open ? "show" : ""}`} onClick={() => setOpen(false)} />
       <aside className={`nav ${open ? "open" : ""}`}>
         <div className="brand-block">
-          <h1 className="brand">
-            Outcome <span>Orchestrate</span>
-          </h1>
-          <div className="brand-sub">Email requests → clear next steps</div>
+          <div className="brand-mark">Desk</div>
+          <p className="brand-sub">Workplace admin</p>
         </div>
 
-        {GROUPS.map((g) => (
-          <div className="nav-group" key={g.label}>
-            <div className="nav-group-label">{g.label}</div>
-            {g.links.map((l) => (
+        <nav className="nav-primary" aria-label="Main">
+          {PRIMARY.map((l) => (
+            <Link key={l.href} href={l.href} className={isActive(l.href) ? "active" : ""}>
+              {l.label}
+            </Link>
+          ))}
+        </nav>
+
+        <button type="button" className="nav-more-toggle" onClick={() => setShowMore((v) => !v)}>
+          {showMore ? "Hide more" : "More"}
+        </button>
+        {showMore && (
+          <nav className="nav-more" aria-label="More">
+            {MORE.map((l) => (
               <Link key={l.href} href={l.href} className={isActive(l.href) ? "active" : ""}>
                 {l.label}
               </Link>
             ))}
-          </div>
-        ))}
+          </nav>
+        )}
 
         <div className="nav-footer">
-          <div className="panel" style={{ padding: "0.75rem 0.85rem", marginBottom: "0.75rem" }}>
+          <div className="nav-status">
             <div className="row" style={{ gap: "0.45rem" }}>
-              <span className={`live-dot ${mailin?.smtp_configured ? "" : "off"}`} />
-              <strong style={{ fontSize: "0.82rem" }}>Email</strong>
+              <span className={`live-dot ${mailReady ? "" : "off"}`} />
+              <strong>Employee mail</strong>
             </div>
-            <div className="muted" style={{ fontSize: "0.75rem", marginTop: "0.35rem" }}>
-              {mailin?.address || "Intake address not set"}
+            <p className="muted">
+              {mailin?.address || "Inbox address not set yet"}
               <br />
-              {mailin?.can_send_replies || mailin?.smtp_configured
-                ? "Can send replies"
-                : "Receiving only"}
-            </div>
+              {mailReady ? "Can send replies" : "Receiving only — replies not configured"}
+            </p>
           </div>
           <button
             className="btn secondary"
@@ -137,7 +131,7 @@ export function AppShell({
       <main className="main">
         <div className="topbar">
           <div>
-            <button type="button" className="nav-toggle" onClick={() => setOpen(true)} style={{ marginBottom: "0.75rem" }}>
+            <button type="button" className="nav-toggle" onClick={() => setOpen(true)}>
               Menu
             </button>
             {title ? <h1 className="page-title">{title}</h1> : null}

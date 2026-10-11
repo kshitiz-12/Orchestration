@@ -31,7 +31,7 @@ export default function ConfigPage() {
   }, []);
 
   return (
-    <AppShell title="Configuration" subtitle="Outcome templates, rules, SLAs, notifications, evidence requirements.">
+    <AppShell title="Preferences" subtitle="How Desk handles turnaround times, notifications, and request rules for your company.">
       <div className="stack">
         <div className="panel">
           <h2>Demo controls</h2>

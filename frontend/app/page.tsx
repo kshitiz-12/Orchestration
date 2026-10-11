@@ -9,22 +9,27 @@ import { useCallback, useEffect, useState } from "react";
 
 export default function HomePage() {
   const [kpis, setKpis] = useState<any>(null);
+  const [setup, setSetup] = useState<any>(null);
   const [outcomes, setOutcomes] = useState<any[]>([]);
   const [error, setError] = useState("");
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
   const [busy, setBusy] = useState(false);
-  const [query, setQuery] = useState("");
 
   const load = useCallback(async () => {
     setBusy(true);
     setError("");
     try {
-      const [k, o] = await Promise.all([api("/dashboard/kpis"), api("/outcomes?limit=12")]);
+      const [k, o, s] = await Promise.all([
+        api("/dashboard/kpis"),
+        api("/outcomes?limit=10"),
+        api("/setup/status").catch(() => null),
+      ]);
       setKpis(k && typeof k === "object" ? k : null);
       setOutcomes(Array.isArray(o) ? o : []);
+      setSetup(s);
       setUpdatedAt(new Date());
     } catch (e: any) {
-      setError(e.message || "Failed to load");
+      setError(e.message || "Could not load");
       setOutcomes([]);
     } finally {
       setBusy(false);
@@ -37,95 +42,64 @@ export default function HomePage() {
     return () => clearInterval(id);
   }, [load]);
 
-  const filtered = outcomes.filter((o) => {
-    const q = query.trim().toLowerCase();
-    if (!q) return true;
-    return [o.case_reference, requestType(o), o.department, o.requester_email, o.status, o.title]
-      .filter(Boolean)
-      .some((v) => String(v).toLowerCase().includes(q));
-  });
-
-  const waitingReviews = Number(kpis?.human_reviews || 0) + Number(kpis?.pending_approvals || 0);
-  const pendingConfirm = Number(kpis?.pending_confirmations || 0);
-  const awaitingReqs = Number(kpis?.awaiting_requirements || 0);
   const waitingYou =
     kpis?.waiting_on_you != null
       ? Number(kpis.waiting_on_you)
-      : waitingReviews + pendingConfirm;
-  const pastSla = Number(kpis?.past_sla || 0);
-  const late = Number(kpis?.overdue_tasks || 0) + pastSla;
-  const urgent = Number(kpis?.urgent_open || 0);
-  const problems = Number(kpis?.failures || 0);
+      : Number(kpis?.human_reviews || 0) + Number(kpis?.pending_approvals || 0) + Number(kpis?.pending_confirmations || 0);
   const openCases = Number(kpis?.outcomes_active || 0);
-  const needsAttention = Number(kpis?.at_risk || 0) + awaitingReqs + Number(kpis?.no_resource || 0);
-  const byType: { label: string; count: number }[] = Array.isArray(kpis?.open_by_type) ? kpis.open_by_type : [];
-  const byDept: { label: string; count: number }[] = Array.isArray(kpis?.open_by_department) ? kpis.open_by_department : [];
+  const pastSla = Number(kpis?.past_sla || 0);
+  const awaitingReqs = Number(kpis?.awaiting_requirements || 0);
+
+  const employees = Number(setup?.employees || 0);
+  const locations = Number(setup?.locations || 0);
+  const deptsPending = Array.isArray(setup?.departments_needing_setup) ? setup.departments_needing_setup.length : 0;
+  const companyReady = employees > 1 && locations > 0 && deptsPending === 0;
 
   const nextSteps: { title: string; detail: string; href: string; tone: "warn" | "danger" | "ok" | "neutral" }[] = [];
-  if (urgent > 0) {
+  if (!companyReady) {
     nextSteps.push({
-      title: `${urgent} urgent request${urgent === 1 ? "" : "s"} open`,
-      detail: "Safety or work-stopping issues - the team and you were alerted when they came in.",
-      href: "/outcomes",
-      tone: "danger",
+      title: "Finish company setup",
+      detail: "Upload branches, teams, and employees so mail can be routed correctly.",
+      href: "/setup",
+      tone: "warn",
+    });
+  }
+  if (waitingYou > 0) {
+    nextSteps.push({
+      title: `${waitingYou} item${waitingYou === 1 ? "" : "s"} need your decision`,
+      detail: "Approvals or confirmations are waiting on the admin team.",
+      href: "/reviews",
+      tone: "warn",
     });
   }
   if (pastSla > 0) {
     nextSteps.push({
       title: `${pastSla} request${pastSla === 1 ? "" : "s"} past due`,
-      detail: "The team missed the agreed time. Chase them or reassign from the request page.",
+      detail: "Teams missed the agreed time — follow up from the request.",
       href: "/outcomes",
-      tone: "warn",
-    });
-  }
-  if (waitingYou > 0) {
-    const bits: string[] = [];
-    if (waitingReviews > 0) bits.push(`${waitingReviews} approval/review`);
-    if (pendingConfirm > 0) bits.push(`${pendingConfirm} booking to confirm`);
-    nextSteps.push({
-      title: `${waitingYou} item${waitingYou === 1 ? "" : "s"} waiting for your decision`,
-      detail: bits.length ? bits.join(" · ") : "Open these first — the system paused until someone decides.",
-      href: "/reviews",
-      tone: "warn",
+      tone: "danger",
     });
   }
   if (awaitingReqs > 0) {
     nextSteps.push({
-      title: `${awaitingReqs} request${awaitingReqs === 1 ? "" : "s"} still missing details`,
-      detail: "We already emailed the requester for only the remaining gaps.",
-      href: "/outcomes?waiting=requester",
+      title: `${awaitingReqs} waiting on the employee`,
+      detail: "We already asked for the missing details by email.",
+      href: "/outcomes",
       tone: "neutral",
-    });
-  }
-  if (Number(kpis?.overdue_tasks || 0) > 0) {
-    const n = Number(kpis.overdue_tasks);
-    nextSteps.push({
-      title: `${n} late task${n === 1 ? "" : "s"}`,
-      detail: "Someone still needs to finish work on these requests.",
-      href: "/tasks",
-      tone: "warn",
-    });
-  }
-  if (problems > 0) {
-    nextSteps.push({
-      title: `${problems} processing problem${problems === 1 ? "" : "s"}`,
-      detail: "An email or job failed. Tech can retry from Failures.",
-      href: "/failures",
-      tone: "danger",
     });
   }
   if (nextSteps.length === 0 && openCases > 0) {
     nextSteps.push({
-      title: "Nothing urgent right now",
-      detail: `${openCases} open request${openCases === 1 ? "" : "s"} are moving along.`,
+      title: "Everything is on track",
+      detail: `${openCases} open request${openCases === 1 ? "" : "s"} moving with the teams.`,
       href: "/outcomes",
       tone: "ok",
     });
   }
   if (nextSteps.length === 0) {
     nextSteps.push({
-      title: "No open requests yet",
-      detail: "When someone emails the intake address, their request will show up here.",
+      title: "No open requests",
+      detail: "When employees email the company inbox, new work shows up here.",
       href: "/email",
       tone: "neutral",
     });
@@ -133,8 +107,8 @@ export default function HomePage() {
 
   return (
     <AppShell
-      title="Home"
-      subtitle="See what needs your attention, then open the request."
+      title="Overview"
+      subtitle="What needs attention across your offices — and whether the company is ready for employee mail."
       actions={
         <>
           <span className="muted" style={{ fontSize: "0.82rem" }}>
@@ -147,8 +121,8 @@ export default function HomePage() {
       }
     >
       {error && (
-        <div className="panel" style={{ marginBottom: "1rem", borderColor: "#fecdd3" }}>
-          <strong style={{ color: "var(--danger)" }}>Couldn’t load the page</strong>
+        <div className="panel" style={{ marginBottom: "1rem", borderColor: "#f0b4ae" }}>
+          <strong style={{ color: "var(--danger)" }}>Couldn&apos;t load</strong>
           <p className="muted" style={{ margin: "0.35rem 0 0" }}>{error}</p>
           <button className="btn secondary" style={{ marginTop: "0.75rem" }} onClick={load}>
             Try again
@@ -156,18 +130,40 @@ export default function HomePage() {
         </div>
       )}
 
-      {busy && !kpis && !error && (
-        <div className="panel" style={{ marginBottom: "1rem" }}>
-          <strong>Loading…</strong>
-          <p className="muted" style={{ margin: "0.35rem 0 0" }}>
-            First load can take up to a minute if the server was asleep.
-          </p>
+      {!companyReady && (
+        <div className="setup-hero">
+          <div>
+            <h2>Get your company ready</h2>
+            <p>
+              Upload one Excel file with offices, teams, and employees. Until that&apos;s done,
+              only listed employees get replies — and teams need real mailboxes to receive work.
+            </p>
+          </div>
+          <div className="setup-steps">
+            <span className={`setup-step ${locations > 0 ? "done" : "warn"}`}>
+              {locations > 0 ? "Offices added" : "Add offices"}
+            </span>
+            <span className={`setup-step ${deptsPending === 0 && setup ? "done" : "warn"}`}>
+              {deptsPending === 0 && setup ? "Teams ready" : `${deptsPending || "—"} teams need email`}
+            </span>
+            <span className={`setup-step ${employees > 1 ? "done" : "warn"}`}>
+              {employees > 1 ? `${employees} people` : "Add employees"}
+            </span>
+          </div>
+          <div className="row">
+            <Link href="/setup" className="btn accent">
+              Open company data
+            </Link>
+            <Link href="/email" className="btn secondary">
+              Check mail inbox
+            </Link>
+          </div>
         </div>
       )}
 
-      <div className="panel next-panel" style={{ marginBottom: "1.1rem" }}>
+      <div className="panel" style={{ marginBottom: "1.15rem" }}>
         <div className="panel-head">
-          <h2>What should I do next?</h2>
+          <h2>Do this next</h2>
         </div>
         <div className="stack">
           {nextSteps.map((step) => (
@@ -182,86 +178,38 @@ export default function HomePage() {
       <div className="grid kpis">
         <Link href="/outcomes" className="kpi clickable">
           <div className="label">Open requests</div>
-          <div className="value">{openCases || "—"}</div>
-          <div className="hint">Cases still being handled</div>
-        </Link>
-        <Link href="/outcomes" className="kpi clickable">
-          <div className="label">Need attention</div>
-          <div className="value">{needsAttention || "—"}</div>
-          <div className="hint">At risk or stuck</div>
+          <div className="value">{openCases || "0"}</div>
+          <div className="hint">Still being handled</div>
         </Link>
         <Link href="/reviews" className="kpi clickable">
-          <div className="label">Waiting on you</div>
-          <div className="value">{waitingYou || "—"}</div>
-          <div className="hint">Approvals, reviews and confirmations</div>
+          <div className="label">Need your decision</div>
+          <div className="value">{waitingYou || "0"}</div>
+          <div className="hint">Approvals & confirmations</div>
         </Link>
         <Link href="/outcomes" className="kpi clickable">
-          <div className="label">Late work</div>
-          <div className="value">{late || "—"}</div>
-          <div className="hint">
-            Past due{kpis?.resolved_24h != null ? ` · ${kpis.resolved_24h} resolved in 24h` : ""}
-          </div>
+          <div className="label">Past due</div>
+          <div className="value">{pastSla || "0"}</div>
+          <div className="hint">Missed team deadline</div>
         </Link>
-        <div className="kpi">
-          <div className="label">Automation (30 days)</div>
-          <div className="value">{kpis?.automation_rate_pct != null ? `${kpis.automation_rate_pct}%` : "—"}</div>
-          <div className="hint">
-            Routine steps done without a human
-            {kpis?.verified_closure_pct != null ? ` · ${kpis.verified_closure_pct}% closures verified` : ""}
-          </div>
-        </div>
+        <Link href="/setup" className="kpi clickable">
+          <div className="label">Employees loaded</div>
+          <div className="value">{employees || "0"}</div>
+          <div className="hint">{locations || 0} offices on file</div>
+        </Link>
       </div>
 
-      {kpis?.ai_emergency_stop && (
-        <div className="panel" style={{ marginBottom: "1.1rem", borderColor: "var(--danger)" }}>
-          <strong>AI is paused (emergency stop).</strong> Requests are still logged and safety issues still go out
-          urgently, but every other request waits for your approval. Turn off AI_EMERGENCY_STOP to resume.
-        </div>
-      )}
-
-      {(byType.length > 0 || byDept.length > 0) && (
-        <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: "1rem", marginBottom: "1.1rem" }}>
-          <div className="panel">
-            <div className="panel-head"><h2>Open by type</h2></div>
-            <div className="stack" style={{ gap: "0.35rem" }}>
-              {byType.slice(0, 10).map((r) => (
-                <Link key={r.label} href={`/outcomes?type=${encodeURIComponent(r.label)}`} className="table-link"
-                  style={{ display: "flex", justifyContent: "space-between" }}>
-                  <span>{r.label}</span><strong>{r.count}</strong>
-                </Link>
-              ))}
-            </div>
-          </div>
-          <div className="panel">
-            <div className="panel-head"><h2>Open by team</h2></div>
-            <div className="stack" style={{ gap: "0.35rem" }}>
-              {byDept.slice(0, 10).map((r) => (
-                <Link key={r.label} href={`/outcomes?department=${encodeURIComponent(r.label)}`} className="table-link"
-                  style={{ display: "flex", justifyContent: "space-between" }}>
-                  <span>{r.label}</span><strong>{r.count}</strong>
-                </Link>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-
       <div className="grid actions">
-        <Link href="/reviews" className="action-tile">
-          <strong>Decide on pending items</strong>
-          <span>Approve, ask a follow-up question, or reject.</span>
+        <Link href="/setup" className="action-tile">
+          <strong>Upload company Excel</strong>
+          <span>Branches, teams, and people in one file.</span>
         </Link>
         <Link href="/outcomes" className="action-tile">
-          <strong>Browse all requests</strong>
-          <span>See every case, emails, and progress.</span>
+          <strong>Browse requests</strong>
+          <span>See status, who is waiting, and history.</span>
         </Link>
         <Link href="/email" className="action-tile">
-          <strong>Email intake</strong>
-          <span>Check the address people mail into.</span>
-        </Link>
-        <Link href="/tasks" className="action-tile">
-          <strong>Team tasks</strong>
-          <span>Work assigned to operators.</span>
+          <strong>Employee mail address</strong>
+          <span>The inbox staff should write to.</span>
         </Link>
       </div>
 
@@ -272,24 +220,16 @@ export default function HomePage() {
             See all
           </Link>
         </div>
-        <div className="toolbar">
-          <input
-            className="search"
-            placeholder="Search by person, case number, or type…"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-          />
-        </div>
-        {filtered.length === 0 ? (
+        {outcomes.length === 0 ? (
           <div className="empty">
             <strong>No requests yet</strong>
-            When someone emails the intake address, their request appears here.
+            After company data is loaded, employee emails to the intake address appear here.
           </div>
         ) : (
           <table>
             <thead>
               <tr>
-                <th>Case #</th>
+                <th>Case</th>
                 <th>Type</th>
                 <th>Team</th>
                 <th>From</th>
@@ -298,7 +238,7 @@ export default function HomePage() {
               </tr>
             </thead>
             <tbody>
-              {filtered.map((o) => (
+              {outcomes.map((o) => (
                 <tr key={o.outcome_id}>
                   <td>
                     <Link className="table-link" href={`/outcomes/${o.outcome_id}`}>

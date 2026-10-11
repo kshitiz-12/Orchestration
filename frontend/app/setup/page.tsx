@@ -66,24 +66,24 @@ type CostCentre = {
 };
 
 const TABS = [
-  { id: "places", label: "Branches & places" },
-  { id: "departments", label: "Departments" },
-  { id: "services", label: "Site services & charges" },
+  { id: "import", label: "Upload Excel" },
+  { id: "places", label: "Offices" },
+  { id: "departments", label: "Teams" },
+  { id: "services", label: "Site services" },
   { id: "cost_centres", label: "Cost centres" },
-  { id: "knowledge", label: "Office knowledge" },
-  { id: "import", label: "Import data" },
+  { id: "knowledge", label: "Policies & FAQs" },
 ] as const;
 
 const DELIVERY_MODELS = ["INCLUDED", "CONTRACT", "SUBSIDISED", "CHARGEABLE", "OUTSOURCED"];
 
 const IMPORT_KINDS = [
-  { id: "locations", label: "Branches & places", hint: "code, name, type (REGION / CITY / BRANCH / BUILDING / FLOOR ...), parent_code, aliases" },
+  { id: "locations", label: "Offices", hint: "code, name, type (REGION / CITY / BRANCH / BUILDING / FLOOR ...), parent_code, aliases" },
   { id: "employees", label: "Employees", hint: "email, name, department, role, manager_email, location (place code or name)" },
-  { id: "departments", label: "Departments", hint: "code, name, categories, primary_email, backup_emails, approver_email, sla_hours, spend_approval_limit, location (blank = whole company)" },
+  { id: "departments", label: "Teams", hint: "code, name, categories, primary_email, backup_emails, approver_email, sla_hours, spend_approval_limit, location (blank = whole company)" },
   { id: "resources", label: "Rooms, desks & parking", hint: "name, type (MEETING_ROOM / PARKING_SLOT / DESK / CABIN / LOCKER), capacity, floor, video_conferencing, display, near_department" },
   { id: "vendors", label: "Vendors", hint: "name, category, contact_email, location" },
   { id: "knowledge", label: "Policies & FAQs", hint: "key, section, title, content" },
-  { id: "site_services", label: "Site services & charges", hint: "site, code, name, delivery_model (INCLUDED / CONTRACT / SUBSIDISED / CHARGEABLE / OUTSOURCED), owner_department, unit, rate, included_limit, premium_triggers, premium_rate, provider" },
+  { id: "site_services", label: "Site services", hint: "site, code, name, delivery_model (INCLUDED / CONTRACT / SUBSIDISED / CHARGEABLE / OUTSOURCED), owner_department, unit, rate, included_limit, premium_triggers, premium_rate, provider" },
   { id: "cost_centres", label: "Cost centres", hint: "code, name, department, approver_name, approver_email" },
 ];
 
@@ -102,7 +102,7 @@ function usePlaces(setMsg: TabProps["setMsg"]) {
 }
 
 export default function SetupPage() {
-  const [tab, setTab] = useState<(typeof TABS)[number]["id"]>("places");
+  const [tab, setTab] = useState<(typeof TABS)[number]["id"]>("import");
   const [status, setStatus] = useState<any>(null);
   const [msg, setMsg] = useState<{ text: string; tone: "ok" | "danger" } | null>(null);
 
@@ -115,46 +115,69 @@ export default function SetupPage() {
   }, []);
 
   const pending: string[] = status?.departments_needing_setup || [];
+  const employees = Number(status?.employees || 0);
+  const locations = Number(status?.locations || 0);
 
   return (
     <AppShell
-      title="Company setup"
-      subtitle="Department mailboxes, office knowledge the AI admin answers from, and bulk company data."
+      title="Company data"
+      subtitle="Load offices, teams, and people once — then Desk can route every employee request to the right branch."
     >
       <div className="stack">
         <div className="grid kpis">
-          <div className="kpi panel">
-            <div className="muted">Main admin mailbox</div>
-            <strong className="mono">{status?.admin_email || "not set"}</strong>
-            <div className="muted" style={{ fontSize: "0.75rem" }}>Set in server env (ADMIN_OPS_EMAIL)</div>
+          <div className="kpi">
+            <div className="label">Offices</div>
+            <div className="value">{locations || "0"}</div>
+            <div className="hint">Branches & buildings on file</div>
           </div>
-          <div className="kpi panel">
-            <div className="muted">Departments</div>
-            <strong>{status?.departments ?? "—"}</strong>
-            {pending.length > 0 ? (
-              <span className="badge warn">{pending.length} need a real email</span>
-            ) : (
-              status && <span className="badge ok">All set</span>
-            )}
+          <div className="kpi">
+            <div className="label">Teams</div>
+            <div className="value">{status?.departments ?? "0"}</div>
+            <div className="hint">
+              {pending.length > 0 ? (
+                <span className="badge warn">{pending.length} need a work email</span>
+              ) : status ? (
+                <span className="badge ok">Mailboxes ready</span>
+              ) : (
+                "—"
+              )}
+            </div>
           </div>
-          <div className="kpi panel">
-            <div className="muted">Places · Employees · Resources · Vendors</div>
-            <strong>
-              {status?.locations ?? "—"} · {status?.employees ?? "—"} · {status?.resources ?? "—"} · {status?.vendors ?? "—"}
-            </strong>
+          <div className="kpi">
+            <div className="label">Employees</div>
+            <div className="value">{employees || "0"}</div>
+            <div className="hint">Only these people get replies</div>
           </div>
-          <div className="kpi panel">
-            <div className="muted">Knowledge entries · Open tickets</div>
-            <strong>
-              {status?.knowledge_entries ?? "—"} · {status?.open_tickets ?? "—"}
-            </strong>
+          <div className="kpi">
+            <div className="label">Open requests</div>
+            <div className="value">{status?.open_tickets ?? "0"}</div>
+            <div className="hint">{status?.resources ?? 0} rooms & assets</div>
           </div>
         </div>
 
         {pending.length > 0 && (
-          <div className="panel next-card tone-warn">
-            <strong>Setup needed.</strong> Until a department has a real mailbox, its work orders go to the main admin
-            mailbox instead: {pending.join(", ")}.
+          <div className="next-card tone-warn">
+            <strong>Some teams still need a real work email</strong>
+            <span>
+              Until then, their work goes to the main admin mailbox: {pending.join(", ")}.
+            </span>
+          </div>
+        )}
+
+        {employees <= 1 && (
+          <div className="setup-hero">
+            <div>
+              <h2>Start with one Excel upload</h2>
+              <p>
+                Download the company template, fill offices / teams / employees, then Preview and Confirm.
+                You can edit individual rows later under Offices and Teams.
+              </p>
+            </div>
+            <div className="row">
+              <button className="btn accent" type="button" onClick={() => setTab("import")}>
+                Go to Upload Excel
+              </button>
+            </div>
           </div>
         )}
 
@@ -172,12 +195,12 @@ export default function SetupPage() {
           </p>
         )}
 
+        {tab === "import" && <ImportTab onChange={loadStatus} setMsg={setMsg} />}
         {tab === "places" && <PlacesTab onChange={loadStatus} setMsg={setMsg} />}
         {tab === "departments" && <Departments onChange={loadStatus} setMsg={setMsg} />}
         {tab === "services" && <ServicesTab onChange={loadStatus} setMsg={setMsg} />}
         {tab === "cost_centres" && <CostCentresTab onChange={loadStatus} setMsg={setMsg} />}
         {tab === "knowledge" && <KnowledgeTab onChange={loadStatus} setMsg={setMsg} />}
-        {tab === "import" && <ImportTab onChange={loadStatus} setMsg={setMsg} />}
       </div>
     </AppShell>
   );
@@ -234,10 +257,8 @@ function PlacesTab({ onChange, setMsg }: TabProps) {
         </button>
       </div>
       <p className="muted" style={{ marginTop: 0 }}>
-        Your regions, cities, branches and buildings as a tree — as many as you have. A team or admin set on a place
-        covers everything inside it; a branch with no team of its own is handled from the level above, so new branches
-        work straight away. Employees are matched to their branch, and the AI recognises the names and aliases here in
-        requests. For many branches, use Import data → Branches &amp; places.
+        Regions, cities, branches, and buildings. A team on a city covers every branch underneath unless you override
+        it. Prefer Upload Excel when you have many sites.
       </p>
       {draft && (
         <div className="pre" style={{ marginBottom: "1rem", whiteSpace: "normal" }}>
@@ -380,7 +401,7 @@ function Departments({ onChange, setMsg }: TabProps) {
         </button>
       </div>
       <p className="muted" style={{ marginTop: 0 }}>
-        The AI admin routes each request to the department that handles its category, at the requester&apos;s branch.
+        Desk routes each request to the team that handles its category, at the employee&apos;s branch.
         A team set to cover a branch, city or region takes that place&apos;s work; teams covering the whole company take
         everything else. Name branch teams after the main team (FACILITIES_PUNE, ADMIN_PUNE): an ADMIN_ team is that
         branch&apos;s admin and gets its approvals and alerts. Spends above the limit need the approver.
@@ -848,7 +869,7 @@ function KnowledgeTab({ onChange, setMsg }: TabProps) {
         </button>
       </div>
       <p className="muted" style={{ marginTop: 0 }}>
-        Company profile, offices, policies and FAQs. The AI admin answers questions from this and never invents
+        Company profile, offices, policies and FAQs. Desk answers employee questions from this and does not invent
         policy that isn&apos;t here. The sample entries are placeholders; replace them with your real details.
       </p>
       {draft && (
@@ -930,23 +951,23 @@ function ImportTab({ onChange, setMsg }: TabProps) {
   return (
     <div className="stack">
       <div className="panel">
-        <h2>Upload whole company (one file)</h2>
+        <h2>Upload company Excel</h2>
         <p className="muted">
-          Prefer the multi-sheet Excel template (branches, teams, employees, rooms in one workbook). A freeform dump
-          is mapped by AI into the same tables, then validated — nothing saves until you confirm.
+          Use the multi-sheet workbook (offices, teams, employees, rooms). Or drop any structured Excel / CSV —
+          Desk maps it, shows a preview, and saves only when you confirm.
         </p>
         <div className="toolbar">
           <button
             className={`btn ${mode === "company" ? "accent" : "secondary"}`}
             onClick={() => { setMode("company"); setResult(null); }}
           >
-            One file
+            Full company file
           </button>
           <button
             className={`btn ${mode === "single" ? "accent" : "secondary"}`}
             onClick={() => { setMode("single"); setResult(null); }}
           >
-            Single sheet
+            One sheet only
           </button>
           {mode === "company" && (
             <button
@@ -957,14 +978,14 @@ function ImportTab({ onChange, setMsg }: TabProps) {
                 )
               }
             >
-              Download company template
+              Download Excel template
             </button>
           )}
         </div>
         {mode === "company" ? (
           <>
-            <div className="muted mono" style={{ marginBottom: "0.9rem" }}>
-              Sheets: locations, departments, employees, resources, vendors, knowledge, site_services, cost_centres
+            <div className="muted" style={{ marginBottom: "0.9rem", lineHeight: 1.5 }}>
+              Include sheets for offices, teams, employees, rooms & assets, vendors, policies, site services, and cost centres as needed.
             </div>
             <input
               type="file"

@@ -57,8 +57,8 @@ export default function OutcomesPage() {
 
   return (
     <AppShell
-      title="All requests"
-      subtitle="Every request the desk is tracking - repairs, IT, visitors, travel, rooms and more."
+      title="Requests"
+      subtitle="Every employee request Desk is tracking — facilities, IT, visitors, travel, rooms, and more."
       actions={
         <button className="btn secondary" onClick={load} disabled={busy}>
           {busy ? "Loading…" : "Refresh"}

@@ -85,7 +85,7 @@ def main() -> None:
         print(f"  Departments (stubs only): {len(depts)}")
         print(f"  People (login only): {len(people)}")
         print(f"  Login: {ADMIN_EMAIL} / {ADMIN_PASSWORD}")
-        print("  Next: Setup > Import data (locations, then departments, then employees, ...)")
+        print("  Next: Company data > Upload Excel")
 
 
 if __name__ == "__main__":

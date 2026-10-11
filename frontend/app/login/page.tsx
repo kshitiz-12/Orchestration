@@ -19,7 +19,7 @@ export default function LoginPage() {
       await login(email, password);
       router.replace("/");
     } catch (err: any) {
-      setError(err.message || "Login failed");
+      setError(err.message || "Could not sign in");
     } finally {
       setLoading(false);
     }
@@ -28,20 +28,21 @@ export default function LoginPage() {
   return (
     <div className="login-wrap">
       <section className="login-hero">
-        <h1>Outcome Orchestrate</h1>
+        <p className="eyebrow">Workplace admin</p>
+        <h1>Desk</h1>
         <p>
-          Emails become clear requests your team can track, reply to, and finish —
-          without digging through inboxes.
+          One place for company admins to load people and teams, watch employee requests,
+          and keep every branch moving — without living in the shared inbox.
         </p>
       </section>
       <section className="login-side">
         <form className="login-card" onSubmit={onSubmit}>
           <h2>Sign in</h2>
           <p className="muted" style={{ marginBottom: "1.25rem" }}>
-            Operations console
+            For your company&apos;s workplace admin team
           </p>
           <div className="field">
-            <label>Email</label>
+            <label>Work email</label>
             <input value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="username" />
           </div>
           <div className="field">
@@ -53,9 +54,13 @@ export default function LoginPage() {
               autoComplete="current-password"
             />
           </div>
-          {error && <p className="badge danger" style={{ marginBottom: "0.75rem" }}>{error}</p>}
+          {error && (
+            <p className="badge danger" style={{ marginBottom: "0.75rem" }}>
+              {error}
+            </p>
+          )}
           <button className="btn accent" style={{ width: "100%" }} disabled={loading}>
-            {loading ? "Signing in…" : "Continue"}
+            {loading ? "Signing in…" : "Enter Desk"}
           </button>
         </form>
       </section>

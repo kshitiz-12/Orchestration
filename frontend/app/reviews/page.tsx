@@ -89,8 +89,8 @@ export default function ReviewsPage() {
 
   return (
     <AppShell
-      title="Needs your decision"
-      subtitle="Approvals, sign-offs and proposals for every request type that are waiting on you."
+      title="Needs a decision"
+      subtitle="Approvals and confirmations waiting on the admin team — act here so work can continue."
       actions={
         <button className="btn secondary" onClick={load}>
           Refresh

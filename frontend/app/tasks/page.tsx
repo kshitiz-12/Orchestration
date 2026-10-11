@@ -30,7 +30,7 @@ export default function TasksPage() {
   return (
     <AppShell
       title="Team tasks"
-      subtitle="Work items for operators. Update status as you go."
+      subtitle="Work items assigned to your teams — update status as they progress."
       actions={
         <button className="btn secondary" onClick={load}>
           Refresh
