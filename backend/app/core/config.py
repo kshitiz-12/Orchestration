@@ -107,6 +107,12 @@ class Settings(BaseSettings):
     # Prefer flash-lite on free tier — 3.6/3.7/3.8 often 503 under load
     gemini_model: str = "gemini-3.5-flash-lite"
     gemini_fallback_model: str = "gemini-3.1-flash-lite"
+    # Live flight offers for travel mail (price / times / layover) — first configured wins
+    serpapi_api_key: str = ""
+    amadeus_client_id: str = ""
+    amadeus_client_secret: str = ""
+    # test: https://test.api.amadeus.com  |  production: https://api.amadeus.com
+    amadeus_hostname: str = "https://test.api.amadeus.com"
     ai_prompt_version: str = "v1.1.0"
     # Gemini rewrites requester emails in natural language (template is the fallback)
     ai_mail_writer: bool = True

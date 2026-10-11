@@ -21,21 +21,58 @@ def test_wants_flight_detects_travel_asks():
     assert not wants_flight("need a cab to the airport at 6am")
 
 
-def test_search_flights_always_returns_compare_links(monkeypatch):
-    monkeypatch.setattr(
-        "app.services.flight_search._duckduckgo_snippets",
-        lambda q, limit=6: [
-            "IndiGo nonstop Delhi to Bangalore from ₹4,299 — book online",
-            "Air India one-way DEL-BLR fares from INR 5,100",
-        ],
-    )
+def test_search_flights_returns_structured_details_not_links(monkeypatch):
+    from app.services.flight_search import FlightOption
+
+    fake = [
+        FlightOption(
+            airline="IndiGo",
+            flight_numbers="6E2041",
+            depart_at="20 Oct 06:15",
+            arrive_at="20 Oct 09:00",
+            duration="2h 45m",
+            stops="Non-stop",
+            price="INR 4,299",
+            origin="DEL",
+            destination="BLR",
+            source="amadeus",
+        ),
+        FlightOption(
+            airline="Air India",
+            flight_numbers="AI803 + AI505",
+            depart_at="20 Oct 08:00",
+            arrive_at="20 Oct 13:40",
+            duration="5h 40m",
+            stops="1 stop (BOM, 1h 10m)",
+            price="INR 5,840",
+            origin="DEL",
+            destination="BLR",
+            source="amadeus",
+        ),
+    ]
+    monkeypatch.setattr("app.services.flight_search._serpapi_flights", lambda *a, **k: [])
+    monkeypatch.setattr("app.services.flight_search._amadeus_flights", lambda *a, **k: fake)
     opts = search_flights("Delhi", "Bangalore", "2026-10-20")
-    assert len(opts) >= 3
-    assert any(o.airline and "IndiGo" in o.airline for o in opts)
-    assert any(o.source == "google_flights" for o in opts)
+    assert len(opts) == 2
+    assert opts[0].price.startswith("INR")
+    assert "Non-stop" in opts[0].stops
+    assert "BOM" in opts[1].stops
     mail = format_flight_options_for_mail(opts)
-    assert "Flight options I found" in mail
-    assert "google.com/travel/flights" in mail
+    assert "Depart:" in mail and "Arrive:" in mail and "Fare:" in mail
+    assert "http" not in mail.lower()
+    assert "kayak" not in mail.lower()
+
+
+def test_parse_travel_date_and_iata():
+    from app.services.flight_search import parse_travel_date, resolve_iata
+    from datetime import date
+
+    assert resolve_iata("Bengaluru") == "BLR"
+    assert resolve_iata("Delhi") == "DEL"
+    assert parse_travel_date("20 Oct 2026") == "2026-10-20"
+    assert parse_travel_date("2026-11-05") == "2026-11-05"
+    assert parse_travel_date("next Monday", today=date(2026, 10, 11))  # Sunday → 19 Oct
+
 
 
 def test_department_autocode_from_name_and_place(session: Session):
