@@ -64,7 +64,7 @@ from app.core.logging import get_logger
 from app.engine.outcome_engine import OutcomeEngine
 from app.models.company import ServiceTicket, VisitorPass
 from app.models.intake import Conversation, RawEmailEvent
-from app.models.org import Person, Resource, Vendor, utcnow
+from app.models.org import Asset, Person, Resource, Vendor, utcnow
 from app.models.outcome import Approval, Evidence, Outcome
 from app.services.communication import (
     CommunicationService,
@@ -74,6 +74,13 @@ from app.services.communication import (
     without_refs,
 )
 from app.services.email_utils import strip_for_ai
+from app.services.flight_search import (
+    format_flight_options_for_mail,
+    options_as_dicts,
+    search_flights,
+    wants_flight,
+)
+from app.services.stock import issue_and_maybe_reorder, refill_from_confirm
 
 logger = get_logger(__name__)
 
@@ -737,6 +744,7 @@ class AdminDesk:
             _set_facts(self.session, outcome, agent_stage="AWAITING_INFO", missing=missing,
                        info_requested_at=utcnow().isoformat())
             self._ticket_status(outcome, "OPEN")
+            self._attach_flight_options(outcome, text)
             return {"intent": intent, "status": "awaiting_info", "outcome": outcome, "missing": missing}
 
         own = f"{outcome.title}\n{' '.join(facts.get('tasks') or [])}\n{details}"
@@ -773,7 +781,9 @@ class AdminDesk:
                 )
                 self._ticket_status(outcome, "AWAITING_APPROVAL")
                 self._notify_admin(outcome, kind="decision", headline=f"Needs your approval - {risk.reason}", route=route)
+            self._attach_flight_options(outcome, text)
             return {"intent": intent, "status": "awaiting_approval", "outcome": outcome, "reason": risk.reason}
+        self._attach_flight_options(outcome, text)
         result = self._dispatch(outcome, intent, route)
         if missing:
             # Urgent work starts at once; the open questions go to the requester in the same reply.
@@ -858,6 +868,20 @@ class AdminDesk:
             return {"intent": intent, "status": "allocated" if done else "dispatched", "outcome": outcome, "parking": slots}
         _set_facts(self.session, outcome, agent_stage="DISPATCHED", missing=[])
         self._ticket_status(outcome, "ASSIGNED", assignee=route.recipients[0] if route.recipients else None)
+        if category == "supplies":
+            blob = f"{outcome.title}\n{facts.get('raw_request') or ''}\n{facts.get('details') or {}}"
+            stock = issue_and_maybe_reorder(
+                self.session,
+                self.tenant_id,
+                text=blob,
+                location_id=facts.get("location_id"),
+                trigger_outcome=outcome,
+                comms=self.comms,
+            )
+            if stock.get("issued"):
+                _set_facts(self.session, outcome, stock_issue=stock)
+        if category in {"laptop", "asset", "phone_sim", "access_card"}:
+            self._touch_asset(outcome, status="PENDING_ISSUE")
         headline = "New work order"
         if facts.get("knowledge_gap"):
             headline = 'Question needs a verified answer - reply "tell requester: <answer>"'
@@ -1273,10 +1297,10 @@ class AdminDesk:
             for r in results:
                 if r.get("day1") and r["day1"].split(" for ")[0] not in draft:
                     draft = _before_signoff(draft, r["day1"])
-            return draft
+            return self._with_flight_options(draft, results)
         if all(r["status"] == "small_talk" for r in results) and not draft:
             return ""
-        return self._template_reply(results, name, split=split)
+        return self._with_flight_options(self._template_reply(results, name, split=split), results)
 
     @staticmethod
     def _draft_is_grounded(draft: str, mine: list[AgentIntent], results: list[dict]) -> bool:
@@ -1360,6 +1384,101 @@ class AdminDesk:
             lines.append("")
         lines.append(self.settings.mail_signature)
         return "\n".join(lines).strip() + "\n"
+
+    def _attach_flight_options(self, outcome: Outcome, text: str) -> None:
+        """When travel involves a flight and we know route/date, search the web and store options on the case."""
+        facts = outcome.facts or {}
+        if (facts.get("agent_category") or "") != "travel":
+            return
+        if facts.get("flight_options"):
+            return
+        details = facts.get("details") or {}
+        blob = f"{facts.get('raw_request') or ''}\n{text}\n{details}\n{outcome.title}"
+        if not wants_flight(blob):
+            return
+        origin = (
+            details.get("from")
+            or details.get("pickup")
+            or details.get("origin")
+            or details.get("route")
+            or ""
+        )
+        destination = details.get("to") or details.get("destination") or details.get("drop") or ""
+        # "Delhi to Bangalore" in a single route field
+        if (not origin or not destination) and details.get("route"):
+            parts = re.split(r"\bto\b|->|→", str(details.get("route")), maxsplit=1, flags=re.I)
+            if len(parts) == 2:
+                origin, destination = parts[0].strip(), parts[1].strip()
+        day = (
+            details.get("travel_date")
+            or details.get("visit_date")
+            or details.get("date")
+            or details.get("pickup_time")
+            or ""
+        )
+        if isinstance(day, str) and " " in day and not re.search(r"\d{4}", day):
+            # keep date-ish token only when possible
+            day = day.split()[0]
+        if not origin or not destination:
+            return
+        options = search_flights(str(origin), str(destination), str(day))
+        if options:
+            _set_facts(self.session, outcome, flight_options=options_as_dicts(options), travel_flight=True)
+
+    @staticmethod
+    def _with_flight_options(draft: str, results: list[dict]) -> str:
+        if not draft:
+            return draft
+        for r in results:
+            outcome = r.get("outcome")
+            if not outcome:
+                continue
+            opts = (outcome.facts or {}).get("flight_options") or []
+            if not opts:
+                continue
+            block = format_flight_options_for_mail(opts)
+            if block and "Flight options I found" not in draft:
+                draft = _before_signoff(draft, block)
+        return draft
+
+    def _touch_asset(self, outcome: Outcome, *, status: str) -> None:
+        facts = outcome.facts or {}
+        category = facts.get("agent_category") or "asset"
+        details = facts.get("details") or {}
+        name = str(details.get("item") or details.get("asset") or details.get("description") or outcome.title)[:200]
+        tag = str(details.get("tag") or details.get("asset_tag") or "")[:80] or None
+        email = (outcome.requester_email or "").lower() or None
+        existing = None
+        if tag:
+            existing = self.session.exec(
+                select(Asset).where(Asset.tenant_id == self.tenant_id, Asset.tag == tag)
+            ).first()
+        if existing is None and email:
+            existing = self.session.exec(
+                select(Asset).where(
+                    Asset.tenant_id == self.tenant_id,
+                    Asset.assignee_email == email,
+                    Asset.type == category.upper()[:40],
+                    Asset.status.in_(["PENDING_ISSUE", "ISSUED", "ACTIVE"]),  # type: ignore[attr-defined]
+                )
+            ).first()
+        asset = existing or Asset(
+            tenant_id=self.tenant_id,
+            type=category.upper()[:40],
+            name=name,
+            location_id=facts.get("location_id"),
+        )
+        asset.name = name
+        asset.status = status
+        asset.assignee_email = email
+        if tag:
+            asset.tag = tag
+        attrs = dict(asset.attributes or {})
+        attrs["case_reference"] = outcome.case_reference
+        asset.attributes = attrs
+        asset.updated_at = utcnow()
+        self.session.add(asset)
+        _set_facts(self.session, outcome, asset_id=asset.asset_id, asset_status=status)
 
     def _send_reply(
         self, event: RawEmailEvent, conversation: Conversation, outcome: Optional[Outcome], body: str, results: list[dict]
@@ -1917,6 +2036,14 @@ class AdminDesk:
         return {"applied": True, "action": "priority", "priority": new}
 
     def _resolve(self, outcome: Outcome, *, note: str, actor: str, evidence: str) -> None:
+        facts = outcome.facts or {}
+        if facts.get("bulk_reorder") and re.search(r"\b(?:confirm\s+received|received|refilled?|delivered)\b", note or "", re.I):
+            filled = refill_from_confirm(self.session, outcome, note or "")
+            if filled:
+                note = (note or "Completed") + "\nStock refilled: " + "; ".join(filled)
+        cat = facts.get("agent_category") or ""
+        if cat in {"laptop", "asset", "phone_sim", "access_card"}:
+            self._touch_asset(outcome, status="ISSUED")
         _set_facts(self.session, outcome, agent_stage="RESOLVED", resolution_note=note or "Completed", resolved_by=actor,
                    resolved_at=utcnow().isoformat(), evidence_status=evidence)
         if outcome.status != OutcomeStatus.RESOLVED.value:

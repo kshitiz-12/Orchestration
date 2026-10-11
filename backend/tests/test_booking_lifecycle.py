@@ -393,6 +393,28 @@ def test_reply_to_cloudmailin_bare_message_id_is_trusted(session: Session, env):
     assert result["status"] == "admin_command" and result["sender_verification"] == "reply_to_our_mail"
 
 
+def test_gmail_plus_tag_recipient_accepts_base_from_reply(session: Session, env):
+    """Work order to team+tag@gmail.com; Gmail replies From team@gmail.com."""
+    _set(env, ADMIN_SENDER_VERIFICATION="strict", ADMIN_FYI_LEVEL="all")
+    tid = _tenant(session)
+    case = Case(session, tid, "t-plus-tag", _facts())
+    briefing = case.mails(ADMIN)[-1]
+    briefing.provider_message_id = "<wo-plus@cloudmta.net>"
+    briefing.recipients = ["flexxftw12+facilities@gmail.com"]
+    session.add(briefing)
+    session.commit()
+    ev = _admin_event(
+        session,
+        tid,
+        case.outcome,
+        "book Auditorium A",
+        sender="Facilities <flexxftw12@gmail.com>",
+        headers={"In-Reply-To": "<wo-plus@cloudmta.net>"},
+    )
+    result = ProcessingPipeline(session, tid).process_event(ev.event_id)
+    assert result["status"] == "admin_command" and result["sender_verification"] == "reply_to_our_mail"
+
+
 def test_spf_pass_for_sender_domain_is_trusted(session: Session, env):
     _set(env, ADMIN_SENDER_VERIFICATION="strict")
     tid = _tenant(session)

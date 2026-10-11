@@ -35,6 +35,11 @@ async def lifespan(_: FastAPI):
         run_migrations=settings.run_migrations_on_startup,
     )
 
+    if settings.is_production and not (settings.admin_ops_email or "").strip():
+        raise RuntimeError(
+            "ADMIN_OPS_EMAIL is required in production — set the company admin mailbox used for ops mail."
+        )
+
     try:
         init_db()
         ensure_seeded()

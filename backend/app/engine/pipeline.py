@@ -486,13 +486,16 @@ class ProcessingPipeline:
 
     def _maybe_handle_admin_reply(self, event: RawEmailEvent) -> Optional[dict]:
         """Ops mailbox and department replies are commands on an existing case, not requester mail."""
-        from app.agent.directory import department_emails
+        from app.agent.directory import base_mailbox, department_emails
         from app.services.site_services import cost_centre_approver_emails
 
         addr = sender_address(event.sender)
+        dept_mail = department_emails(self.session, self.tenant_id)
+        # Team mail may be stored as user+tag@…; Gmail always replies as user@…
         if (
             not is_admin_sender(event.sender)
-            and addr not in department_emails(self.session, self.tenant_id)
+            and addr not in dept_mail
+            and base_mailbox(addr) not in dept_mail
             and addr not in cost_centre_approver_emails(self.session, self.tenant_id)
         ):
             return None

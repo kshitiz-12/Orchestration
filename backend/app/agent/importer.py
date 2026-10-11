@@ -17,7 +17,7 @@ from sqlmodel import Session, select
 
 from app.agent.places import PLACE_TYPES
 from app.models.company import CostCentre, Department, KnowledgeEntry, SiteService
-from app.models.org import Location, Person, Resource, Vendor
+from app.models.org import Location, Person, Resource, StockSku, Vendor
 
 TEMPLATES: dict[str, list[str]] = {
     "locations": ["code", "name", "type", "parent_code", "aliases"],
@@ -26,6 +26,7 @@ TEMPLATES: dict[str, list[str]] = {
                     "spend_approval_limit", "location"],
     "resources": ["name", "type", "capacity", "floor", "video_conferencing", "display", "near_department"],
     "vendors": ["name", "category", "contact_email", "location"],
+    "stock": ["sku_code", "name", "qty_on_hand", "reorder_min", "reorder_qty", "unit", "location", "vendor_email"],
     "knowledge": ["key", "section", "title", "content"],
     "site_services": ["site", "code", "name", "delivery_model", "owner_department", "unit", "rate", "included_limit",
                       "premium_triggers", "premium_rate", "provider"],
@@ -39,6 +40,7 @@ IMPORT_ORDER = [
     "employees",
     "resources",
     "vendors",
+    "stock",
     "knowledge",
     "site_services",
     "cost_centres",
@@ -54,6 +56,7 @@ EXAMPLES: dict[str, list[str]] = {
                     "", "", "8", "0", "PUN"],
     "resources": ["Board Room 1", "MEETING_ROOM", "12", "3", "yes", "yes", "Sales"],
     "vendors": ["QuickRide Corporate Cabs", "transport", "bookings@quickride.com", "Gurugram"],
+    "stock": ["STAPLER", "Stapler", "12", "4", "24", "each", "PUN", "supplies@vendor.com"],
     "knowledge": ["faq_canteen", "faq", "Canteen timings", "Canteen is open 8:30 AM - 6 PM on weekdays."],
 }
 
@@ -188,12 +191,54 @@ def _num(value: str, default: float = 0.0) -> float:
         return default
 
 
+def _places_cache(session: Session, tid: str) -> list[Location]:
+    """One locations query per import pass (location_by_ref used to re-select every row)."""
+    cache = getattr(session, "_import_places_cache", None)
+    if cache is None or cache[0] != tid:
+        rows = list(session.exec(select(Location).where(Location.tenant_id == tid)).all())
+        cache = (tid, rows)
+        setattr(session, "_import_places_cache", cache)
+    return cache[1]
+
+
+def _invalidate_places_cache(session: Session) -> None:
+    if hasattr(session, "_import_places_cache"):
+        delattr(session, "_import_places_cache")
+
+
+def _people_by_email(session: Session, tid: str) -> dict[str, Person]:
+    cache = getattr(session, "_import_people_cache", None)
+    if cache is None or cache[0] != tid:
+        rows = list(session.exec(select(Person).where(Person.tenant_id == tid)).all())
+        cache = (tid, {p.email.lower(): p for p in rows if p.email})
+        setattr(session, "_import_people_cache", cache)
+    return cache[1]
+
+
+def _depts_by_code(session: Session, tid: str) -> dict[str, Department]:
+    cache = getattr(session, "_import_depts_cache", None)
+    if cache is None or cache[0] != tid:
+        rows = list(session.exec(select(Department).where(Department.tenant_id == tid)).all())
+        cache = (tid, {d.code.upper(): d for d in rows if d.code})
+        setattr(session, "_import_depts_cache", cache)
+    return cache[1]
+
+
+def _resources_by_name(session: Session, tid: str) -> dict[str, Resource]:
+    cache = getattr(session, "_import_resources_cache", None)
+    if cache is None or cache[0] != tid:
+        rows = list(session.exec(select(Resource).where(Resource.tenant_id == tid)).all())
+        cache = (tid, {r.name.lower(): r for r in rows if r.name})
+        setattr(session, "_import_resources_cache", cache)
+    return cache[1]
+
+
 def location_by_ref(session: Session, tid: str, ref: str) -> Location | None:
     """A place by its code (preferred) or exact name."""
     ref = (ref or "").strip()
     if not ref:
         return None
-    rows = session.exec(select(Location).where(Location.tenant_id == tid)).all()
+    rows = _places_cache(session, tid)
     by_code = [p for p in rows if (p.code or "").lower() == ref.lower()]
     if by_code:
         return by_code[0]
@@ -236,6 +281,9 @@ def _import_kind_rows(
     created, updated, errors = 0, 0, []
     preview = []
     ordered = _parents_first(rows) if kind == "locations" else list(enumerate(rows, start=2))
+    # Locations need frequent flush for parent_code; other kinds batch heavily.
+    flush_every = 1 if kind == "locations" else 200
+    pending = 0
     for i, row in ordered:
         try:
             action, label = handler(session, tenant_id, row, apply=apply)
@@ -244,8 +292,19 @@ def _import_kind_rows(
             continue
         created += action == "new"
         updated += action == "update"
+        if apply:
+            pending += 1
+            if pending >= flush_every:
+                session.flush()
+                if kind == "locations":
+                    _invalidate_places_cache(session)
+                pending = 0
         if len(preview) < 50:
             preview.append({"row": i, "kind": kind, "action": action, "item": label})
+    if apply and pending:
+        session.flush()
+        if kind == "locations":
+            _invalidate_places_cache(session)
     preview.sort(key=lambda p: p["row"])
     return {
         "kind": kind,
@@ -273,16 +332,31 @@ def run_import(session: Session, tenant_id: str, kind: str, rows: list[dict[str,
 def run_bundle_import(
     session: Session, tenant_id: str, bundles: dict[str, list[dict[str, str]]], *, commit: bool, source: str = "structured"
 ) -> dict:
-    """Import several kinds in dependency order. Always applies mid-flight so later sheets can resolve places; rolls back if not committing."""
+    """Import several kinds in dependency order.
+
+    Preview (commit=False) only applies locations (so place refs resolve) and dry-runs
+    the rest — a full apply+rollback of 1k+ rows freezes Render's single worker.
+
+    Commit mode saves each sheet as it finishes so a mid-file timeout doesn't lose
+    earlier sheets, and raises the session statement timeout for bulk loads.
+    """
+    from sqlalchemy import text
+
     parts: list[dict] = []
+    if commit:
+        session.execute(text("SET LOCAL statement_timeout = '300s'"))
     for kind in IMPORT_ORDER:
         rows = bundles.get(kind) or []
         if not rows:
             continue
-        parts.append(_import_kind_rows(session, tenant_id, kind, rows, apply=True))
-    if commit:
-        session.commit()
-    else:
+        apply = commit or kind == "locations"
+        part = _import_kind_rows(session, tenant_id, kind, rows, apply=apply)
+        parts.append(part)
+        if commit:
+            session.commit()
+            _invalidate_places_cache(session)
+            session.execute(text("SET LOCAL statement_timeout = '300s'"))
+    if not commit:
         session.rollback()
     errors = [e for p in parts for e in p["errors"]]
     preview = [row for p in parts for row in p["preview"]][:80]
@@ -428,7 +502,6 @@ def _import_locations(session: Session, tid: str, row: dict, *, apply: bool) -> 
         if row.get("aliases") is not None and row.get("aliases") != "":
             place.alias = "; ".join(_list(row["aliases"]))
         session.add(place)
-        session.flush()
     return action, f"{ptype} {code} - {name}" + (f" (in {parent.name})" if parent else "")
 
 
@@ -440,13 +513,17 @@ def _import_employees(session: Session, tid: str, row: dict, *, apply: bool) -> 
     if not name:
         raise ValueError("name is required")
     place = _location_or_error(session, tid, row.get("location") or "")
-    person = session.exec(select(Person).where(Person.email == email)).first()
+    people = _people_by_email(session, tid)
+    person = people.get(email)
     action = "update" if person else "new"
     manager = None
-    if row.get("manager_email"):
-        manager = session.exec(select(Person).where(Person.email == row["manager_email"].lower())).first()
+    mgr_email = (row.get("manager_email") or "").lower().strip()
+    if mgr_email:
+        manager = people.get(mgr_email)
     if apply:
-        person = person or Person(tenant_id=tid, email=email, name=name)
+        if person is None:
+            person = Person(tenant_id=tid, email=email, name=name)
+            people[email] = person
         person.name = name
         person.department = row.get("department") or person.department
         person.role = (row.get("role") or person.role or "EMPLOYEE").upper()
@@ -455,22 +532,72 @@ def _import_employees(session: Session, tid: str, row: dict, *, apply: bool) -> 
         if place:
             person.site_id = place.location_id
         session.add(person)
-        session.flush()
     return action, f"{name} <{email}>" + (f" @ {place.name}" if place else "")
 
 
+def _family_token(name: str) -> str:
+    """Map a department name to a short family code (FACILITIES, IT, …)."""
+    text = (name or "").upper()
+    aliases = (
+        ("FACILIT", "FACILITIES"),
+        ("MAINT", "FACILITIES"),
+        ("HOUSEKEEP", "HOUSEKEEPING"),
+        ("TRAVEL", "TRAVEL"),
+        ("SECURITY", "SECURITY"),
+        ("PROCURE", "PROCUREMENT"),
+        ("CAFETERIA", "CAFETERIA"),
+        ("CATERING", "CAFETERIA"),
+        ("FINANCE", "FINANCE"),
+        ("ACCOUNT", "FINANCE"),
+        ("HUMAN", "HR"),
+        ("PEOPLE", "HR"),
+        ("ADMIN", "ADMIN"),
+        ("TECH", "IT"),
+    )
+    if re.search(r"\bHR\b", text):
+        return "HR"
+    if re.search(r"\bIT\b", text):
+        return "IT"
+    for needle, code in aliases:
+        if needle in text:
+            return code
+    token = re.sub(r"[^A-Z0-9]+", "_", text).strip("_").split("_")[0]
+    return (token or "TEAM")[:20]
+
+
+def _autocode_department(name: str, place: Optional[Location]) -> str:
+    family = _family_token(name)
+    if place is None:
+        return family
+    loc = re.sub(r"[^A-Z0-9]+", "_", (place.alias or place.name or "").upper()).strip("_")
+    loc = loc[:24] or place.location_id[:8].upper()
+    return f"{family}_{loc}"
+
+
 def _import_departments(session: Session, tid: str, row: dict, *, apply: bool) -> tuple[str, str]:
-    code = re.sub(r"[^A-Z0-9_]+", "_", (row.get("code") or "").upper()).strip("_")
-    if not code or not row.get("name"):
-        raise ValueError("code and name are required")
-    for field in ("primary_email", "approver_email"):
-        if row.get(field) and not _EMAIL.match(row[field].lower()):
-            raise ValueError(f"invalid {field} '{row[field]}'")
+    if not row.get("name"):
+        raise ValueError("name is required")
     place = _location_or_error(session, tid, row.get("location") or "")
-    dept = session.exec(select(Department).where(Department.tenant_id == tid, Department.code == code)).first()
+    code = re.sub(r"[^A-Z0-9_]+", "_", (row.get("code") or "").upper()).strip("_")
+    if not code:
+        code = _autocode_department(row["name"], place)
+    for field in ("primary_email", "approver_email"):
+        raw = (row.get(field) or "").strip().lower()
+        if not raw:
+            continue
+        if "+" in raw.split("@", 1)[0]:
+            raise ValueError(
+                f"{field} must be a normal mailbox (no Gmail +tag aliases) — got '{row[field]}'"
+            )
+        if not _EMAIL.match(raw):
+            raise ValueError(f"invalid {field} '{row[field]}'")
+    depts = _depts_by_code(session, tid)
+    dept = depts.get(code)
     action = "update" if dept else "new"
     if apply:
-        dept = dept or Department(tenant_id=tid, code=code, name=row["name"])
+        if dept is None:
+            dept = Department(tenant_id=tid, code=code, name=row["name"])
+            depts[code] = dept
         dept.name = row["name"]
         if row.get("categories"):
             dept.categories = [c.lower().replace(" ", "_") for c in _list(row["categories"])]
@@ -487,21 +614,85 @@ def _import_departments(session: Session, tid: str, row: dict, *, apply: bool) -
         if place:
             dept.location_id = place.location_id
         session.add(dept)
-        session.flush()
     return action, f"{code} - {row['name']}" + (f" @ {place.name}" if place else "")
+
+
+def _import_stock(session: Session, tid: str, row: dict, *, apply: bool) -> tuple[str, str]:
+    code = re.sub(r"[^A-Z0-9_]+", "_", (row.get("sku_code") or row.get("code") or "").upper()).strip("_")
+    name = (row.get("name") or "").strip()
+    if not code or not name:
+        raise ValueError("sku_code and name are required")
+    place = _location_or_error(session, tid, row.get("location") or "")
+    vendor_email = (row.get("vendor_email") or "").strip().lower()
+    vendor = None
+    if vendor_email:
+        if not _EMAIL.match(vendor_email):
+            raise ValueError(f"invalid vendor_email '{row.get('vendor_email')}'")
+        vendor = session.exec(
+            select(Vendor).where(Vendor.tenant_id == tid, Vendor.contact_email == vendor_email)
+        ).first()
+    loc_id = place.location_id if place else None
+    q = select(StockSku).where(StockSku.tenant_id == tid, StockSku.sku_code == code)
+    if loc_id:
+        existing = session.exec(q.where(StockSku.location_id == loc_id)).first()
+    else:
+        existing = session.exec(q.where(StockSku.location_id.is_(None))).first()  # type: ignore[attr-defined]
+        if existing is None:
+            existing = session.exec(q).first()
+    action = "update" if existing else "new"
+    if apply:
+        sku = existing or StockSku(tenant_id=tid, sku_code=code, name=name)
+        sku.name = name
+        sku.sku_code = code
+        if row.get("qty_on_hand") not in (None, ""):
+            sku.qty_on_hand = _num(row.get("qty_on_hand"), sku.qty_on_hand)
+        if row.get("reorder_min") not in (None, ""):
+            sku.reorder_min = _num(row.get("reorder_min"), sku.reorder_min)
+        if row.get("reorder_qty") not in (None, ""):
+            sku.reorder_qty = _num(row.get("reorder_qty"), sku.reorder_qty)
+        if row.get("unit"):
+            sku.unit = str(row["unit"]).strip()[:40]
+        if place:
+            sku.location_id = place.location_id
+        if vendor:
+            sku.vendor_id = vendor.vendor_id
+        session.add(sku)
+    return action, f"{code} - {name}" + (f" @ {place.name}" if place else "")
+
+
+_RESOURCE_TYPES = {
+    "MEETING_ROOM", "PARKING_SLOT", "DESK", "CABIN", "LOCKER",
+    "TRAINING_ROOM", "PROJECTOR", "PANTRY", "FIRST_AID_STATION", "SERVER_ROOM",
+}
+_RESOURCE_ALIASES = {
+    "MEETINGROOM": "MEETING_ROOM",
+    "PARKING": "PARKING_SLOT",
+    "PARKING_SLOT": "PARKING_SLOT",
+    "TRAININGROOM": "TRAINING_ROOM",
+    "FIRSTAID": "FIRST_AID_STATION",
+    "FIRST_AID": "FIRST_AID_STATION",
+    "SERVERROOM": "SERVER_ROOM",
+}
 
 
 def _import_resources(session: Session, tid: str, row: dict, *, apply: bool) -> tuple[str, str]:
     name = row.get("name") or ""
-    rtype = (row.get("type") or "MEETING_ROOM").upper().replace(" ", "_")
+    raw_type = (row.get("type") or "MEETING_ROOM").upper().replace(" ", "_").replace("-", "_")
+    rtype = _RESOURCE_ALIASES.get(raw_type.replace("_", ""), raw_type)
+    rtype = _RESOURCE_ALIASES.get(rtype, rtype)
     if not name:
         raise ValueError("name is required")
-    if rtype not in {"MEETING_ROOM", "PARKING_SLOT", "DESK", "CABIN", "LOCKER"}:
-        raise ValueError(f"type must be MEETING_ROOM, PARKING_SLOT, DESK, CABIN or LOCKER (got '{rtype}')")
-    res = session.exec(select(Resource).where(Resource.tenant_id == tid, Resource.name == name)).first()
+    if rtype not in _RESOURCE_TYPES:
+        raise ValueError(
+            f"type must be one of {', '.join(sorted(_RESOURCE_TYPES))} (got '{row.get('type')}')"
+        )
+    by_name = _resources_by_name(session, tid)
+    res = by_name.get(name.lower())
     action = "update" if res else "new"
     if apply:
-        res = res or Resource(tenant_id=tid, type=rtype, name=name)
+        if res is None:
+            res = Resource(tenant_id=tid, type=rtype, name=name)
+            by_name[name.lower()] = res
         res.type = rtype
         attrs = dict(res.attributes or {})
         if row.get("capacity"):
@@ -516,7 +707,6 @@ def _import_resources(session: Session, tid: str, row: dict, *, apply: bool) -> 
             attrs["near_department"] = row["near_department"]
         res.attributes = attrs
         session.add(res)
-        session.flush()
     return action, f"{rtype} {name}"
 
 
@@ -533,7 +723,6 @@ def _import_vendors(session: Session, tid: str, row: dict, *, apply: bool) -> tu
         vendor.contact_email = email
         vendor.location = row.get("location") or vendor.location
         session.add(vendor)
-        session.flush()
     return action, name
 
 
@@ -549,21 +738,28 @@ def _import_knowledge(session: Session, tid: str, row: dict, *, apply: bool) -> 
         entry.section = row.get("section") or entry.section
         entry.content = row["content"]
         session.add(entry)
-        session.flush()
     return action, row.get("title") or key
 
 
 _DELIVERY_MODELS = {"INCLUDED", "CONTRACT", "SUBSIDISED", "CHARGEABLE", "OUTSOURCED"}
+_DELIVERY_ALIASES = {
+    "INTERNAL": "INCLUDED",
+    "IN_HOUSE": "INCLUDED",
+    "INHOUSE": "INCLUDED",
+    "VENDOR": "OUTSOURCED",
+    "EXTERNAL": "OUTSOURCED",
+}
 
 
 def _import_site_services(session: Session, tid: str, row: dict, *, apply: bool) -> tuple[str, str]:
     code = _key(row.get("code") or row.get("name"))
     site = (row.get("site") or "Corporate Office").strip()
-    model = (row.get("delivery_model") or "INCLUDED").strip().upper()
+    model = (row.get("delivery_model") or "INCLUDED").strip().upper().replace(" ", "_").replace("-", "_")
+    model = _DELIVERY_ALIASES.get(model, model)
     if not code or not row.get("name"):
         raise ValueError("code and name are required")
     if model not in _DELIVERY_MODELS:
-        raise ValueError(f"delivery_model must be one of {', '.join(sorted(_DELIVERY_MODELS))} (got '{model}')")
+        raise ValueError(f"delivery_model must be one of {', '.join(sorted(_DELIVERY_MODELS))} (got '{row.get('delivery_model')}')")
     svc = session.exec(
         select(SiteService).where(SiteService.tenant_id == tid, SiteService.site == site, SiteService.code == code)
     ).first()
@@ -585,7 +781,6 @@ def _import_site_services(session: Session, tid: str, row: dict, *, apply: bool)
         if row.get("provider"):
             svc.provider = row["provider"]
         session.add(svc)
-        session.flush()
     return action, f"{site}: {code} ({model})"
 
 
@@ -606,5 +801,4 @@ def _import_cost_centres(session: Session, tid: str, row: dict, *, apply: bool) 
         if email:
             cc.approver_email = email
         session.add(cc)
-        session.flush()
     return action, f"{code} - {row['name']}"

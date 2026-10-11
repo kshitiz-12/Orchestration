@@ -103,6 +103,7 @@ def _spf(envelope: Any) -> tuple[str, str]:
 
 def verify_ops_sender(session: Session, tenant_id: str, headers: Any, sender: str) -> tuple[bool, str]:
     """A From header is trivially spoofed; require SPF/DKIM for the sender's domain or a reply to our own mail."""
+    from app.agent.directory import base_mailbox
     from app.core.config import get_settings
     from app.models.outcome import Communication
 
@@ -132,9 +133,15 @@ def verify_ops_sender(session: Session, tenant_id: str, headers: Any, sender: st
                 | (Communication.gmail_message_id.in_(variants)),  # type: ignore[union-attr]
             )
         ).all()
+        sender_base = base_mailbox(sender)
         for row in rows:
-            if sender in [str(r).strip().lower() for r in (row.recipients or [])]:
-                return True, "reply_to_our_mail"
+            # Gmail delivers team+tag@… but replies From as team@… — treat as the same mailbox.
+            for recipient in row.recipients or []:
+                r = str(recipient).strip().lower()
+                if not r:
+                    continue
+                if sender == r or sender_base == base_mailbox(r):
+                    return True, "reply_to_our_mail"
     return False, "unverified"
 
 

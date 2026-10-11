@@ -194,7 +194,7 @@ class CommunicationService:
         )
         from_addr = sender or (
             self.email_sender.get_account_email() if self.email_sender else None
-        ) or "orchestration@prototype.local"
+        ) or "workplace-desk@localhost"
 
         def _execute():
             nonlocal body

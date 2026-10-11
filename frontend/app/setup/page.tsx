@@ -1039,16 +1039,29 @@ function ImportTab({ onChange, setMsg }: TabProps) {
         )}
         <div className="row" style={{ marginTop: "0.75rem" }}>
           <button className="btn secondary" disabled={!file || busy} onClick={() => run(false)}>
-            Preview
+            {busy ? "Working…" : "Preview"}
           </button>
           <button
             className="btn accent"
-            disabled={!file || busy || !result || result.committed || result.new + result.updated === 0}
-            onClick={() => run(true)}
+            disabled={!file || busy || (result?.committed === true)}
+            onClick={() => {
+              if (
+                !result &&
+                !window.confirm(
+                  "Import and save this file now? Large company files can take a few minutes."
+                )
+              ) {
+                return;
+              }
+              run(true);
+            }}
           >
-            Confirm import
+            {busy ? "Importing…" : "Import & save"}
           </button>
         </div>
+        <p className="muted" style={{ marginTop: "0.65rem", fontSize: "0.82rem" }}>
+          Large files (hundreds of employees) — use Import &amp; save directly. Preview can time out on the free API.
+        </p>
 
         {result && (
           <div style={{ marginTop: "1rem" }}>

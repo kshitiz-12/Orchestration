@@ -37,7 +37,7 @@ DEFAULT_KNOWLEDGE: list[dict] = [
         "section": "company",
         "title": "Company profile",
         "content": (
-            "Acme Corp (sample data). The Workplace / Admin Desk handles meeting rooms, visitors, parking, "
+            "Company Workplace / Admin Desk (sample knowledge). Handles meeting rooms, visitors, parking, "
             "facility issues, IT help routing, supplies, travel, onboarding logistics and vendor invoices. "
             "Employees reach us by simply emailing this mailbox."
         ),
@@ -49,7 +49,7 @@ DEFAULT_KNOWLEDGE: list[dict] = [
         "content": (
             "Corporate Office, Gurugram (primary): Tower B, Cyber City, DLF Phase 2, Gurugram 122002. "
             "Hours Mon-Fri 9:00 AM-7:00 PM, Sat 10:00 AM-2:00 PM.\n"
-            "Acme HQ Bengaluru: Outer Ring Road, Bellandur, Bengaluru 560103. Hours Mon-Fri 9:00 AM-6:30 PM.\n"
+            "Bengaluru office: Outer Ring Road, Bellandur, Bengaluru 560103. Hours Mon-Fri 9:00 AM-6:30 PM.\n"
             "Admin desk is on the ground floor reception at both offices."
         ),
     },

@@ -53,13 +53,21 @@ export default function HomePage() {
   const employees = Number(setup?.employees || 0);
   const locations = Number(setup?.locations || 0);
   const deptsPending = Array.isArray(setup?.departments_needing_setup) ? setup.departments_needing_setup.length : 0;
-  const companyReady = employees > 1 && locations > 0 && deptsPending === 0;
+  const dataLoaded = employees > 1 && locations > 0;
+  const companyReady = dataLoaded && deptsPending === 0;
 
   const nextSteps: { title: string; detail: string; href: string; tone: "warn" | "danger" | "ok" | "neutral" }[] = [];
-  if (!companyReady) {
+  if (!dataLoaded) {
     nextSteps.push({
-      title: "Finish company setup",
-      detail: "Upload branches, teams, and employees so mail can be routed correctly.",
+      title: "Upload company Excel",
+      detail: "Add offices, teams, and employees so mail can be routed correctly.",
+      href: "/setup",
+      tone: "warn",
+    });
+  } else if (deptsPending > 0) {
+    nextSteps.push({
+      title: `${deptsPending} teams still need a work email`,
+      detail: "Until then, their work orders go to the main admin mailbox.",
       href: "/setup",
       tone: "warn",
     });
@@ -130,7 +138,7 @@ export default function HomePage() {
         </div>
       )}
 
-      {!companyReady && (
+      {!dataLoaded && (
         <div className="setup-hero">
           <div>
             <h2>Get your company ready</h2>
@@ -158,6 +166,15 @@ export default function HomePage() {
               Check mail inbox
             </Link>
           </div>
+        </div>
+      )}
+
+      {dataLoaded && !companyReady && (
+        <div className="next-card tone-warn" style={{ marginBottom: "1.15rem" }}>
+          <strong>{deptsPending} teams still use a placeholder mailbox</strong>
+          <span>
+            Employee directory is loaded. Work for those teams goes to Admin Ops until you set a real team email under Company data → Teams.
+          </span>
         </div>
       )}
 

@@ -104,6 +104,28 @@ class Asset(TimestampMixin, table=True):
     vendor_id: Optional[str] = Field(default=None, foreign_key="vendors.vendor_id")
     contract_id: Optional[str] = Field(default=None, foreign_key="contracts.contract_id")
     status: str = "ACTIVE"
+    assignee_email: Optional[str] = Field(default=None, index=True)
+    tag: Optional[str] = Field(default=None, index=True)
+    attributes: dict = Field(default_factory=dict, sa_column=Column(JSON))
+
+
+class StockSku(TimestampMixin, table=True):
+    """Branch/store SKU for supplies — qty + reorder mins for mail-driven auto reorder."""
+
+    __tablename__ = "stock_skus"
+    __table_args__ = (UniqueConstraint("tenant_id", "sku_code", "location_id", name="uq_stock_sku_place"),)
+
+    sku_id: str = Field(default_factory=lambda: new_id("sku_"), primary_key=True)
+    tenant_id: str = Field(foreign_key="tenants.tenant_id", index=True)
+    location_id: Optional[str] = Field(default=None, foreign_key="locations.location_id", index=True)
+    sku_code: str = Field(index=True)
+    name: str
+    qty_on_hand: float = 0.0
+    reorder_min: float = 0.0
+    reorder_qty: float = 0.0
+    unit: str = "each"
+    vendor_id: Optional[str] = Field(default=None, foreign_key="vendors.vendor_id")
+    status: str = "ACTIVE"
     attributes: dict = Field(default_factory=dict, sa_column=Column(JSON))
 
 

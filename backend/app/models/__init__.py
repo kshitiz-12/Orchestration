@@ -30,6 +30,7 @@ from app.models.org import (
     Resource,
     RoomBooking,
     ServiceCatalog,
+    StockSku,
     Tenant,
     Vendor,
 )
@@ -53,6 +54,7 @@ __all__ = [
     "Resource",
     "RoomBooking",
     "Asset",
+    "StockSku",
     "ServiceCatalog",
     "Vendor",
     "Contract",

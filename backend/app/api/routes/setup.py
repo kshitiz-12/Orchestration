@@ -74,6 +74,9 @@ def _clean_email(value: Optional[str]) -> Optional[str]:
 def _dept_out(d: Department, labels: Optional[dict[str, str]] = None) -> dict:
     emails = [d.primary_email, *(d.backup_emails or [])]
     real = [e for e in emails if e and not is_placeholder(e)]
+    # Blank mailbox is OK — routing walks up the place tree / Admin Ops.
+    # Only a fake placeholder like @example.invalid means setup is still needed.
+    needs_setup = bool(d.primary_email and is_placeholder(d.primary_email))
     return {
         "department_id": d.department_id,
         "code": d.code,
@@ -89,7 +92,8 @@ def _dept_out(d: Department, labels: Optional[dict[str, str]] = None) -> dict:
         "is_active": d.is_active,
         "notes": d.notes,
         "handover_info": d.handover_info,
-        "needs_setup": not real,
+        "needs_setup": needs_setup,
+        "has_mailbox": bool(real),
     }
 
 

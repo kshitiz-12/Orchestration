@@ -57,6 +57,10 @@ export async function api<T = any>(path: string, options: RequestInit = {}): Pro
     }
     if (res.status === 401) {
       clearToken();
+      // Login failures should show the API message, not "session expired".
+      if (path.includes("/auth/login")) {
+        throw new Error(typeof detail === "string" && detail ? detail : "Invalid credentials");
+      }
       throw new Error("Session expired — sign in again.");
     }
     throw new Error(detail || `Request failed (${res.status})`);
