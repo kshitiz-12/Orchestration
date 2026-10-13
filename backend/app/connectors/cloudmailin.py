@@ -107,12 +107,19 @@ def normalize_cloudmailin_payload(payload: dict[str, Any]) -> NormalizedEmailEve
     for att in payload.get("attachments") or []:
         if not isinstance(att, dict):
             continue
+        content = att.get("content") or att.get("content_base64")
+        content_b64 = content if isinstance(content, str) and content.strip() else None
+        size = int(att.get("size") or 0)
+        if not size and content_b64:
+            # Approximate from base64 length when CloudMailin omits size
+            size = max(0, (len(content_b64) * 3) // 4)
         attachments.append(
             NormalizedAttachment(
                 filename=att.get("file_name") or att.get("filename") or "attachment",
                 mime_type=att.get("content_type") or att.get("contentType"),
-                size=int(att.get("size") or 0),
+                size=size,
                 attachment_id=None,
+                content_base64=content_b64,
             )
         )
 

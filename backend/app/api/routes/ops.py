@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from sqlmodel import select
 
-from app.api.deps import SessionDep, TenantDep, UserDep
+from app.api.deps import CompanyAdminDep, SessionDep, TenantDep, UserDep
 from app.ai.gemini import GeminiProvider
 from app.ai.service import LLMService
 from app.connectors.mocks import MockERPConnector
@@ -137,7 +137,7 @@ def list_vendors(session: SessionDep, tenant_id: TenantDep, _user: UserDep):
 
 
 @router.post("/demo/reset")
-def reset_demo_data(session: SessionDep, tenant_id: TenantDep, user: UserDep):
+def reset_demo_data(session: SessionDep, tenant_id: TenantDep, user: CompanyAdminDep):
     """Clear emails, outcomes, reviews and free rooms — keep org seed masters."""
     result = reset_demo_operational_data(session, tenant_id)
     AuditService(session).record(

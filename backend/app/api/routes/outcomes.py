@@ -708,18 +708,16 @@ def decide_approval(
     tenant_id: TenantDep,
     user: UserDep,
 ):
+    from app.api.deps import DASHBOARD_OPS_ROLES
     from app.services.approval_actions import apply_decision
 
+    if (user.role or "").strip().upper() not in DASHBOARD_OPS_ROLES:
+        raise HTTPException(403, "Ops dashboard role required to decide approvals")
     approval = session.get(Approval, approval_id)
     if not approval or approval.tenant_id != tenant_id:
         raise HTTPException(404, "Approval not found")
     if payload.decision not in {"APPROVED", "REJECTED"}:
-        approval.decision = payload.decision
-        approval.reason = payload.reason
-        approval.decided_at = utcnow()
-        session.add(approval)
-        session.commit()
-        return approval
+        raise HTTPException(400, "decision must be APPROVED or REJECTED")
     if approval.decision != "PENDING":
         raise HTTPException(409, f"Approval already {approval.decision.lower()}")
     apply_decision(

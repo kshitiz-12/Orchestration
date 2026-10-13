@@ -13,7 +13,6 @@ from app.services.email_utils import (
     compute_idempotency_key,
     safety_scan_email,
     strip_for_ai,
-    validate_attachment,
 )
 
 logger = get_logger(__name__)
@@ -43,6 +42,12 @@ class IntakeService:
         attachments: Optional[list[dict[str, Any]]] = None,
         headers: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
+        src = (source or "").strip().upper()
+        if src == "API":
+            from app.services.admin_commands import sanitize_api_email_headers
+
+            headers = sanitize_api_email_headers(headers)
+
         idem = compute_idempotency_key(message_id, source)
         existing = self.session.exec(
             select(RawEmailEvent).where(RawEmailEvent.idempotency_key == idem)
@@ -65,16 +70,18 @@ class IntakeService:
                 "processing_id": existing.processing_id,
             }
 
+        from app.services.attachment_extract import persist_and_extract_attachment
+
+        event_key = idem.replace(":", "_")[:80]
         attachment_meta = []
         for att in attachments or []:
-            flags = validate_attachment(
-                att.get("filename", "unknown"),
-                int(att.get("size", 0)),
-                att.get("content_bytes"),
+            # Persist PDF/bytes to disk, extract text, never keep raw content in DB JSON
+            meta = persist_and_extract_attachment(
+                att if isinstance(att, dict) else {},
+                tenant_id=self.tenant_id,
+                event_key=event_key,
             )
-            safe = {k: v for k, v in att.items() if k != "content_bytes"}
-            safe["validation"] = flags
-            attachment_meta.append(safe)
+            attachment_meta.append(meta)
 
         safety = safety_scan_email(subject, body_text)
         event = RawEmailEvent(
@@ -211,7 +218,12 @@ class JobQueueService:
         self.session.refresh(job)
         return job
 
-    def claim_next(self, job_types: Optional[list[str]] = None) -> Optional[ProcessingJob]:
+    def claim_next(
+        self,
+        job_types: Optional[list[str]] = None,
+        *,
+        tenant_id: Optional[str] = None,
+    ) -> Optional[ProcessingJob]:
         now = utcnow()
         stmt = (
             select(ProcessingJob)
@@ -221,6 +233,8 @@ class JobQueueService:
         )
         if job_types:
             stmt = stmt.where(ProcessingJob.job_type.in_(job_types))
+        if tenant_id:
+            stmt = stmt.where(ProcessingJob.tenant_id == tenant_id)
         job = self.session.exec(stmt).first()
         if not job:
             return None

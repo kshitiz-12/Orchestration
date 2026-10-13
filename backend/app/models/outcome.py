@@ -13,6 +13,8 @@ class Outcome(TimestampMixin, table=True):
 
     outcome_id: str = Field(default_factory=lambda: new_id("out_"), primary_key=True)
     tenant_id: str = Field(foreign_key="tenants.tenant_id", index=True)
+    entity_id: Optional[str] = Field(default=None, index=True)
+    site_id: Optional[str] = Field(default=None, index=True)
     case_reference: str = Field(index=True)
     template_id: Optional[str] = Field(default=None, foreign_key="outcome_templates.template_id")
     template_code: str

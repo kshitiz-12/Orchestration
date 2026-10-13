@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from sqlmodel import select
 
-from app.api.deps import SessionDep, TenantDep, UserDep
+from app.api.deps import DashboardOpsDep, SessionDep, TenantDep, UserDep
 from app.engine.pipeline import ProcessingPipeline, process_claimed_job
 from app.models.intake import RawEmailEvent
 from app.schemas.api import EmailIngestRequest
@@ -15,7 +15,7 @@ def ingest_email(
     payload: EmailIngestRequest,
     session: SessionDep,
     tenant_id: TenantDep,
-    _user: UserDep,
+    _user: DashboardOpsDep,
 ):
     service = IntakeService(session, tenant_id)
     return service.ingest(

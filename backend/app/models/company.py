@@ -75,6 +75,15 @@ class SiteService(TimestampMixin, table=True):
     premium_triggers: list = Field(default_factory=list, sa_column=Column(JSON))
     premium_rate: float = 0.0
     evidence_rule: Optional[str] = None
+    # Enterprise catalogue bridges (facilities.docx §4.1)
+    service_family: Optional[str] = None
+    sla_response_hours: Optional[float] = None
+    sla_resolution_hours: Optional[float] = None
+    chargeback_rule_code: Optional[str] = None
+    fulfilment_checklist: list = Field(default_factory=list, sa_column=Column(JSON))
+    closure_codes: list = Field(default_factory=list, sa_column=Column(JSON))
+    primary_vendor_id: Optional[str] = None
+    backup_vendor_id: Optional[str] = None
     effective_from: Optional[str] = None
     effective_to: Optional[str] = None
     is_active: bool = True
@@ -159,3 +168,4 @@ class VisitorPass(TimestampMixin, table=True):
     parking_slot: Optional[str] = None
     purpose: Optional[str] = None
     status: str = "REGISTERED"
+    attributes: dict = Field(default_factory=dict, sa_column=Column(JSON))

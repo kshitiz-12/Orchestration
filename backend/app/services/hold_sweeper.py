@@ -250,6 +250,20 @@ def run_all_sweeps(session: Session, tenant_id: str) -> dict[str, Any]:
         session.rollback()
         logger.warning("sla_tick_failed", error=str(exc))
     try:
+        from app.services.pm_sweeper import sweep_preventive_maintenance
+
+        out["pm"] = sweep_preventive_maintenance(session, tenant_id)
+    except Exception as exc:  # noqa: BLE001
+        session.rollback()
+        logger.warning("pm_sweep_failed", error=str(exc))
+    try:
+        from app.services.workplace import WorkplaceService
+
+        out["visitor_expiry"] = {"expired": WorkplaceService(session, tenant_id).expire_open_passes()}
+    except Exception as exc:  # noqa: BLE001
+        session.rollback()
+        logger.warning("visitor_expiry_failed", error=str(exc))
+    try:
         from app.agent.digest import send_admin_digest
 
         out["digest"] = send_admin_digest(session, tenant_id)

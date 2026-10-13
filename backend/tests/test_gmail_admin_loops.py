@@ -21,7 +21,7 @@ def test_wants_flight_detects_travel_asks():
     assert not wants_flight("need a cab to the airport at 6am")
 
 
-def test_search_flights_returns_structured_details_not_links(monkeypatch):
+def test_search_flights_schedule_only_no_auto_fare(monkeypatch):
     from app.services.flight_search import FlightOption
 
     fake = [
@@ -35,32 +35,19 @@ def test_search_flights_returns_structured_details_not_links(monkeypatch):
             price="INR 4,299",
             origin="DEL",
             destination="BLR",
-            source="amadeus",
-        ),
-        FlightOption(
-            airline="Air India",
-            flight_numbers="AI803 + AI505",
-            depart_at="20 Oct 08:00",
-            arrive_at="20 Oct 13:40",
-            duration="5h 40m",
-            stops="1 stop (BOM, 1h 10m)",
-            price="INR 5,840",
-            origin="DEL",
-            destination="BLR",
-            source="amadeus",
+            source="serpapi",
         ),
     ]
-    monkeypatch.setattr("app.services.flight_search._serpapi_flights", lambda *a, **k: [])
-    monkeypatch.setattr("app.services.flight_search._amadeus_flights", lambda *a, **k: fake)
+    monkeypatch.setattr("app.services.flight_search._serpapi_flights", lambda *a, **k: fake)
+    monkeypatch.setattr("app.services.flight_search._amadeus_flights", lambda *a, **k: [])
     opts = search_flights("Delhi", "Bangalore", "2026-10-20")
-    assert len(opts) == 2
-    assert opts[0].price.startswith("INR")
-    assert "Non-stop" in opts[0].stops
-    assert "BOM" in opts[1].stops
+    assert len(opts) == 1
+    assert "Travel Desk will confirm" in opts[0].price
     mail = format_flight_options_for_mail(opts)
-    assert "Depart:" in mail and "Arrive:" in mail and "Fare:" in mail
+    assert "Depart:" in mail and "Arrive:" in mail
+    assert "Travel Desk will confirm" in mail
     assert "http" not in mail.lower()
-    assert "kayak" not in mail.lower()
+    assert "4,299" not in mail
 
 
 def test_parse_travel_date_and_iata():

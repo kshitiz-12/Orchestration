@@ -68,12 +68,11 @@ def outlook_connect(_session: SessionDep, tenant_id: TenantDep, _user: UserDep):
 def outlook_callback(code: str, state: str, session: SessionDep):
     tenant_id = _oauth_states.pop(state, None)
     if not tenant_id:
-        from app.models.org import Tenant
-
-        tenant = session.exec(select(Tenant)).first()
-        if not tenant:
-            raise HTTPException(400, "Invalid OAuth state and no tenant found")
-        tenant_id = tenant.tenant_id
+        raise HTTPException(
+            400,
+            "Invalid or expired OAuth state — start Connect again from the app. "
+            "Tokens are never bound to a fallback tenant.",
+        )
     try:
         token_payload = outlook_mod.exchange_code_for_token(code)
         row = outlook_mod.save_outlook_credentials(session, tenant_id, token_payload)

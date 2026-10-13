@@ -52,6 +52,7 @@ EXAMPLES: dict[str, list[str]] = {
     "cost_centres": ["SL-1101", "Sales", "Sales", "Rohan Mehta", "rohan.mehta@yourco.com"],
     "locations": ["PUN", "Pune Hinjewadi", "BRANCH", "WEST", "Hinjewadi; Pune office"],
     "employees": ["riya.shah@yourco.com", "Riya Shah", "Engineering", "EMPLOYEE", "priya.manager@yourco.com", "PUN"],
+    # roles: EMPLOYEE | COMPANY_ADMIN | BRANCH_ADMIN | TEAM_OPERATOR (mail authority, not dashboard)
     "departments": ["FACILITIES_PUN", "Facilities - Pune", "maintenance; hvac; electrical", "facilities.pune@yourco.com",
                     "", "", "8", "0", "PUN"],
     "resources": ["Board Room 1", "MEETING_ROOM", "12", "3", "yes", "yes", "Sales"],
@@ -526,7 +527,14 @@ def _import_employees(session: Session, tid: str, row: dict, *, apply: bool) -> 
             people[email] = person
         person.name = name
         person.department = row.get("department") or person.department
-        person.role = (row.get("role") or person.role or "EMPLOYEE").upper()
+        role = (row.get("role") or person.role or "EMPLOYEE").upper().replace(" ", "_")
+        if role in {"COMPANYADMIN", "COMPANY_ADMIN", "ORG_ADMIN"}:
+            role = "COMPANY_ADMIN"
+        elif role in {"BRANCHADMIN", "BRANCH_ADMIN", "SITE_ADMIN"}:
+            role = "BRANCH_ADMIN"
+        elif role in {"TEAMOPERATOR", "TEAM_OPERATOR", "TEAM_LEAD"}:
+            role = "TEAM_OPERATOR"
+        person.role = role
         if manager:
             person.manager_id = manager.person_id
         if place:

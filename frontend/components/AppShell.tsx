@@ -10,12 +10,14 @@ const PRIMARY = [
   { href: "/outcomes", label: "Requests" },
   { href: "/reviews", label: "Needs a decision" },
   { href: "/setup", label: "Company data" },
+  { href: "/vendors", label: "Vendors" },
   { href: "/email", label: "Mail inbox" },
 ];
 
 const MORE = [
   { href: "/tasks", label: "Team tasks" },
   { href: "/resources", label: "Rooms & assets" },
+  { href: "/failures", label: "Failures" },
   { href: "/config", label: "Preferences" },
 ];
 

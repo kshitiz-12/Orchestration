@@ -58,8 +58,11 @@ def approver_emails(approval_type: str) -> list[str]:
     return picked or ([admin_ops_email()] if admin_ops_email() else [])
 
 
+_OPS_PERSON_ROLES = frozenset({"ADMIN", "OPERATOR", "COMPANY_ADMIN", "BRANCH_ADMIN", "TEAM_OPERATOR"})
+
+
 def trusted_ops_senders() -> set[str]:
-    """Mailboxes whose replies may act on cases."""
+    """Env-configured mailboxes whose replies may act on cases."""
     settings = get_settings()
     out = set(backup_ops_emails())
     out.update(_emails(settings.approval_manager_email))
@@ -67,6 +70,35 @@ def trusted_ops_senders() -> set[str]:
     if admin_ops_email():
         out.add(admin_ops_email())
     return out
+
+
+def person_ops_emails(session, tenant_id: str) -> set[str]:
+    """Company/branch admins from the employee sheet (authority by mailbox, not dashboard)."""
+    from sqlmodel import select
+
+    from app.models.org import Person
+
+    out: set[str] = set()
+    for person in session.exec(
+        select(Person).where(Person.tenant_id == tenant_id, Person.is_active == True)  # noqa: E712
+    ).all():
+        if (person.role or "").strip().upper() in _OPS_PERSON_ROLES and person.email:
+            out.add(person.email.strip().lower())
+    return out
+
+
+def is_ops_authority(session, tenant_id: str, sender: Optional[str]) -> bool:
+    """True when this mailbox may approve / command cases (env ops or Person role)."""
+    addr = (sender or "").strip().lower()
+    if "@" in addr and "<" in addr:
+        from email.utils import parseaddr
+
+        addr = parseaddr(sender or "")[1].strip().lower()
+    if not addr:
+        return False
+    if addr in trusted_ops_senders():
+        return True
+    return addr in person_ops_emails(session, tenant_id)
 
 
 def _open_request_texts(facts: dict[str, Any]) -> list[str]:

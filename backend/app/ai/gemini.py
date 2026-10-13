@@ -310,6 +310,7 @@ class GeminiProvider(LLMProvider):
             prior_facts=prior_facts,
             allowed_context=allowed_context,
             attachment_summaries=attachment_summaries,
+            attachment_documents=kwargs.get("attachment_documents"),
         )
         response, endpoint = self._generate_with_failover(user_payload)
         raw = response.text or "{}"
@@ -1025,15 +1026,29 @@ class HeuristicProvider(LLMProvider):
                 entities["bank_details_changed"] = True
                 human_review = True
                 confidence = 0.8
+            # Fill from PDF/attachment text when body is sparse
+            from app.services.attachment_extract import scrape_invoice_fields
+
+            att_blob = "\n".join(
+                str(d.get("text") or "")
+                for d in (kwargs.get("attachment_documents") or [])
+                if isinstance(d, dict)
+            )
+            for k, v in scrape_invoice_fields(att_blob).items():
+                entities.setdefault(k, v)
+            searchable = f"{text}\n{att_blob}".lower()
             for field in ["invoice_number", "amount", "po_number", "vendor_name"]:
-                if field not in entities and field.replace("_", " ") not in text:
-                    missing.append(
-                        {
-                            "field": field,
-                            "question": f"Please confirm {field.replace('_', ' ')}.",
-                            "blocking": field in {"invoice_number", "amount"},
-                        }
-                    )
+                if field in entities and entities[field] not in (None, ""):
+                    continue
+                if field.replace("_", " ") in searchable:
+                    continue
+                missing.append(
+                    {
+                        "field": field,
+                        "question": f"Please confirm {field.replace('_', ' ')}.",
+                        "blocking": field in {"invoice_number", "amount"},
+                    }
+                )
 
         # merge reply facts (e.g. time windows)
         if prior:

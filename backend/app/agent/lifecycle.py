@@ -137,12 +137,30 @@ def _sla_followups(desk, outcome: Outcome, facts: dict, now: datetime, route_for
     if now >= due and not facts.get("sla_escalated_at"):
         outcome.status = OutcomeStatus.AT_RISK.value
         desk.session.add(outcome)
-        set_facts(desk.session, outcome, sla_escalated_at=now.isoformat(), sla_breached=True)
+        escalate_bits: dict = {"sla_escalated_at": now.isoformat(), "sla_breached": True}
+        headline = f"SLA missed - {route.department_name} has not closed this"
         overdue_h = max(0.0, (now - due).total_seconds() / 3600)
-        desk._notify_admin(
-            outcome, kind="escalation",
-            headline=f"SLA missed - {route.department_name} has not closed this"
-            + (f" ({overdue_h:.0f}h overdue)" if overdue_h >= 1 else ""),
+        if overdue_h >= 1:
+            headline += f" ({overdue_h:.0f}h overdue)"
+        from app.agent.resolution_agent import investigate_stalled, should_investigate
+
+        if should_investigate(facts.get("agent_category") or ""):
+            try:
+                plan = investigate_stalled(desk.session, desk.tenant_id, outcome=outcome)
+                escalate_bits["resolution_stalled"] = plan.model_dump(exclude={"investigation"})
+                if plan.ops_notes:
+                    headline += f"\n{plan.ops_notes[:300]}"
+                if plan.vendor_hint:
+                    escalate_bits["resolution_vendor_hint"] = plan.vendor_hint
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("resolution_stalled_failed", outcome_id=outcome.outcome_id, error=str(exc)[:160])
+        set_facts(desk.session, outcome, **escalate_bits)
+        desk._notify_admin(outcome, kind="escalation", headline=headline)
+        desk._ledger(
+            outcome,
+            "SLA_ESCALATED",
+            headline.split("\n", 1)[0][:400],
+            actor_role="system",
         )
         out["escalated"] = 1
         return out
@@ -166,5 +184,6 @@ def _sla_followups(desk, outcome: Outcome, facts: dict, now: datetime, route_for
                 subject_hint="Due soon",
                 suppress_fingerprint=f"sla_remind:{outcome.outcome_id}:{facts.get('dispatched_at')}",
             )
+            desk._ledger(outcome, "SLA_REMINDED", "SLA mid-window reminder to team", actor_role="system")
             out["reminded"] = 1
     return out

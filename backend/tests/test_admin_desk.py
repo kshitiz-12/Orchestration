@@ -133,7 +133,9 @@ def test_one_mail_two_requests_become_two_cases(session: Session, env):
     reply = _mails_to(session, REQ)[-1]
     assert all(c.case_reference in reply.body for c in cases) and "[[REF" not in reply.body
     trail = fake.payloads[0]
-    assert trail["requester"]["name"] == "Arjun Singh" and trail["OFFICE_KNOWLEDGE"]
+    assert trail["requester"]["name"] == "Arjun Singh"
+    # OFFICE_KNOWLEDGE is empty until Setup uploads knowledge; key must still be present for the agent.
+    assert "OFFICE_KNOWLEDGE" in trail
 
 
 def test_sensitive_request_waits_for_admin_then_proceeds(session: Session, env):

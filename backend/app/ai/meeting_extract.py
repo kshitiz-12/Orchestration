@@ -250,12 +250,16 @@ def build_interpreter_payload(
     prior_facts: Optional[dict] = None,
     allowed_context: Optional[dict] = None,
     attachment_summaries: Optional[list[str]] = None,
+    attachment_documents: Optional[list[dict[str, str]]] = None,
 ) -> dict[str, Any]:
     prior = prior_facts or {}
     return {
         "task": (
             "Read this workplace email the way ChatGPT or Gemini would in chat. "
-            "Typing will be messy. Understand everything they want."
+            "Typing will be messy. Understand everything they want. "
+            "If attachment_documents contain invoice/PDF text, extract invoice_number, "
+            "amount, po_number, vendor_name, quantity and unit_rate from them. "
+            "Never invent amounts that are not present."
         ),
         "today": _today_label(),
         "subject": subject,
@@ -275,6 +279,7 @@ def build_interpreter_payload(
         "already_on_file": compact_interpreter_state(prior),
         "still_asking": prior.get("checklist_missing") or [],
         "attachments": attachment_summaries or [],
+        "attachment_documents": attachment_documents or [],
         "allowed_context": allowed_context or {},
         "instructions": MEETING_ROOM_AI_INSTRUCTIONS,
     }

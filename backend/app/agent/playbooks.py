@@ -348,10 +348,15 @@ def assess_risk(
     confidence: float = 1.0,
     spend_limit: float = 0.0,
     known: bool = True,
+    session: Any = None,
+    tenant_id: Optional[str] = None,
+    requester_email: Optional[str] = None,
+    default_approver: Optional[str] = None,
 ) -> RiskVerdict:
     """Hard rules can only add caution to what the model said, never remove it.
 
     known=False: no playbook and no department handles this kind of work, so the admin decides.
+    When session+tenant_id are provided, V3 ApprovalEngine policy rules can also require approval.
     """
     book = playbook_for(category)
     cat = book.category
@@ -378,6 +383,24 @@ def assess_risk(
         return RiskVerdict(True, "catering is chargeable - cost sign-off needed before ordering")
     if confidence < 0.45:
         return RiskVerdict(True, "the request is unclear")
+    if session is not None and tenant_id:
+        try:
+            from app.engines.approval import ApprovalEngine
+
+            decision = ApprovalEngine(session, tenant_id).decide(
+                amount=amount,
+                category=cat,
+                requester_email=requester_email,
+                default_approver=default_approver,
+            )
+            if decision.required:
+                return RiskVerdict(
+                    True,
+                    decision.reason or "approval policy requires sign-off",
+                    checks=[decision.rule_code or "APPROVAL_ENGINE"],
+                )
+        except Exception:  # noqa: BLE001 — never break desk on policy lookup
+            pass
     return RiskVerdict(False)
 
 

@@ -60,8 +60,49 @@ def parse_qty(text: str, default: float = 1.0) -> float:
         return default
 
 
+def available_qty(sku: StockSku) -> float:
+    return max(0.0, float(sku.qty_on_hand or 0) - float(getattr(sku, "qty_reserved", 0) or 0))
+
+
+def reserve_sku(
+    session: Session,
+    sku: StockSku,
+    qty: float,
+    *,
+    outcome_id: Optional[str] = None,
+    notes: Optional[str] = None,
+):
+    from app.models.org import StockReservation
+    from fastapi import HTTPException
+
+    need = float(qty)
+    if need <= 0:
+        raise HTTPException(status_code=400, detail="quantity must be positive")
+    if available_qty(sku) + 1e-9 < need:
+        raise HTTPException(status_code=409, detail="Insufficient available stock to reserve")
+    sku.qty_reserved = float(getattr(sku, "qty_reserved", 0) or 0) + need
+    sku.updated_at = utcnow()
+    session.add(sku)
+    row = StockReservation(
+        tenant_id=sku.tenant_id,
+        sku_id=sku.sku_id,
+        outcome_id=outcome_id,
+        quantity=need,
+        status="HELD",
+        notes=notes,
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
 def issue_sku(session: Session, sku: StockSku, qty: float) -> StockSku:
-    sku.qty_on_hand = max(0.0, float(sku.qty_on_hand or 0) - float(qty))
+    need = float(qty)
+    reserved = float(getattr(sku, "qty_reserved", 0) or 0)
+    # Prefer consuming reservation first
+    use_reserved = min(reserved, need)
+    sku.qty_reserved = max(0.0, reserved - use_reserved)
+    sku.qty_on_hand = max(0.0, float(sku.qty_on_hand or 0) - need)
     sku.updated_at = utcnow()
     session.add(sku)
     session.flush()
@@ -175,6 +216,21 @@ def open_bulk_reorder(
     )
     session.add(outcome)
     session.flush()
+    try:
+        from app.services.ops_ledger import record_from_outcome
+
+        record_from_outcome(
+            session,
+            tenant_id,
+            outcome,
+            event_type="STOCK_REORDER",
+            summary=f"Bulk reorder: {names}"[:400],
+            actor_role="system",
+            quantity=sum(float(l.get("order_qty") or 0) for l in lines),
+            payload={"lines": lines, "vendor_id": vendor_id},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("stock_ledger_reorder_failed", error=str(exc)[:160])
 
     body_lines = [
         "Stock is below minimum. Please supply / confirm the following in one delivery:",
@@ -222,6 +278,23 @@ def refill_from_confirm(session: Session, outcome: Outcome, text: str) -> list[s
         sku.updated_at = utcnow()
         session.add(sku)
         updated.append(f"{sku.name} +{add:g} → {sku.qty_on_hand:g}")
+        try:
+            from app.services.ops_ledger import record_from_outcome
+
+            record_from_outcome(
+                session,
+                outcome.tenant_id,
+                outcome,
+                event_type="STOCK_REFILL",
+                summary=f"Refilled {sku.name} +{add:g}",
+                actor_role="vendor",
+                quantity=add,
+                unit=sku.unit,
+                sku_code=sku.sku_code,
+                payload={"qty_on_hand": sku.qty_on_hand},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("stock_ledger_refill_failed", error=str(exc)[:160])
     return updated
 
 

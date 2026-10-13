@@ -13,6 +13,8 @@ class NormalizedAttachment(BaseModel):
     mime_type: Optional[str] = None
     size: int = 0
     attachment_id: Optional[str] = None
+    # Present only during ingest — stripped before DB persistence
+    content_base64: Optional[str] = None
 
 
 class NormalizedEmailEvent(BaseModel):

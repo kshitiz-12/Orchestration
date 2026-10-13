@@ -87,6 +87,8 @@ class Settings(BaseSettings):
     offsite_venues: str = ""
     # Public URL of this backend for approve/reject links in mail (else RENDER_EXTERNAL_URL; empty = no links)
     public_base_url: str = ""
+    # Browser origin for vendor registration links (falls back to first CORS origin)
+    frontend_public_url: str = ""
     approval_link_hours: float = 72.0
     # Pending approvals / department task packages: one reminder after N hours, one escalation after M hours
     followup_reminder_hours: float = 8.0
@@ -121,6 +123,14 @@ class Settings(BaseSettings):
     # AI admin desk reads every mail first (greetings, any request type, status, multi-request).
     # Off = previous behaviour (every mail goes to the meeting-room/legacy flows).
     agent_mode: bool = True
+    # V3: stamp/ensure Outcome→Requirement→Task spine on meeting, invoice, and desk cases.
+    unified_outcome_spine: bool = True
+    # Live ERP (optional). Empty → CertifiedStubERP for CI/dev.
+    erp_base_url: str = ""
+    erp_api_token: str = ""
+    # Live HRMS (optional).
+    hrms_base_url: str = ""
+    hrms_api_token: str = ""
 
     # Active email channel: cloudmailin (prototype default) | outlook | gmail
     email_provider: str = "cloudmailin"

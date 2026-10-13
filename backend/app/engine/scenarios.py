@@ -162,6 +162,17 @@ class ScenarioOrchestrator:
             force_new=force_new,
         )
 
+        from app.core.config import get_settings
+        from app.engine.outcome_spine import materialize_template_spine
+
+        if get_settings().unified_outcome_spine and template in {"MEETING_ROOM", "INVOICE", "ONBOARDING"}:
+            materialize_template_spine(
+                self.session,
+                tenant_id=self.tenant_id,
+                outcome=outcome,
+                template_code=template,
+            )
+
         if template == "ONBOARDING":
             self._scenario_a(outcome, facts, context)
         elif template == "PARKING_CONFLICT":
@@ -613,10 +624,32 @@ class ScenarioOrchestrator:
             attributes={"note": "LLM must not approve payment"},
         )
         self.session.add(inv)
+        self.session.flush()
+
+        # Cross-check with V3 MatchingEngine (does not invent payment; may refine status).
+        from app.core.config import get_settings
+        from app.engines.matching import MatchingEngine
+
+        if get_settings().unified_outcome_spine and po and receipt and not bank_changed:
+            engine_match = MatchingEngine(self.session, self.tenant_id).match_invoice(inv)
+            if engine_match.status == "MATCHED" and match_status == "MATCHED":
+                inv.attributes = {**(inv.attributes or {}), "matching_engine": engine_match.status}
+            elif engine_match.status != "MATCHED" and match_status == "MATCHED":
+                # Prefer engine disagreement → keep human review
+                match_status = engine_match.status
+                inv.match_status = match_status
+                inv.attributes = {
+                    **(inv.attributes or {}),
+                    "matching_engine": engine_match.status,
+                    "matching_reasons": engine_match.reasons,
+                }
+                self.session.add(inv)
+
         # Never auto-release payment
         outcome.facts = {
             **(outcome.facts or {}),
             "invoice_match_status": match_status,
             "payment_auto_approved": False,
+            "unified_spine": True,
         }
         self.session.add(outcome)

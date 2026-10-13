@@ -417,7 +417,13 @@ def test_signed_link_approves_once(client, session: Session, env):
     parsed = urlparse(link)
     assert parsed.netloc == "ops.example.com"
     q = {k: v[0] for k, v in parse_qs(parsed.query).items()}
-    assert verify(parsed.path.split("/")[-2], "approve", int(q["exp"]), q["sig"])
+    assert verify(
+        parsed.path.split("/")[-2],
+        "approve",
+        int(q["exp"]),
+        q["sig"],
+        approver_email=q.get("for"),
+    )
 
     path = parsed.path + "?" + parsed.query
     assert client.get(path).status_code == 200
@@ -433,8 +439,10 @@ def test_signed_link_approves_once(client, session: Session, env):
 
 
 def test_reject_link_cannot_be_reused_for_approve(session: Session, env):
-    _set(env, PUBLIC_BASE_URL="https://ops.example.com")
-    link = approval_link("apr_x", "reject")
+    _set(env, PUBLIC_BASE_URL="https://ops.example.com", ADMIN_OPS_EMAIL="ops@example.com")
+    link = approval_link("apr_x", "reject", approver_email="ops@example.com")
     q = {k: v[0] for k, v in parse_qs(urlparse(link).query).items()}
-    assert verify("apr_x", "reject", int(q["exp"]), q["sig"])
-    assert not verify("apr_x", "approve", int(q["exp"]), q["sig"])
+    assert q.get("for") == "ops@example.com"
+    assert verify("apr_x", "reject", int(q["exp"]), q["sig"], approver_email=q["for"])
+    assert not verify("apr_x", "approve", int(q["exp"]), q["sig"], approver_email=q["for"])
+    assert not verify("apr_x", "reject", int(q["exp"]), q["sig"], approver_email="other@example.com")

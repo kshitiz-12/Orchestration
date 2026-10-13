@@ -88,6 +88,9 @@ class ProcessingPipeline:
         admin_result = self._maybe_handle_admin_reply(event)
         if admin_result is not None:
             return admin_result
+        analytics = self._maybe_handle_admin_analytics(event)
+        if analytics is not None:
+            return analytics
         ignored = self._ignore_unknown_sender(event)
         if ignored is not None:
             return ignored
@@ -131,16 +134,29 @@ class ProcessingPipeline:
         # Light context for first-pass extraction (requester only)
         preliminary_ctx = self.context.for_extraction(None, event.sender, prior_facts)
 
+        from app.services.attachment_extract import (
+            attachment_texts_for_ai,
+            scraped_fields_from_attachments,
+        )
+
+        att_summaries = [
+            a.get("filename", "")
+            for a in (event.attachments or [])
+            if a.get("validation", {}).get("allowed", True)
+        ]
+        att_docs = attachment_texts_for_ai(event.attachments)
+        pdf_fields = scraped_fields_from_attachments(event.attachments)
+
         extraction = self.llm.extract(
             subject=event.subject,
             body=event.body_text or event.body_for_ai,
-            attachment_summaries=[
-                a.get("filename", "") for a in (event.attachments or []) if a.get("validation", {}).get("allowed", True)
-            ],
+            attachment_summaries=att_summaries,
+            attachment_documents=att_docs,
             prior_facts=prior_facts,
             allowed_context=preliminary_ctx,
         )
         extraction = self._enrich_with_thread_facts(extraction, prior_facts, event)
+        extraction = self._merge_pdf_invoice_fields(extraction, pdf_fields)
 
         # Second-pass: relevant context based on detected event type
         relevant_ctx = self.context.for_extraction(
@@ -150,15 +166,13 @@ class ProcessingPipeline:
             extraction = self.llm.extract(
                 subject=event.subject,
                 body=event.body_text or event.body_for_ai,
-                attachment_summaries=[
-                    a.get("filename", "")
-                    for a in (event.attachments or [])
-                    if a.get("validation", {}).get("allowed", True)
-                ],
+                attachment_summaries=att_summaries,
+                attachment_documents=att_docs,
                 prior_facts=prior_facts,
                 allowed_context=relevant_ctx,
             )
             extraction = self._enrich_with_thread_facts(extraction, prior_facts, event)
+            extraction = self._merge_pdf_invoice_fields(extraction, pdf_fields)
 
         routing = self.llm.route(extraction)
         interp_path = (extraction.entities or {}).get("interpretation_path")
@@ -453,7 +467,9 @@ class ProcessingPipeline:
         ).first()
         if person is not None and person.is_active:
             return True
-        if is_admin_sender(addr):
+        from app.services.admin_ops import is_ops_authority
+
+        if is_admin_sender(addr) or is_ops_authority(self.session, self.tenant_id, addr):
             return True
         if {addr, base_mailbox(addr)} & department_emails(self.session, self.tenant_id):
             return True
@@ -468,6 +484,68 @@ class ProcessingPipeline:
             select(Vendor).where(Vendor.tenant_id == self.tenant_id, Vendor.contact_email == addr)
         ).first()
         return vendor is not None
+
+    def _maybe_handle_admin_analytics(self, event: RawEmailEvent) -> Optional[dict]:
+        """Ops authority asking spend/repairs/replace/who-did-what — answer from ledger, no new case."""
+        import re
+
+        from app.agent.resolution_agent import answer_admin_question, is_admin_analytics_question
+        from app.services.admin_ops import is_ops_authority
+
+        if not is_ops_authority(self.session, self.tenant_id, event.sender):
+            return None
+        text = event.body_text or event.body_for_ai or ""
+        if not is_admin_analytics_question(text):
+            return None
+        # Don't steal plain team commands that happen to mention "repair" / "cost"
+        if re.match(
+            r"^\s*(?:approved?|reject(?:ed)?|done|cancel|on\s+it|issue\s*:|assign\s+|tell\s+requester|"
+            r"close|change\s+|update\s+|set\s+)",
+            text or "",
+            re.I,
+        ):
+            return None
+        sender = sender_address(event.sender)
+        verified, how = verify_ops_sender(self.session, self.tenant_id, event.headers, sender)
+        if not verified:
+            event.processing_stage = ProcessingStage.COMPLETED.value
+            event.safety_flags = {
+                **(event.safety_flags or {}),
+                "ops_analytics_unverified": True,
+                "sender_verification": how,
+            }
+            self.session.add(event)
+            self.session.commit()
+            logger.warning("ops_analytics_unverified", event_id=event.event_id, sender=sender, how=how)
+            return {
+                "status": "ops_analytics_unverified",
+                "event_id": event.event_id,
+                "replied": False,
+                "sender_verification": how,
+            }
+        answer = answer_admin_question(self.session, self.tenant_id, text)
+        body = f"{answer.reply}\n\n{self.settings.mail_signature}\n"
+        subject = f"Re: {event.subject or 'Ops question'}"
+        self.comms.send(
+            communication_type="INFORMATION_ONLY",
+            recipients=[sender_address(event.sender)],
+            subject=subject[:200],
+            body=body,
+            thread_id=event.provider_conversation_id or event.gmail_thread_id,
+            in_reply_to_message_id=event.provider_message_id or event.gmail_message_id,
+            idempotency_key=f"ops-analytics:{event.event_id}",
+        )
+        event.processing_stage = ProcessingStage.COMPLETED.value
+        event.safety_flags = {**(event.safety_flags or {}), "ops_analytics": True}
+        self.session.add(event)
+        self.session.commit()
+        logger.info("ops_analytics_answered", event_id=event.event_id, grounded=answer.grounded)
+        return {
+            "status": "ops_analytics",
+            "event_id": event.event_id,
+            "grounded": answer.grounded,
+            "replied": True,
+        }
 
     def _ignore_unknown_sender(self, event: RawEmailEvent) -> Optional[dict]:
         """Outsiders get no reply and no case - answering would confirm the mailbox to spammers and let anyone
@@ -489,11 +567,14 @@ class ProcessingPipeline:
         from app.agent.directory import base_mailbox, department_emails
         from app.services.site_services import cost_centre_approver_emails
 
+        from app.services.admin_ops import is_ops_authority
+
         addr = sender_address(event.sender)
         dept_mail = department_emails(self.session, self.tenant_id)
         # Team mail may be stored as user+tag@…; Gmail always replies as user@…
         if (
             not is_admin_sender(event.sender)
+            and not is_ops_authority(self.session, self.tenant_id, event.sender)
             and addr not in dept_mail
             and base_mailbox(addr) not in dept_mail
             and addr not in cost_centre_approver_emails(self.session, self.tenant_id)
@@ -694,6 +775,47 @@ class ProcessingPipeline:
         )
         self.session.flush()
         return item
+
+    def _merge_pdf_invoice_fields(
+        self,
+        extraction: ExtractionResult,
+        pdf_fields: dict,
+    ) -> ExtractionResult:
+        """Fill invoice entities from PDF text scrape when LLM/heuristic left them blank."""
+        if not pdf_fields:
+            return extraction
+        ents = dict(extraction.entities or {})
+        filled = False
+        for key in ("invoice_number", "amount", "po_number", "vendor_name", "quantity", "unit_rate"):
+            if key in pdf_fields and ents.get(key) in (None, "", 0, 0.0):
+                ents[key] = pdf_fields[key]
+                filled = True
+        if not filled and not any(k in ents for k in ("invoice_number", "amount")):
+            # Still apply when entities are empty but PDF has fields
+            for key, val in pdf_fields.items():
+                ents.setdefault(key, val)
+                filled = True
+        if filled:
+            if extraction.event_type in {"UNKNOWN", "GENERAL", None, ""}:
+                extraction.event_type = "INVOICE"
+                extraction.category = "INVOICE"
+            extraction.entities = ents
+            # Drop blocking questions for fields we now have
+            have = {k for k, v in ents.items() if v not in (None, "", 0, 0.0)}
+            extraction.missing_information = [
+                m for m in (extraction.missing_information or []) if m.field not in have
+            ]
+            extraction.clarification_questions = [
+                q
+                for q, m in zip(
+                    extraction.clarification_questions or [],
+                    extraction.missing_information or [],
+                )
+            ] if False else [
+                m.question for m in (extraction.missing_information or [])
+            ]
+            extraction.reason = (extraction.reason or "") + " | pdf_text_extract"
+        return extraction
 
     def _enrich_with_thread_facts(
         self,

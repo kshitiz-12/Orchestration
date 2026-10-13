@@ -93,6 +93,30 @@ def _lower_headers(headers: Any) -> dict[str, Any]:
     return {str(k).lower(): v for k, v in (headers or {}).items()} if isinstance(headers, dict) else {}
 
 
+# Auth signals that only a real MTA/webhook may assert — never trust from API intake.
+_FORGEABLE_AUTH_HEADERS = frozenset(
+    {
+        "_envelope",
+        "authentication-results",
+        "arc-authentication-results",
+        "received-spf",
+        "authentication_results",
+    }
+)
+
+
+def sanitize_api_email_headers(headers: Optional[dict[str, Any]]) -> dict[str, Any]:
+    """Strip SPF/DKIM envelope claims so authenticated API callers cannot forge ops trust."""
+    if not headers:
+        return {}
+    out: dict[str, Any] = {}
+    for key, value in headers.items():
+        if str(key).lower() in _FORGEABLE_AUTH_HEADERS:
+            continue
+        out[key] = value
+    return out
+
+
 def _spf(envelope: Any) -> tuple[str, str]:
     env = envelope if isinstance(envelope, dict) else {}
     spf = env.get("spf")

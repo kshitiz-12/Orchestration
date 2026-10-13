@@ -173,6 +173,44 @@ class CommunicationService:
         self.email_sender = email_sender
         self.audit = AuditService(session)
         self.actions = IdempotentActionService(session)
+        self._alerting_send_failure = False
+
+    def _alert_ops_send_failure(
+        self,
+        *,
+        subject: str,
+        recipients: list[str],
+        error: str,
+        outcome_id: Optional[str],
+        failed_key: str,
+    ) -> None:
+        """Mail ADMIN_OPS when an outbound send fails (best-effort; never recurse)."""
+        if self._alerting_send_failure or not self.email_sender:
+            return
+        from app.services.admin_ops import admin_ops_email
+
+        ops = admin_ops_email()
+        if not ops or ops.lower() in {r.lower() for r in recipients}:
+            return
+        self._alerting_send_failure = True
+        try:
+            body = (
+                "Outbound mail failed to send.\n\n"
+                f"Original subject: {subject}\n"
+                f"Intended recipients: {', '.join(recipients)}\n"
+                f"Error: {error[:500]}\n"
+                f"Outcome: {outcome_id or '—'}\n"
+                f"Key: {failed_key}\n"
+            )
+            self.email_sender.send_reply(
+                to=[ops],
+                subject=f"[ALERT] Mail send failed — {subject[:80]}",
+                body=body,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("ops_send_failure_alert_failed", error=str(exc)[:200])
+        finally:
+            self._alerting_send_failure = False
 
     def send(
         self,
@@ -255,6 +293,13 @@ class CommunicationService:
             )
             if delivery_error:
                 logger.error("email_delivery_recorded_as_failed", key=key, error=delivery_error)
+                self._alert_ops_send_failure(
+                    subject=subject,
+                    recipients=recipients,
+                    error=delivery_error,
+                    outcome_id=outcome_id,
+                    failed_key=key,
+                )
             return {"message_id": msg.message_id, "delivered": not delivery_error and bool(msg.provider_message_id)}
 
         result = self.actions.run_once(

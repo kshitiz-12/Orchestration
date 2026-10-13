@@ -630,7 +630,7 @@ def search_flights(
     *,
     max_options: int = 5,
 ) -> list[FlightOption]:
-    """Return concrete flight offers (price / times / layover). No booking links."""
+    """Schedule options only — fares are confirmed by Travel Desk (auto prices were unreliable)."""
     origin_c = _city(origin)
     destination_c = _city(destination)
     if not origin_c or not destination_c:
@@ -648,30 +648,39 @@ def search_flights(
         logger.warning("flight_iata_unresolved", origin=origin_c, destination=destination_c)
         return []
 
+    # Times/stops only. Do not trust SerpAPI/Amadeus card fares for employee quotes.
     options = _serpapi_flights(origin_iata, dest_iata, day, max_options=max_options)
+    for opt in options:
+        opt.price = "Travel Desk will confirm today's fare"
+        opt.fare_note = f"schedule only ({day} {origin_iata}→{dest_iata}); fare not auto-quoted"
     if not options:
-        options = _amadeus_flights(origin_iata, dest_iata, day, max_options=max_options)
-    if not options:
-        logger.warning(
-            "flight_offers_empty",
-            origin=origin_iata,
-            destination=dest_iata,
-            date=day,
-            hint="Set SERPAPI_API_KEY or AMADEUS_CLIENT_ID/SECRET for live fares",
-        )
+        # Placeholder so the mail still explains next step when the feed is empty.
+        options = [
+            FlightOption(
+                airline="Travel Desk",
+                flight_numbers="—",
+                depart_at=day,
+                arrive_at="—",
+                duration="—",
+                stops="—",
+                price="Travel Desk will confirm today's fare",
+                origin=origin_iata,
+                destination=dest_iata,
+                source="manual",
+                fare_note="No live schedule feed — Travel Desk will send airline / time / fare options",
+            )
+        ]
     return options[:max_options]
 
 
 def format_flight_options_for_mail(options: list[FlightOption] | list[dict]) -> str:
     if not options:
         return (
-            "I couldn't pull live flight inventories right now (fare feed not configured or no seats found). "
-            "Reply with preferred airline / time window and I'll ask Travel Desk to quote exact options."
+            "I've logged the flight ask with Travel Desk. "
+            "They'll reply here with airline, timings and the confirmed one-way fare."
         )
     lines = [
-        "Here are live one-way flight options from Google Flights (India).",
-        "Fares are adult economy; checked bags / seats can add cost on airline sites (so OTA totals may look higher).",
-        "Reply with the option number you prefer, or say a different date/time / round-trip:",
+        "Possible flight timings (schedule only — fares are confirmed by Travel Desk, not auto-quoted):",
         "",
     ]
     for i, opt in enumerate(options, start=1):
@@ -682,24 +691,27 @@ def format_flight_options_for_mail(options: list[FlightOption] | list[dict]) -> 
             arrive = opt.get("arrive_at") or ""
             duration = opt.get("duration") or ""
             stops = opt.get("stops") or ""
-            price = opt.get("price") or opt.get("price_hint") or ""
-            cabin = opt.get("cabin") or "Economy"
-            fare_note = opt.get("fare_note") or ""
+            source = opt.get("source") or ""
         else:
             airline, numbers = opt.airline, opt.flight_numbers
             depart, arrive = opt.depart_at, opt.arrive_at
-            duration, stops, price = opt.duration, opt.stops, opt.price
-            cabin = opt.cabin or "Economy"
-            fare_note = opt.fare_note or ""
+            duration, stops = opt.duration, opt.stops
+            source = opt.source or ""
+        if source == "manual" and airline == "Travel Desk":
+            lines.append(
+                "Travel Desk has the request and will send exact airline / time / fare options on this thread."
+            )
+            break
         lines.append(f"{i}. {airline} {numbers}".strip())
         lines.append(f"   Depart: {depart}")
         lines.append(f"   Arrive: {arrive}")
         lines.append(f"   Duration: {duration}  |  {stops}")
-        lines.append(f"   Fare: {price}  ({cabin})")
-        if fare_note:
-            lines.append(f"   Note: {fare_note}")
+        lines.append("   Fare: Travel Desk will confirm")
         lines.append("")
-    lines.append("Once you pick one, I'll send it to the Travel Desk to book (manager approval if required).")
+    lines.append(
+        "Reply with the option number (or preferred time window). "
+        "I'll ask Travel Desk to lock it after approval if required."
+    )
     return "\n".join(lines).rstrip()
 
 

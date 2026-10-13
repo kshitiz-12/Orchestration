@@ -19,6 +19,10 @@ from app.services.site_services import cost_plan_text
 
 router = APIRouter(prefix="/public/approvals", tags=["public"])
 
+
+def _approver_query(for_email: str = "") -> str:
+    return (for_email or "").strip().lower()
+
 _STYLE = """
 body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#f5f6f8;margin:0;padding:32px;color:#1c2330}
 .card{max-width:560px;margin:0 auto;background:#fff;border-radius:12px;padding:28px;box-shadow:0 2px 12px rgba(0,0,0,.06)}
@@ -37,10 +41,22 @@ def _page(title: str, body: str, status: int = 200) -> HTMLResponse:
     )
 
 
-def _load(session, approval_id: str, decision: str, exp: int, sig: str) -> tuple[Optional[Approval], Optional[HTMLResponse]]:
-    if not verify(approval_id, decision, exp, sig):
-        return None, _page("Link not valid", "<h1>This link is not valid or has expired</h1>"
-                           "<p>Reply to the approval mail with \"approve\" or \"reject\" instead.</p>", 403)
+def _load(
+    session,
+    approval_id: str,
+    decision: str,
+    exp: int,
+    sig: str,
+    for_email: str,
+) -> tuple[Optional[Approval], Optional[HTMLResponse]]:
+    approver = _approver_query(for_email)
+    if not verify(approval_id, decision, exp, sig, approver_email=approver):
+        return None, _page(
+            "Link not valid",
+            "<h1>This link is not valid or has expired</h1>"
+            "<p>Reply to the approval mail with \"approve\" or \"reject\" instead.</p>",
+            403,
+        )
     approval = session.get(Approval, approval_id)
     if approval is None:
         return None, _page("Not found", "<h1>Approval not found</h1>", 404)
@@ -53,8 +69,15 @@ def _load(session, approval_id: str, decision: str, exp: int, sig: str) -> tuple
 
 
 @router.get("/{approval_id}/{decision}", response_class=HTMLResponse)
-def confirm_page(approval_id: str, decision: str, session: SessionDep, exp: int = Query(0), sig: str = Query("")):
-    approval, error = _load(session, approval_id, decision, exp, sig)
+def confirm_page(
+    approval_id: str,
+    decision: str,
+    session: SessionDep,
+    exp: int = Query(0),
+    sig: str = Query(""),
+    for_email: str = Query("", alias="for"),
+):
+    approval, error = _load(session, approval_id, decision, exp, sig, for_email)
     if error:
         return error
     outcome = session.get(Outcome, approval.outcome_id) if approval.outcome_id else None
@@ -64,7 +87,7 @@ def confirm_page(approval_id: str, decision: str, session: SessionDep, exp: int 
     what = html.escape(approval_pretty(approval.approval_type, facts))
     case = html.escape(outcome.case_reference if outcome else "")
     summary = html.escape((outcome.summary or "") if outcome else "")
-    action = f"?exp={exp}&sig={html.escape(sig)}"
+    action = f"?exp={exp}&sig={html.escape(sig)}&for={html.escape(_approver_query(for_email))}"
     if decision == "approve":
         form = (f"<form method='post' action='{action}'><button class='approve' type='submit'>Approve</button></form>")
     else:
@@ -87,18 +110,20 @@ def apply_link_decision(
     session: SessionDep,
     exp: int = Query(0),
     sig: str = Query(""),
+    for_email: str = Query("", alias="for"),
     reason: str = Form(""),
 ):
-    approval, error = _load(session, approval_id, decision, exp, sig)
+    approval, error = _load(session, approval_id, decision, exp, sig, for_email)
     if error:
         return error
     approved = decision == "approve"
+    actor = _approver_query(for_email) or "approver:signed_link"
     apply_decision(
         session,
         approval.tenant_id,
         approval,
         approved=approved,
-        actor="approver:signed_link",
+        actor=actor,
         note=(reason or "").strip()[:500],
         via="signed_link",
     )

@@ -39,6 +39,16 @@ async def lifespan(_: FastAPI):
         raise RuntimeError(
             "ADMIN_OPS_EMAIL is required in production — set the company admin mailbox used for ops mail."
         )
+    if settings.is_production:
+        sk = (settings.secret_key or "").strip()
+        if not sk or sk in {"change-me-to-a-long-random-string", "secret", "changeme"}:
+            raise RuntimeError("SECRET_KEY must be set to a long random value in production.")
+        if settings.auto_seed:
+            pw = (settings.admin_password or "").strip().lower()
+            if pw in {"", "admin123", "password", "changeme", "change-me", "secret"}:
+                raise RuntimeError(
+                    "ADMIN_PASSWORD must be a strong non-default value when AUTO_SEED is enabled in production."
+                )
 
     try:
         init_db()
