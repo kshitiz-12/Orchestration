@@ -165,13 +165,16 @@ class ScenarioOrchestrator:
         from app.core.config import get_settings
         from app.engine.outcome_spine import materialize_template_spine
 
-        if get_settings().unified_outcome_spine and template in {"MEETING_ROOM", "INVOICE", "ONBOARDING"}:
+        # V3 §2.1/§31: one parent Outcome → Requirement → Task for ALL templates.
+        # Meeting/invoice specialists are module helpers under this spine — not alternate masters.
+        if get_settings().unified_outcome_spine:
             materialize_template_spine(
                 self.session,
                 tenant_id=self.tenant_id,
                 outcome=outcome,
                 template_code=template,
             )
+            facts = {**(facts or {}), "unified_spine": True, "orchestrator_role": "module_helper"}
 
         if template == "ONBOARDING":
             self._scenario_a(outcome, facts, context)

@@ -197,6 +197,201 @@ class ContextGateway:
         )
         return bundle
 
+    def resolve_location(self, text: Optional[str] = None, *, location_id: Optional[str] = None) -> ContextBundle:
+        """V3 tool: resolve_location — by id or fuzzy name/code/alias."""
+        if location_id:
+            return self.location_by_id(location_id)
+        bundle = ContextBundle()
+        needle = (text or "").strip().lower()
+        if not needle:
+            self._mark_unavailable(bundle, "location", "text_not_provided")
+            return bundle
+        rows = self.session.exec(select(Location).where(Location.tenant_id == self.tenant_id)).all()
+        hit = None
+        for loc in rows:
+            blob = " ".join(
+                x for x in [loc.name or "", loc.code or "", loc.alias or "", loc.type or ""] if x
+            ).lower()
+            if needle in blob or (loc.code and loc.code.lower() == needle):
+                hit = loc
+                break
+        if not hit:
+            self._mark_unavailable(bundle, "location", "unresolved")
+            return bundle
+        return self.location_by_id(hit.location_id)
+
+    def get_site_services(self, site: Optional[str] = None, *, category: Optional[str] = None) -> ContextBundle:
+        """V3 tool: get_site_services — SiteService catalogue for a site."""
+        from app.models.company import SiteService
+
+        bundle = ContextBundle()
+        stmt = select(SiteService).where(SiteService.tenant_id == self.tenant_id, SiteService.is_active == True)  # noqa: E712
+        if site:
+            stmt = stmt.where(SiteService.site == site)
+        rows = list(self.session.exec(stmt).all())
+        if category:
+            rows = [r for r in rows if category.lower() in (r.code or "").lower() or category.lower() in (r.name or "").lower()]
+        if not rows:
+            self._mark_unavailable(bundle, "site_services", "none_configured")
+            return bundle
+        bundle.facts.append(
+            ContextFact(
+                key="site_services",
+                value=[
+                    {
+                        "service_id": r.service_id,
+                        "code": r.code,
+                        "name": r.name,
+                        "site": r.site,
+                        "delivery_model": r.delivery_model,
+                        "rate": r.rate,
+                        "sla_response_hours": r.sla_response_hours,
+                        "sla_resolution_hours": r.sla_resolution_hours,
+                        "chargeback_rule_code": r.chargeback_rule_code,
+                    }
+                    for r in rows
+                ],
+                source_system="AdminServices.SiteService",
+                record_id=None,
+                freshness="CURRENT",
+            )
+        )
+        return bundle
+
+    def check_amc(self, *, category: Optional[str] = None, asset_id: Optional[str] = None, location_id: Optional[str] = None) -> ContextBundle:
+        """V3 tool: check_amc — AMC coverage before buy/dispatch."""
+        from app.services.amc_gate import amc_coverage_hint
+
+        bundle = ContextBundle()
+        hint = amc_coverage_hint(
+            self.session,
+            self.tenant_id,
+            category=category or "maintenance",
+            asset_id=asset_id,
+            location_id=location_id,
+        )
+        bundle.facts.append(
+            ContextFact(
+                key="amc_coverage",
+                value=hint,
+                source_system="AdminServices.AmcObligation",
+                record_id=(hint.get("obligations") or [{}])[0].get("obligation_id") if hint.get("obligations") else None,
+                freshness="CURRENT",
+            )
+        )
+        if not hint.get("has_coverage"):
+            self._mark_unavailable(bundle, "amc_vendor", hint.get("guidance") or "no_coverage")
+        return bundle
+
+    def get_budget(self, *, period: Optional[str] = None, category: str = "OPEX", cost_centre: Optional[str] = None) -> ContextBundle:
+        """V3 tool: get_budget — operational budget availability (not ERP books)."""
+        from datetime import date
+
+        from app.engines.budget import BudgetEngine
+
+        bundle = ContextBundle()
+        period = period or date.today().isoformat()[:7]
+        eng = BudgetEngine(self.session, self.tenant_id, entity_id=self.entity_id)
+        check = eng.check(amount=0.0, period=period, category=category, cost_centre=cost_centre)
+        if not check.budget_id:
+            self._mark_unavailable(bundle, "budget", check.reason or "no_budget_row")
+            return bundle
+        from app.models.org import Budget
+
+        row = self.session.get(Budget, check.budget_id)
+        bundle.facts.append(
+            ContextFact(
+                key="budget",
+                value={
+                    "budget_id": check.budget_id,
+                    "period": period,
+                    "category": category,
+                    "cost_centre": cost_centre,
+                    "available": check.available,
+                    "reserved": row.reserved_amount if row else None,
+                    "committed": row.committed_amount if row else None,
+                    "actual": row.actual_amount if row else None,
+                    "accrued": getattr(row, "accrued_amount", 0) if row else None,
+                },
+                source_system="AdminServices.Budget",
+                record_id=check.budget_id,
+                freshness="CURRENT",
+            )
+        )
+        return bundle
+
+    def get_rate(self, *, vendor_id: Optional[str] = None, service_code: Optional[str] = None, category: Optional[str] = None) -> ContextBundle:
+        """V3 tool: get_rate — contract / site service rate."""
+        from app.models.company import SiteService
+        from app.models.org import Contract
+
+        bundle = ContextBundle()
+        if vendor_id:
+            contract = self.session.exec(
+                select(Contract).where(
+                    Contract.tenant_id == self.tenant_id,
+                    Contract.vendor_id == vendor_id,
+                    Contract.status == "ACTIVE",
+                )
+            ).first()
+            if contract:
+                bundle.facts.append(
+                    ContextFact(
+                        key="rate_card",
+                        value={"contract_id": contract.contract_id, "rate_card": contract.rate_card, "vendor_id": vendor_id},
+                        source_system="AdminServices.Contract",
+                        record_id=contract.contract_id,
+                        freshness="CURRENT",
+                    )
+                )
+                return bundle
+        if service_code:
+            svc = self.session.exec(
+                select(SiteService).where(
+                    SiteService.tenant_id == self.tenant_id,
+                    SiteService.code == service_code.strip().upper(),
+                    SiteService.is_active == True,  # noqa: E712
+                )
+            ).first()
+            if svc:
+                bundle.facts.append(
+                    ContextFact(
+                        key="service_rate",
+                        value={"code": svc.code, "rate": svc.rate, "currency": svc.currency, "unit": svc.unit},
+                        source_system="AdminServices.SiteService",
+                        record_id=svc.service_id,
+                        freshness="CURRENT",
+                    )
+                )
+                return bundle
+        # Fall back to service catalogue
+        cat = self.service_catalogue(category=category)
+        if cat.facts:
+            return cat
+        self._mark_unavailable(bundle, "rate", "no_rate_found")
+        return bundle
+
+    def for_interpretation(
+        self,
+        *,
+        requester_email: Optional[str] = None,
+        category: Optional[str] = None,
+        location_text: Optional[str] = None,
+        location_id: Optional[str] = None,
+        asset_id: Optional[str] = None,
+        period: Optional[str] = None,
+    ) -> ContextBundle:
+        """Compose authorised facts for AI — V3 §9 controlled tool calling bundle."""
+        return self.merge(
+            self.for_requester(requester_email),
+            self.resolve_location(location_text, location_id=location_id),
+            self.get_site_services(category=category),
+            self.check_amc(category=category, asset_id=asset_id, location_id=location_id),
+            self.get_budget(period=period, category="OPEX"),
+            self.vendors_for_category(category, location_id=location_id),
+            self.get_rate(category=category),
+        )
+
     def merge(self, *bundles: ContextBundle) -> ContextBundle:
         out = ContextBundle()
         for b in bundles:

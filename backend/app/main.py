@@ -5,6 +5,7 @@ import threading
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from app.api.routes import api_router
@@ -12,6 +13,56 @@ from app.core.config import get_settings
 from app.core.database import ensure_seeded, format_startup_error, get_engine, init_db
 from app.core.logging import get_logger, setup_logging
 from app.core.middleware import RequestIdMiddleware
+
+# Render health-checks the open port before FastAPI lifespan finishes if DB init is slow.
+# Bind first; finish schema/seed in a background thread. /health = liveness, /ready = DB.
+_db_ready = threading.Event()
+_db_error: str | None = None
+_db_lock = threading.Lock()
+
+
+def _set_db_error(msg: str) -> None:
+    global _db_error
+    with _db_lock:
+        _db_error = msg
+
+
+def _get_db_error() -> str | None:
+    with _db_lock:
+        return _db_error
+
+
+def _boot_database(settings, logger) -> None:
+    global _db_error
+    try:
+        init_db()
+        ensure_seeded()
+        with _db_lock:
+            _db_error = None
+        _db_ready.set()
+        logger.info("database_ready", auto_seed=settings.auto_seed)
+    except Exception as exc:  # noqa: BLE001
+        _set_db_error(str(exc))
+        logger.error("startup_failed", error=str(exc), traceback=format_startup_error(exc))
+        # Leave _db_ready unset — /ready stays 503; process stays up for Render port check
+
+
+def _validate_production(settings) -> None:
+    if not settings.is_production:
+        return
+    if not (settings.admin_ops_email or "").strip():
+        raise RuntimeError(
+            "ADMIN_OPS_EMAIL is required in production — set the company admin mailbox used for ops mail."
+        )
+    sk = (settings.secret_key or "").strip()
+    if not sk or sk in {"change-me-to-a-long-random-string", "secret", "changeme"}:
+        raise RuntimeError("SECRET_KEY must be set to a long random value in production.")
+    if settings.auto_seed:
+        pw = (settings.admin_password or "").strip().lower()
+        if pw in {"", "admin123", "password", "changeme", "change-me", "secret"}:
+            raise RuntimeError(
+                "ADMIN_PASSWORD must be a strong non-default value when AUTO_SEED is enabled in production."
+            )
 
 
 @asynccontextmanager
@@ -35,30 +86,21 @@ async def lifespan(_: FastAPI):
         run_migrations=settings.run_migrations_on_startup,
     )
 
-    if settings.is_production and not (settings.admin_ops_email or "").strip():
-        raise RuntimeError(
-            "ADMIN_OPS_EMAIL is required in production — set the company admin mailbox used for ops mail."
-        )
-    if settings.is_production:
-        sk = (settings.secret_key or "").strip()
-        if not sk or sk in {"change-me-to-a-long-random-string", "secret", "changeme"}:
-            raise RuntimeError("SECRET_KEY must be set to a long random value in production.")
-        if settings.auto_seed:
-            pw = (settings.admin_password or "").strip().lower()
-            if pw in {"", "admin123", "password", "changeme", "change-me", "secret"}:
-                raise RuntimeError(
-                    "ADMIN_PASSWORD must be a strong non-default value when AUTO_SEED is enabled in production."
-                )
+    _validate_production(settings)
 
-    try:
-        init_db()
-        ensure_seeded()
-        logger.info("database_ready", auto_seed=settings.auto_seed)
-    except Exception as exc:  # noqa: BLE001
-        logger.error("startup_failed", error=str(exc), traceback=format_startup_error(exc))
-        raise
-
+    # Sync DB boot in tests (deterministic). Async bind-first in real deploys (Render port scan).
     stop = threading.Event()
+    if "pytest" in sys.modules:
+        _boot_database(settings, logger)
+    else:
+        threading.Thread(
+            target=_boot_database,
+            args=(settings, logger),
+            name="db-boot",
+            daemon=True,
+        ).start()
+        logger.info("database_boot_deferred", reason="bind_port_before_schema_sync")
+
     interval = int(settings.inprocess_sweeper_seconds or 0)
     if interval > 0 and "pytest" not in sys.modules:
         threading.Thread(target=_sweeper_loop, args=(stop, interval), name="hold-sweeper", daemon=True).start()
@@ -75,6 +117,8 @@ def _sweeper_loop(stop: threading.Event, interval: int) -> None:
 
     logger = get_logger("sweeper")
     while not stop.wait(interval):
+        if not _db_ready.is_set():
+            continue
         try:
             with Session(get_engine()) as session:
                 for tenant in session.exec(select(Tenant)).all():
@@ -102,18 +146,35 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     def health():
-        """Liveness — process is up."""
-        return {"status": "ok", "env": settings.app_env}
+        """Liveness — process is up (Render healthCheckPath). Does not wait for DB."""
+        return {
+            "status": "ok",
+            "env": settings.app_env,
+            "database_ready": _db_ready.is_set(),
+        }
 
     @app.get("/ready")
     def ready():
-        """Readiness — database reachable (use for load balancers)."""
+        """Readiness — database schema/seed finished and reachable."""
+        if not _db_ready.is_set():
+            err = _get_db_error()
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "status": "not_ready",
+                    "database": "booting" if not err else "failed",
+                    "error": err,
+                },
+            )
         try:
             with get_engine().connect() as conn:
                 conn.execute(text("SELECT 1"))
             return {"status": "ready", "database": "ok"}
         except Exception as exc:  # noqa: BLE001
-            return {"status": "not_ready", "database": str(exc)}
+            return JSONResponse(
+                status_code=503,
+                content={"status": "not_ready", "database": str(exc)},
+            )
 
     return app
 

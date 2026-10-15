@@ -41,6 +41,14 @@ from app.services.admin_modules import MailItem, UtilityReading, WorkplaceLifecy
 from app.services.amc_contracts import AmcObligation, ProjectRecord
 from app.services.vendor_sourcing import RfqRound, SourcingRequirement, VendorQuote
 from app.services.fleet_travel import FleetVehicle, TravelItinerary, TripRecord
+from app.services.enterprise_v3 import (
+    CarbonInventory,
+    ContractAmendment,
+    LearningSignOff,
+    MeterReading,
+    VendorWorkspaceItem,
+    WasteManifest,
+)
 from app.models.org import (
     Asset,
     Budget,
@@ -157,4 +165,10 @@ __all__ = [
     "FleetVehicle",
     "TripRecord",
     "TravelItinerary",
+    "ContractAmendment",
+    "VendorWorkspaceItem",
+    "WasteManifest",
+    "CarbonInventory",
+    "MeterReading",
+    "LearningSignOff",
 ]

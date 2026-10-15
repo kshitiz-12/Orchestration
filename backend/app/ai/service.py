@@ -51,6 +51,8 @@ class LLMService:
             self.provider = HeuristicProvider()
 
     def extract(self, **kwargs) -> ExtractionResult:
+        from app.ai.governance import AIGovernance
+
         subject = kwargs.get("subject") or ""
         raw_body = kwargs.get("body") or ""
         view = kwargs.get("interpreter_view") or prepare_interpreter_view(raw_body)
@@ -62,6 +64,19 @@ class LLMService:
         result: ExtractionResult | None = None
         last_exc: Exception | None = None
         endpoint_meta: dict = {}
+
+        gov = AIGovernance()
+        pre = gov.before_inference(purpose="desk_interpretation", model_id="desk-interpret-v1")
+        if not pre.allowed:
+            # Emergency stop / registry block — heuristic only + force human review
+            result = HeuristicProvider().extract(**kwargs)
+            result.human_review_required = True
+            result.reason = (result.reason or "") + f" | governance_block:{pre.reason}"
+            result.entities = {
+                **(result.entities or {}),
+                "governance": {"allowed": False, "reason": pre.reason, "checks": pre.checks},
+            }
+            return result
 
         try:
             # GeminiProvider already fails over across model + secondary API key
@@ -78,6 +93,23 @@ class LLMService:
             result.reason = (
                 f"Primary AI unavailable ({last_exc}); heuristic fallback used"
             )
+
+        post = gov.after_inference(
+            confidence=float(result.confidence or 0),
+            structured_ok=bool(result.event_type),
+        )
+        result.entities = {
+            **(result.entities or {}),
+            "governance": {
+                "allowed": post.allowed,
+                "reason": post.reason,
+                "checks": post.checks,
+                "model_id": pre.model_id,
+            },
+        }
+        if not post.allowed:
+            result.human_review_required = True
+            result.reason = (result.reason or "") + f" | governance_after:{post.reason}"
 
         looks_meeting = result.event_type == "MEETING_ROOM" or _looks_like_meeting_room(
             subject, body, prior_facts

@@ -2394,15 +2394,29 @@ class AdminDesk:
                 amount = float(m.group(1).replace(",", ""))
             except ValueError:
                 amount = None
-        # Budget check on recorded spend (does not invent finance truth)
+        # V3 §16.4/§31: team 'done, INR X' is REPORTED operational cost only — never posted/paid.
+        cost_snap = None
         if amount is not None and self.settings.unified_outcome_spine:
             try:
                 from datetime import date
 
                 from app.engines.budget import BudgetEngine
+                from app.services.commercial_cost import CommercialCostService
 
                 period = date.today().isoformat()[:7]
                 BudgetEngine(self.session, self.tenant_id).check(amount=amount, period=period)
+                cost = CommercialCostService(self.session, self.tenant_id).report_operational(
+                    outcome.outcome_id,
+                    amount,
+                    actor=actor,
+                    note=note,
+                )
+                cost_snap = {
+                    "cost_id": cost.cost_id,
+                    "status": cost.status,
+                    "reported_amount": cost.reported_amount,
+                    "authoritative_finance": False,
+                }
             except Exception:  # noqa: BLE001
                 pass
         self._ledger(
@@ -2412,16 +2426,22 @@ class AdminDesk:
             actor_email=actor,
             actor_role="team",
             amount=amount,
-            payload={"evidence": evidence, "evidence_gate": evidence_gate},
+            payload={
+                "evidence": evidence,
+                "evidence_gate": evidence_gate,
+                "cost": cost_snap,
+                "finance_note": "OpsLedger is operational memory; CostRequirement.reported_amount is not ERP truth",
+            },
         )
         if amount is not None:
             self._ledger(
                 outcome,
-                "SPEND_RECORDED",
-                f"Spend from completion note: INR {amount:,.0f}",
+                "SPEND_REPORTED_OPS",
+                f"Operational report only (not posted/paid): INR {amount:,.0f}",
                 actor_email=actor,
                 actor_role="team",
                 amount=amount,
+                payload={"authoritative_finance": False, "cost": cost_snap},
             )
 
     def _record_evidence(self, outcome: Outcome, note: str, actor: str, files: list[str]) -> None:

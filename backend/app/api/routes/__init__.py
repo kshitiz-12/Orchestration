@@ -7,6 +7,7 @@ from app.api.routes import (
     auth,
     budgets,
     control_tower,
+    enterprise_v3,
     entities,
     facilities,
     fleet_travel,
@@ -46,6 +47,7 @@ api_router.include_router(sourcing.router)
 api_router.include_router(workplace.router)
 api_router.include_router(fleet_travel.router)
 api_router.include_router(control_tower.router)
+api_router.include_router(enterprise_v3.router)
 api_router.include_router(vendors.router)
 api_router.include_router(gmail.router)
 api_router.include_router(outlook.router)

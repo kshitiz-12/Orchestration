@@ -131,8 +131,18 @@ class ProcessingPipeline:
             if current and current.facts:
                 prior_facts = {**(current.facts or {}), **prior_facts}
 
-        # Light context for first-pass extraction (requester only)
-        preliminary_ctx = self.context.for_extraction(None, event.sender, prior_facts)
+        # V3 §9 Context Gateway — authorised facts only (source + freshness + unavailable)
+        from app.services.context_gateway import ContextGateway
+
+        gateway = ContextGateway(self.session, self.tenant_id)
+        gateway_bundle = gateway.for_interpretation(
+            requester_email=event.sender,
+            location_text=f"{event.subject or ''} {(event.body_text or '')[:500]}",
+        )
+        preliminary_ctx = {
+            **(self.context.for_extraction(None, event.sender, prior_facts) or {}),
+            "context_gateway": gateway_bundle.as_dict(),
+        }
 
         from app.services.attachment_extract import (
             attachment_texts_for_ai,
@@ -157,11 +167,22 @@ class ProcessingPipeline:
         )
         extraction = self._enrich_with_thread_facts(extraction, prior_facts, event)
         extraction = self._merge_pdf_invoice_fields(extraction, pdf_fields)
+        ents = dict(extraction.entities or {})
+        ents["context_gateway"] = gateway_bundle.as_dict()
+        extraction.entities = ents
 
-        # Second-pass: relevant context based on detected event type
-        relevant_ctx = self.context.for_extraction(
-            extraction.event_type, event.sender, extraction.entities
+        # Second-pass: relevant context based on detected event type + gateway tools
+        cat = (extraction.event_type or extraction.category or "").lower()
+        gateway_bundle = gateway.for_interpretation(
+            requester_email=event.sender,
+            category=cat if cat not in {"unknown", "general", ""} else None,
+            location_text=f"{event.subject or ''} {(event.body_text or '')[:500]}",
+            asset_id=(extraction.entities or {}).get("asset_id"),
         )
+        relevant_ctx = {
+            **(self.context.for_extraction(extraction.event_type, event.sender, extraction.entities) or {}),
+            "context_gateway": gateway_bundle.as_dict(),
+        }
         if relevant_ctx != preliminary_ctx:
             extraction = self.llm.extract(
                 subject=event.subject,
@@ -173,6 +194,9 @@ class ProcessingPipeline:
             )
             extraction = self._enrich_with_thread_facts(extraction, prior_facts, event)
             extraction = self._merge_pdf_invoice_fields(extraction, pdf_fields)
+            ents = dict(extraction.entities or {})
+            ents["context_gateway"] = gateway_bundle.as_dict()
+            extraction.entities = ents
 
         routing = self.llm.route(extraction)
         interp_path = (extraction.entities or {}).get("interpretation_path")
