@@ -149,6 +149,14 @@ def ensure_seeded() -> None:
             session.commit()
             logger.info("seed_skipped_tenant_exists", tenant_id=existing.tenant_id)
             return
+        # Creating the first admin — refuse weak passwords in production
+        if settings.is_production:
+            weak = {"", "admin123", "password", "changeme", "change-me", "secret"}
+            if (settings.admin_password or "").strip().lower() in weak:
+                raise RuntimeError(
+                    "ADMIN_PASSWORD must be a strong non-default value when seeding a new "
+                    "company in production. Set it on Render, then redeploy."
+                )
         from scripts.bootstrap_empty_company import bootstrap_empty
 
         tid = bootstrap_empty(session)

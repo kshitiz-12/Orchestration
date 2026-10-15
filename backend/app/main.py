@@ -47,7 +47,17 @@ def _boot_database(settings, logger) -> None:
         # Leave _db_ready unset — /ready stays 503; process stays up for Render port check
 
 
-def _validate_production(settings) -> None:
+_WEAK_ADMIN_PASSWORDS = {"", "admin123", "password", "changeme", "change-me", "secret"}
+
+
+def _is_weak_admin_password(password: str | None) -> bool:
+    return (password or "").strip().lower() in _WEAK_ADMIN_PASSWORDS
+
+
+def _validate_production(settings, logger) -> None:
+    """Hard-fail only on secrets that every request needs. Weak ADMIN_PASSWORD is enforced
+    when creating a new seeded admin — not when the tenant already exists (common on Render redeploy).
+    """
     if not settings.is_production:
         return
     if not (settings.admin_ops_email or "").strip():
@@ -57,12 +67,12 @@ def _validate_production(settings) -> None:
     sk = (settings.secret_key or "").strip()
     if not sk or sk in {"change-me-to-a-long-random-string", "secret", "changeme"}:
         raise RuntimeError("SECRET_KEY must be set to a long random value in production.")
-    if settings.auto_seed:
-        pw = (settings.admin_password or "").strip().lower()
-        if pw in {"", "admin123", "password", "changeme", "change-me", "secret"}:
-            raise RuntimeError(
-                "ADMIN_PASSWORD must be a strong non-default value when AUTO_SEED is enabled in production."
-            )
+    if settings.auto_seed and _is_weak_admin_password(settings.admin_password):
+        # Do not crash lifespan — that blocks Render port bind. Seed path refuses weak PW on create.
+        logger.warning(
+            "weak_admin_password",
+            hint="Set a strong ADMIN_PASSWORD on Render. Ignored when tenant already exists.",
+        )
 
 
 @asynccontextmanager
@@ -86,7 +96,7 @@ async def lifespan(_: FastAPI):
         run_migrations=settings.run_migrations_on_startup,
     )
 
-    _validate_production(settings)
+    _validate_production(settings, logger)
 
     # Sync DB boot in tests (deterministic). Async bind-first in real deploys (Render port scan).
     stop = threading.Event()

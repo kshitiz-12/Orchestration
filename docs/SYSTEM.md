@@ -1,10 +1,17 @@
 # AdminServices — Complete End-to-End System Manual
 
-**One document for the whole product.**  
+**One document for the whole product. Enterprise V3 posture — not a prototype.**  
 **Stack:** FastAPI (`backend/`) + Next.js console (`frontend/`) + Postgres/SQLite + email (CloudMailin / Gmail / Outlook) + Gemini (optional).  
-**Live API:** `https://orchestration-pqja.onrender.com` — `/health`, `/ready`, `/api/v1/...`, `/docs`.
+**Live API:** `https://orchestration-pqja.onrender.com` — `/health`, `/ready`, `/api/v1/...`, `/docs`.  
+**Tests:** `backend/tests/test_enterprise_v3.py` + `test_v3_foundation.py` (24 passed).
 
-**Core rule:** AI interprets email. Rules validate. Controlled services execute. Humans approve money, bank changes, and sensitive actions. Evidence verifies closure. Amounts are never invented.
+**Core rules:**
+1. AI interprets email. Rules validate. Controlled engines execute. Humans approve money, bank changes, and sensitive actions. Evidence verifies closure. Amounts are never invented.
+2. **One spine:** every case is Outcome → Requirement → Task (meeting/invoice specialists are module helpers, not alternate masters).
+3. **Financial segregation:** team `done, INR X` → `CostRequirement.reported_amount` only. OpsLedger = operational memory. Posted/paid only via ERP.
+4. **Context before AI:** Context Gateway supplies requester/location/AMC/budget/rate with source + freshness; AIGovernance can emergency-stop or confidence-gate extracts.
+
+**Product exclusions (by design):** real-estate lease commercial masters; mobile field / IoT / GPS technician app.
 
 ---
 
@@ -13,17 +20,17 @@
 Email-first **workplace operations** for a company (multi-branch / BFSI style):
 
 - Employees mail requests (HVAC, visitors, supplies, travel, onboarding, meetings, invoices…).
-- The platform opens a **case (Outcome)**, routes work, asks approvals when needed, tracks spend on an **ops ledger**, closes with evidence.
+- The platform opens a **case (Outcome)**, hydrates context via the gateway, routes work, asks approvals when needed, records **reported** spend on CostRequirement, closes with evidence.
 - The **admin console** is for setup, visibility, vendors, budgets, facilities masters — not the daily employee UX.
-- Vendors use an **invite link only** (no vendor app).
+- Vendors: **invite → register → ACTIVE**, then day-2 **workspace** (quote / evidence / invoice / progress) — no separate vendor app.
 
 | Actor | Channel | Authority |
 |-------|---------|-----------|
 | Employee | Email | Open/update their cases |
-| Team inbox (Facilities, IT, …) | Reply on case thread | `on it`, `done`, `issue: …`, `assign to …` |
-| Ops / company admin | Ops mailbox + console | Approvals, vendors, analytics, Setup |
+| Team inbox (Facilities, IT, …) | Reply on case thread | `on it`, `done`, `done INR …`, `issue: …`, `assign to …` |
+| Ops / company admin | Ops mailbox + console | Approvals, vendors, contracts, analytics, Setup, DLQ |
 | Approver | Approval mail / signed link | Approve/reject |
-| Vendor | `/vendor-register/{token}` | Submit profile only |
+| Vendor | `/vendor-register/{token}` + workspace API | Profile + day-2 submit (quote/evidence/invoice) |
 
 ---
 
@@ -34,34 +41,44 @@ flowchart TB
   subgraph channels [Channels]
     Mail[Employee / Team / Ops email]
     Console[Admin console Next.js]
-    VendorLink[Vendor registration link]
+    VendorLink[Vendor register + workspace]
     Webhook[CloudMailin webhook]
   end
   subgraph api [FastAPI /api/v1]
     Intake[IntakeService]
     Pipe[ProcessingPipeline]
+    GW[Context Gateway]
+    Gov[AI Governance]
     Desk[AdminDesk]
     Scen[ScenarioOrchestrator]
     Engines[Control engines]
-    Fac[Facilities enterprise]
+    Cost[CommercialCostService]
+    Ent[EnterpriseV3Service]
+    Fac[Facilities]
     P2P[P2P / Sourcing]
   end
   subgraph data [Data]
     DB[(Postgres / SQLite)]
     Store[storage/attachments]
-    Ledger[OpsLedger]
-    Outbox[OutboxEvent]
+    CR[CostRequirement]
+    Ledger[OpsLedger ops-only]
+    Outbox[Outbox + DLQ]
   end
   Mail --> Webhook --> Intake --> Pipe
+  Pipe --> GW
+  Pipe --> Gov
   Pipe --> Desk
   Pipe --> Scen
   Desk --> Engines
   Scen --> Engines
+  Desk --> Cost
   Console --> api
-  VendorLink --> api
+  VendorLink --> Ent
   Engines --> DB
+  Cost --> CR
   Fac --> DB
   P2P --> DB
+  Ent --> DB
   Pipe --> Ledger
   Pipe --> Store
   Engines --> Outbox
@@ -69,15 +86,20 @@ flowchart TB
 
 | Layer | Path |
 |-------|------|
-| API | `backend/app/api/routes/` |
+| API | `backend/app/api/routes/` (+ `enterprise_v3.py`) |
 | Pipeline | `backend/app/engine/pipeline.py` |
+| Context Gateway | `backend/app/services/context_gateway.py` |
+| AI Governance | `backend/app/ai/governance.py` |
 | Desk | `backend/app/agent/desk.py` |
-| Scenarios | `backend/app/engine/scenarios.py` |
+| Scenarios | `backend/app/engine/scenarios.py` (helpers under unified spine) |
 | Outcome spine | `backend/app/engine/outcome_engine.py`, `outcome_spine.py` |
 | Engines | `backend/app/engines/` (Approval, Budget, Evidence, Matching, Rate, Resource, SLA) |
-| AI | `backend/app/ai/` (Gemini + Heuristic) |
+| Commercial cost | `backend/app/services/commercial_cost.py` |
+| Enterprise V3 | `backend/app/services/enterprise_v3.py` |
+| AI | `backend/app/ai/` (Gemini + Heuristic + governance) |
 | Facilities | `backend/app/services/facilities_enterprise.py`, `facilities_ops.py` |
 | Vendors | `backend/app/services/vendor_lifecycle.py` |
+| Outbox | `backend/app/services/outbox.py` (PENDING → SENT / FAILED / **DEAD** + requeue) |
 | Workers | `backend/app/workers/runner.py`, `hold_sweeper.py` |
 
 ---
@@ -104,11 +126,12 @@ flowchart TD
   N --> O[Requester notified]
 ```
 
-**What “done” means:** case opened → routed → (approval if needed) → work executed → evidence → requester informed → ledger remembers who/what/spend.
+**What “done” means:** case opened → Context Gateway hydrated → routed → (approval if needed) → work executed → evidence → requester informed.  
+**Spend:** `done, INR 12500` → CostRequirement **REPORTED** (ops memory on OpsLedger). It is **not** paid. Paid only after ERP post/acknowledge.
 
 ### 3.1 Processing stages
 
-`INTAKE → QUEUED → AI_INTERPRETATION → … → OUTCOME_ENGINE → HUMAN_REVIEW | COMMUNICATION → COMPLETED | FAILED`
+`INTAKE → QUEUED → CONTEXT_GATEWAY → AI_INTERPRETATION (governed) → … → OUTCOME_ENGINE → HUMAN_REVIEW | COMMUNICATION → COMPLETED | FAILED`
 
 ### 3.2 Intake details (`IntakeService`)
 
@@ -123,11 +146,11 @@ flowchart TD
 
 | Branch | Behaviour |
 |--------|-----------|
-| Ops/team reply with case ref | Verify sender → desk/legacy command |
-| Ops analytics | Ledger Q&A — no new case |
+| Ops/team reply with case ref | Verify sender → desk command (`on it` / `done` / `done INR …` → commercial cost) |
+| Ops analytics | OpsLedger Q&A — no new case; amounts are ops memory not books |
 | `ACCEPT_REQUESTS_FROM=employees` + unknown sender | Store only |
-| New request + `AGENT_MODE` | **AdminDesk** may finish the case |
-| Else | LLM extract → route → **ScenarioOrchestrator** |
+| New request + `AGENT_MODE` | Gateway → governance → **AdminDesk** may finish under spine |
+| Else | Gateway → governed LLM extract → route → **ScenarioOrchestrator** (spine materializer) |
 
 ---
 
@@ -171,7 +194,7 @@ flowchart LR
 
 ---
 
-## 6. AI (Gemini) and PDF invoices
+## 6. AI (Gemini), governance, and PDF invoices
 
 ```mermaid
 flowchart TD
@@ -179,9 +202,13 @@ flowchart TD
   Save --> Text[pypdf text extract]
   Text --> Scrape[Regex scrape: invoice_number amount PO vendor qty rate]
   Scrape --> Merge[Pipeline merges into extraction entities]
-  Body[Email body] --> Gemini[Gemini JSON extract OR Heuristic]
+  Body[Email body] --> GW[Context Gateway facts]
+  GW --> Pre[AIGovernance before_inference]
+  Pre -->|blocked| Stop[No invent / human path]
+  Pre -->|allowed| Gemini[Gemini JSON OR Heuristic]
   Merge --> Gemini
-  Gemini --> Inv[Invoice scenario]
+  Gemini --> Post[AIGovernance after_inference confidence]
+  Post --> Inv[Invoice / desk route on spine]
   Inv --> Match[Duplicate / event match / 3-way match]
   Match --> Human[Finance approval — never auto-pay]
 ```
@@ -190,10 +217,12 @@ flowchart TD
 |------|------|
 | **Gemini** | `GEMINI_API_KEY` set — structured JSON extraction |
 | **Heuristic** | No key — keyword rules; still uses PDF scrape |
+| **Emergency stop** | `AI_EMERGENCY_STOP=true` → governance blocks inference |
+| **Confidence gate** | Low confidence → human review / no auto-route |
 | **Digital PDF** | Text layer → amount stored |
 | **Scanned PDF** | No text layer → ask human / flag `extract_note` |
 
-Gemini **does not** approve payment, invent amounts, or change bank details.
+Gemini **does not** approve payment, invent amounts, change bank details, or mutate learning prompts without M26 sign-off.
 
 ---
 
@@ -206,37 +235,39 @@ Gemini **does not** approve payment, invent amounts, or change bank details.
 3. AMC gate: if asset covered → prefer AMC vendor call (no new buy).
 4. Budget/SLA engines apply.
 5. WO email to Facilities (and vendor hint).
-6. Team `done` → evidence → close → ledger.
+6. Team `done` / `done INR …` → evidence → close → CostRequirement REPORTED + OpsLedger memory.
 
 **Work order statuses:**  
 `OPEN → TRIAGED → APPROVED → ASSIGNED → IN_PROGRESS → PENDING_PARTS → PENDING_ACCEPTANCE → CLOSED | CANCELLED`
 
 ### 7.2 Meeting room
 
-ClientMeetingOrchestrator: hold room → confirm → visitors/parking/catering modules as needed → shared Outcome→Requirement→Task spine.
+Module helper holds room → confirm → visitors/parking/catering as needed. Always materializes the same Outcome→Requirement→Task spine (not a second case master).
 
 ### 7.3 Vendor invoice
 
-Extract fields → create `Invoice` → duplicate check → match event SES or PO+GRN → mismatches raise exceptions → on MATCH request finance approval → ERP handoff status tracked (payment never invented).
+Extract fields → create `Invoice` → duplicate check → match event SES or PO+GRN → mismatches raise exceptions → on MATCH request finance approval → ERP handoff (`ErpHandoff`) tracked. Payment never invented; CostRequirement moves REPORTED → INVOICED → POSTED → PAID only via commercial/ERP path.
 
-### 7.4 Vendor lifecycle
+### 7.4 Vendor lifecycle + day-2 workspace
 
 ```mermaid
 flowchart LR
   I[INVITED] --> U[UNDER_REVIEW]
   U --> A[ACTIVE]
+  A --> WS[Workspace QUOTE EVIDENCE INVOICE PROGRESS]
   A --> S[SUSPENDED]
   A --> B[BLACKLISTED]
   S --> A
 ```
 
-Only **ACTIVE** vendors are used for WO hints and stock reorder.  
-Tiers after score: PREFERRED ≥80, APPROVED ≥55, else CONDITIONAL.
+Only **ACTIVE** vendors are used for WO hints, stock reorder, and RFQ.  
+Tiers after score: PREFERRED ≥80, APPROVED ≥55, else CONDITIONAL.  
+Workspace items: `SUBMITTED → ACCEPTED | REJECTED | WITHDRAWN`.
 
-### 7.5 P2P / sourcing
+### 7.5 P2P / sourcing (incl. M16 sealed RFQ)
 
 Purchase request → PO → GRN / SES → invoice match-and-post.  
-Sourcing: requirement → RFQ → quotes → compare → award (ACTIVE vendors only).
+Sourcing: requirement → RFQ → quotes → **sealed score** (tech vs commercial; sealed until due/unseal) → compare → award (ACTIVE vendors only).
 
 ### 7.6 Soft services
 
@@ -245,6 +276,18 @@ Schedule → generate rounds → complete with SES link for certification.
 ### 7.7 PM sweeper
 
 Overdue `PreventiveSchedule` → creates desk outcomes/WOs automatically.
+
+### 7.8 Contracts (lifecycle)
+
+Amend (rate card / SLA credits / penalties) → versioned `ContractAmendment`. Terminate with reason. Status moves to TERMINATED.
+
+### 7.9 ESG / utilities (M23)
+
+Meter readings with **rollover** math → waste manifests → carbon inventory Scope 1/2/3. Complements facilities `EsgMetric`.
+
+### 7.10 Governed learning (M26)
+
+`LearningRecord` becomes eligible only after verified closure **and** human corrections **and** explicit sign-off (`LearningSignOff`). No silent prompt mutation.
 
 ---
 
@@ -278,12 +321,13 @@ cd frontend && npm install && npm run dev
 |----------|---------|
 | `APP_ENV=production` | Strict checks |
 | `SECRET_KEY` | Strong JWT secret |
-| `ADMIN_PASSWORD` | Strong (not admin123) when `AUTO_SEED` |
+| `ADMIN_PASSWORD` | Strong (not `admin123`) — required only when seeding a **new** company; redeploys with existing tenant warn only |
 | `ADMIN_OPS_EMAIL` | Required ops mailbox |
 | `DATABASE_URL` | Supabase **session** pooler `:5432` |
 | `CLOUDMAILIN_*` | Inbound webhook + outbound |
 | `PUBLIC_BASE_URL` / `FRONTEND_PUBLIC_URL` | Approval + vendor links |
 | `GEMINI_API_KEY` | Optional AI |
+| `AI_EMERGENCY_STOP` | `true` blocks all model inference (governance) |
 | `INPROCESS_SWEEPER_SECONDS` | Sweeps on web dyno |
 | Health path | `/health` (DB boot is background; `/ready` for DB) |
 
@@ -298,6 +342,7 @@ Startup: port binds immediately; schema/seed runs in background thread so Render
 | `/auth` | Login |
 | `/intake` | Ingest/process emails, worker tick |
 | `/outcomes`, `/tasks`, `/evidence`, `/approvals` | Case spine |
+| `/outcomes/{id}/cost`, `/outcomes/{id}/cost/report` | CostRequirement snapshot + ops report |
 | `/reviews` | Human review queue |
 | `/ops` | Resources, invoices, failures, SLA tick, holds sweep, AI health |
 | `/entities` | Legal entities |
@@ -309,14 +354,23 @@ Startup: port binds immediately; schema/seed runs in background thread so Render
 | `/amc`, `/projects` | AMC obligations, projects |
 | `/p2p` | PR, PO, GRN, SES, invoice post |
 | `/sourcing` | RFQ lifecycle |
+| `/sourcing/rfq/{id}/sealed-score` | M16 sealed / unseal scoring |
 | `/workplace` | Seats, visitors |
 | `/fleet`, `/travel` | Trips, itineraries |
 | `/control-tower` | Summary |
 | `/vendors` | Invite, activate, suspend, score |
+| `/vendors/{id}/workspace` | Day-2 QUOTE / EVIDENCE / INVOICE / PROGRESS |
+| `/vendor-workspace/{id}/decide` | Accept / reject workspace item |
+| `/contracts/{id}/amendments` | Amend rate card / SLA credits / penalties |
+| `/contracts/{id}/terminate` | Terminate contract |
+| `/utilities/meters` | Meter reading + rollover |
+| `/esg/waste-manifests`, `/esg/carbon` | M23 waste + Scope 1/2/3 |
+| `/learning`, `/learning/{id}/sign-off` | Learning + M26 governed sign-off |
+| `/outbox/dead-letters`, `.../requeue` | Integration DLQ |
+| `/integrations/erp/reconcile` | Enqueue ERP reconciliation |
 | `/integrations/gmail\|outlook` | OAuth + poll |
 | `/webhooks/cloudmailin` | Inbound mail |
 | `/setup` | Company data import |
-| `/learning` | Learning records |
 | `/public/approvals` | Signed approve/reject pages |
 | `/public/vendors` | Vendor self-register |
 
@@ -336,7 +390,7 @@ Also: `GET /health`, `GET /ready`.
 | SLA tick | Overdue / escalate |
 | PM sweeper | Due PM → cases |
 | Visitor expiry | Expire open passes |
-| Outbox flush | Send pending integration/notify events |
+| Outbox flush | Send pending integration/notify events; exhausted → **DEAD** DLQ |
 | Admin digest | Daily ops digest when configured |
 
 ---
@@ -443,9 +497,10 @@ All `TimestampMixin` tables also have **`created_at`**, **`updated_at`**.
 
 **VisitorPass** — `pass_id`, `tenant_id`, `outcome_id`, `pass_code`, `visitor_name`, `company`, `host_email`, visit date/time, `office`, `vehicle_number`, `parking_slot`, `purpose`, `status`, `attributes`
 
-### 11.5 Finance (`models/finance.py`)
+### 11.5 Finance (`models/finance.py`) — commercial authority
 
-**CostRequirement** — `cost_id`, `tenant_id`, `entity_id`, `outcome_id`, `vendor_id`, `budget_id`, `category`, `currency`, `estimated_amount`, `reserved_amount`, `approved_amount`, `committed_amount`, `reported_amount`, `invoiced_amount`, `posted_amount`, `paid_amount`, `status`, `notes`, `attributes`
+**CostRequirement** — authoritative commercial spine: `cost_id`, `tenant_id`, `entity_id`, `outcome_id`, `vendor_id`, `budget_id`, `category`, `currency`, `estimated_amount`, `reserved_amount`, `approved_amount`, `committed_amount`, `reported_amount`, `invoiced_amount`, `posted_amount`, `paid_amount`, `status` (`DRAFT` → `ESTIMATED` → `RESERVED` → `APPROVED` → `COMMITTED` → `REPORTED` → `INVOICED` → `POSTED`/`PARTIAL` → `PAID` → `CLOSED`), `notes`, `attributes`  
+Team `done INR …` may only advance to **REPORTED**. Never invents `posted_amount` / `paid_amount`.
 
 **ServiceEntry (SES)** — `ses_id`, `tenant_id`, `entity_id`, `po_id`, `contract_id`, `vendor_id`, `outcome_id`, `quantity`, `unit_rate`, `amount`, `currency`, `period_from`, `period_to`, `status` (DRAFT/SUBMITTED/ACCEPTED/REJECTED), `notes`, `accepted_at`
 
@@ -454,7 +509,7 @@ All `TimestampMixin` tables also have **`created_at`**, **`updated_at`**.
 ### 11.6 Ops ledger & integrations
 
 **OpsLedgerEvent** — `event_id`, `tenant_id`, `occurred_at`, `actor_email`, `actor_role`, `department_code`, `location_id`, `category`, `outcome_id`, `case_reference`, `event_type`, `amount`, `currency`, `quantity`, `unit`, `sku_code`, `asset_tag`, `summary`, `payload`  
-*(Operational memory — not ERP books.)*
+*(Operational memory for analytics / “who did what” — **not** ERP books, **not** payment truth.)*
 
 **IntegrationCredential** — `credential_id`, `tenant_id`, `provider`, `account_email`, `token_json`, `scopes`, `status`, `last_synced_at`
 
@@ -518,36 +573,59 @@ All `TimestampMixin` tables also have **`created_at`**, **`updated_at`**.
 
 **UtilityReading** — `reading_id`, `tenant_id`, `location_id`, `meter_code`, `utility_type`, `reading_value`, `unit`, `reading_at`, `attributes`
 
+### 11.9 Enterprise V3 closers (`services/enterprise_v3.py`)
+
+**ContractAmendment** — `amendment_id`, `tenant_id`, `contract_id`, `version`, `change_summary`, `rate_card_delta`, `sla_credits`, `penalties`, `effective_from`, `approved_by`, `status`, `attributes`
+
+**VendorWorkspaceItem** — `item_id`, `tenant_id`, `vendor_id`, `item_type` (QUOTE/EVIDENCE/INVOICE/PROGRESS), `outcome_id`, `rfq_id`, `title`, `payload`, `amount`, `currency`, `file_refs`, `status` (SUBMITTED/ACCEPTED/REJECTED/WITHDRAWN), `notes`
+
+**WasteManifest** — `manifest_id`, `tenant_id`, `location_id`, `waste_type`, `quantity_kg`, `disposer`, `manifest_no`, `disposed_on`, `certificate_ref`, `status`, `attributes`
+
+**CarbonInventory** — `carbon_id`, `tenant_id`, `location_id`, `period`, `scope` (SCOPE1/2/3), `tco2e`, `methodology`, `factors`, `status`, `attributes`
+
+**MeterReading** — `reading_id`, `tenant_id`, `location_id`, `meter_code`, `utility_type`, `reading_value`, `previous_value`, `delta`, `rolled_over`, `reading_at`, `attributes`
+
+**LearningSignOff** — `signoff_id`, `tenant_id`, `record_id`, `signed_by`, `decision` (APPROVE/REJECT), `notes`, `status`
+
 ---
 
-## 12. Enterprise posture (V3) — what closed vs excluded
+## 12. Enterprise posture (V3) — closed vs excluded
 
-**Target:** Kapil V3 blueprint enterprise-ready — **not** a prototype.
+**Status:** Kapil V3 blueprint gaps closed in code — **enterprise-ready**, not a prototype. Lease + mobile remain out of scope by product decision.
 
-| Closed in code | Notes |
-|----------------|-------|
-| Context Gateway tools wired into pipeline | `get_requester`, `resolve_location`, `get_site_services`, `check_amc`, `get_budget`, `get_rate` — facts carry source/freshness/unavailable |
-| AIGovernance | Model registry + emergency stop + confidence gate on extract |
-| Financial segregation | Team `done, INR X` → `CostRequirement.reported_amount` only; OpsLedger = operational memory; paid only via ERP |
-| Unified spine for all templates | Meeting/invoice materialize Outcome→Requirement→Task; specialists are **module helpers** |
-| Contract lifecycle | Amend / SLA credits / penalties / terminate |
-| Vendor day-2 workspace | QUOTE / EVIDENCE / INVOICE / PROGRESS submit + decide |
-| M16 sealed RFQ scoring | Tech vs commercial; sealed until due/unseal |
-| M23 ESG | Meter rollover, Scope1/2/3 carbon, waste manifests |
-| M26 governed learning | Sign-off requires verified + human corrections; no auto prompt mutation |
-| Outbox DLQ | DEAD letter queue + requeue + ERP reconcile enqueue |
+### 12.1 Closed (shipped)
 
-| Still excluded (product decision) |
-|-----------------------------------|
-| Real-estate **lease** commercial masters (rent, landlord, CAM, stamp duty) |
-| Mobile field / QR technician offline app / IoT GPS telemetry |
+| Area | Implementation |
+|------|----------------|
+| Context Gateway | Wired in pipeline: requester, location, site services, AMC, budget, rate — facts include `source_system` / freshness / `unavailable` |
+| AI Governance | Registry + `AI_EMERGENCY_STOP` + confidence gate before/after extract (`ai/governance.py` + `ai/service.py`) |
+| Financial segregation | `CommercialCostService` — team spend → `CostRequirement.REPORTED` only; OpsLedger ops-only; paid via ERP |
+| Unified spine | All templates materialize Outcome→Requirement→Task; meeting/invoice = **module helpers** |
+| Contract lifecycle | Amend / SLA credits / penalties / terminate → `ContractAmendment` |
+| Vendor day-2 | Workspace QUOTE / EVIDENCE / INVOICE / PROGRESS + decide |
+| M16 sealed RFQ | Tech vs commercial scoring; sealed until due / unseal |
+| M23 ESG | Meter rollover, Scope 1/2/3 carbon, waste manifests |
+| M26 learning | Sign-off only if verified + human corrections; no auto prompt mutation |
+| Outbox DLQ | Status **DEAD** + list + requeue + ERP reconcile enqueue |
 
-| External dependency (adapter ready; needs client credentials) |
-|---------------------------------------------------------------|
-| Live ERP journal post/pay (HTTP connector; stub in CI) |
-| Live HRMS / SCIM IdP sync |
+### 12.2 Excluded (product decision)
 
-APIs: `/api/v1/contracts/...`, `/vendors/{id}/workspace`, `/sourcing/rfq/{id}/sealed-score`, `/utilities/meters`, `/esg/*`, `/learning/{id}/sign-off`, `/outcomes/{id}/cost`, `/outbox/dead-letters`, `/integrations/erp/reconcile`.
+| Area | Why |
+|------|-----|
+| Real-estate **lease** commercial | Rent, landlord, CAM, stamp duty masters out of scope |
+| Mobile / IoT / GPS field | Offline technician QR app and telemetry out of scope |
+
+### 12.3 External credentials (adapters ready)
+
+| Integration | State |
+|-------------|-------|
+| Live ERP journal post/pay | HTTP connector + reconcile enqueue; stub in CI until client credentials |
+| Live HRMS / SCIM IdP | Adapter pattern ready; needs client IdP |
+
+### 12.4 Proof
+
+- Routes: `enterprise_v3.py` mounted on `/api/v1`
+- Tests: `tests/test_enterprise_v3.py` + `tests/test_v3_foundation.py` → **24 passed**
 
 ---
 
@@ -556,13 +634,15 @@ APIs: `/api/v1/contracts/...`, `/vendors/{id}/workspace`, `/sourcing/rfq/{id}/se
 1. `GET /health` → ok; `GET /ready` → ready  
 2. Console login with `ADMIN_EMAIL` / `ADMIN_PASSWORD`  
 3. Setup: office + Facilities inbox + one employee  
-4. Employee emails “Hi” → help reply  
-5. Employee emails AC fault → case + WO  
+4. Employee emails "Hi" → help reply  
+5. Employee emails AC fault → case + WO (gateway context present)  
 6. Invite vendor → register → activate → appears on next WO  
 7. Vendor PDF invoice with amount in text → `Invoice.amount` stored → match/approval (no auto-pay)  
-8. Team `done, INR 12500` → CostRequirement REPORTED (not PAID); OpsLedger ops-only  
+8. Team `done, INR 12500` → CostRequirement **REPORTED** (not PAID); OpsLedger ops-only  
 9. Control tower / facilities dashboard shows open WO / overdue PM  
 10. Contract amend / vendor workspace quote / sealed RFQ unseal / learning sign-off  
+11. Force outbox DEAD → list dead-letters → requeue → PENDING  
+12. `AI_EMERGENCY_STOP=true` → extract blocked by governance  
 
 ---
 
