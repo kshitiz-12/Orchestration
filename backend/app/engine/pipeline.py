@@ -547,7 +547,16 @@ class ProcessingPipeline:
                 "replied": False,
                 "sender_verification": how,
             }
-        answer = answer_admin_question(self.session, self.tenant_id, text)
+        from app.services.admin_ops import analytics_scope_for_sender
+
+        location_ids, scope_label = analytics_scope_for_sender(self.session, self.tenant_id, sender)
+        answer = answer_admin_question(
+            self.session,
+            self.tenant_id,
+            text,
+            location_ids=location_ids,
+            scope_label=scope_label,
+        )
         body = f"{answer.reply}\n\n{self.settings.mail_signature}\n"
         subject = f"Re: {event.subject or 'Ops question'}"
         self.comms.send(

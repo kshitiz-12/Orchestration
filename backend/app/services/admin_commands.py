@@ -125,6 +125,40 @@ def _spf(envelope: Any) -> tuple[str, str]:
     return str(env.get("spf][result") or "").lower(), str(env.get("spf][domain") or "").lower()
 
 
+_GOOGLE_MAIL_NETS = (
+    "64.233.160.0/19",
+    "66.102.0.0/20",
+    "66.249.80.0/20",
+    "72.14.192.0/18",
+    "74.125.0.0/16",
+    "108.177.8.0/21",
+    "142.250.0.0/15",
+    "172.217.0.0/19",
+    "172.253.0.0/16",
+    "173.194.0.0/16",
+    "209.85.128.0/17",
+    "216.58.192.0/19",
+    "216.239.32.0/19",
+)
+
+
+def _google_submitted(envelope: Any) -> bool:
+    """CloudMailin often records Gmail SPF as neutral. Trust it only when the SMTP peer is Google."""
+    import ipaddress
+
+    env = envelope if isinstance(envelope, dict) else {}
+    if not env.get("tls"):
+        return False
+    helo = str(env.get("helo_domain") or "").lower()
+    if helo != "google.com" and not helo.endswith(".google.com"):
+        return False
+    try:
+        peer = ipaddress.ip_address(str(env.get("remote_ip") or ""))
+    except ValueError:
+        return False
+    return any(peer in ipaddress.ip_network(net) for net in _GOOGLE_MAIL_NETS)
+
+
 def verify_ops_sender(session: Session, tenant_id: str, headers: Any, sender: str) -> tuple[bool, str]:
     """A From header is trivially spoofed; require SPF/DKIM for the sender's domain or a reply to our own mail."""
     from app.agent.directory import base_mailbox
@@ -136,9 +170,19 @@ def verify_ops_sender(session: Session, tenant_id: str, headers: Any, sender: st
     domain = sender.rsplit("@", 1)[-1]
     hdrs = _lower_headers(headers)
 
-    result, spf_domain = _spf(hdrs.get("_envelope"))
+    envelope = hdrs.get("_envelope")
+    result, spf_domain = _spf(envelope)
     if result == "pass" and spf_domain and (spf_domain == domain or spf_domain.endswith("." + domain)):
         return True, "spf_pass"
+    # Known ops mailbox, envelope From matches, delivered by Gmail over TLS. SPF neutral is normal here.
+    if result not in {"fail", "softfail", "permerror"} and _google_submitted(envelope):
+        env = envelope if isinstance(envelope, dict) else {}
+        envelope_from = parseaddr(str(env.get("from") or ""))[1].strip().lower() or str(env.get("from") or "").strip().lower()
+        if envelope_from == sender:
+            from app.services.admin_ops import is_ops_authority
+
+            if is_ops_authority(session, tenant_id, sender):
+                return True, "ops_directory_google"
 
     auth = str(hdrs.get("authentication-results") or hdrs.get("arc-authentication-results") or "").lower()
     if re.search(rf"dkim=pass[^;]*header\.(?:d|i)=@?(?:[\w.-]+\.)?{re.escape(domain)}\b", auth):

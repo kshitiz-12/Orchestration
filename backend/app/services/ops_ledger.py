@@ -112,6 +112,7 @@ def query_events(
     event_types: Optional[list[str]] = None,
     department_code: Optional[str] = None,
     location_id: Optional[str] = None,
+    location_ids: Optional[list[str]] = None,
     category: Optional[str] = None,
     case_reference: Optional[str] = None,
     days: int = 30,
@@ -129,7 +130,9 @@ def query_events(
         q = q.where(col(OpsLedgerEvent.event_type).in_(event_types))
     if department_code:
         q = q.where(OpsLedgerEvent.department_code == department_code)
-    if location_id:
+    if location_ids is not None:
+        q = q.where(col(OpsLedgerEvent.location_id).in_(location_ids or ["__none__"]))
+    elif location_id:
         q = q.where(OpsLedgerEvent.location_id == location_id)
     if category:
         q = q.where(OpsLedgerEvent.category == category.lower())
@@ -145,15 +148,24 @@ def spend_summary(
     *,
     department_code: Optional[str] = None,
     location_id: Optional[str] = None,
+    location_ids: Optional[list[str]] = None,
     category: Optional[str] = None,
     days: int = 30,
 ) -> dict[str, Any]:
     rows = query_events(
         session,
         tenant_id,
-        event_types=["SPEND_RECORDED", "STOCK_REORDER", "STOCK_REFILL", "VENDOR_ASSIGNED", "TEAM_DONE"],
+        event_types=[
+            "SPEND_RECORDED",
+            "SPEND_REPORTED_OPS",
+            "STOCK_REORDER",
+            "STOCK_REFILL",
+            "VENDOR_ASSIGNED",
+            "TEAM_DONE",
+        ],
         department_code=department_code,
         location_id=location_id,
+        location_ids=location_ids,
         category=category,
         days=days,
         limit=500,
@@ -172,6 +184,7 @@ def spend_summary(
         "days": days,
         "department_code": department_code,
         "location_id": location_id,
+        "location_ids": location_ids,
         "category": category,
         "top": [
             {
@@ -192,6 +205,7 @@ def repairs_summary(
     tenant_id: str,
     *,
     location_id: Optional[str] = None,
+    location_ids: Optional[list[str]] = None,
     department_code: Optional[str] = None,
     days: int = 30,
 ) -> dict[str, Any]:
@@ -201,6 +215,7 @@ def repairs_summary(
         tenant_id,
         event_types=["TEAM_DONE", "CLOSED", "CASE_OPENED", "WORK_ORDER_SENT"],
         location_id=location_id,
+        location_ids=location_ids,
         department_code=department_code,
         days=days,
         limit=300,
@@ -230,6 +245,7 @@ def who_did_what(
     *,
     case_reference: Optional[str] = None,
     department_code: Optional[str] = None,
+    location_ids: Optional[list[str]] = None,
     days: int = 14,
 ) -> dict[str, Any]:
     rows = query_events(
@@ -237,6 +253,7 @@ def who_did_what(
         tenant_id,
         case_reference=case_reference,
         department_code=department_code,
+        location_ids=location_ids,
         days=days,
         limit=150,
     )

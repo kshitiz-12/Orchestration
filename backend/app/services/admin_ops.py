@@ -72,6 +72,22 @@ def trusted_ops_senders() -> set[str]:
     return out
 
 
+def is_ops_person_role(role: Optional[str]) -> bool:
+    """Employee-sheet roles, including 'COMPANY ADMIN / ADMIN - PUNE' style labels."""
+    raw = (role or "").strip().upper()
+    if raw in _OPS_PERSON_ROLES:
+        return True
+    for part in re.split(r"[/,|]", raw):
+        token = re.sub(r"[\s\-]+", "_", part.strip()).strip("_")
+        if not token:
+            continue
+        if token in _OPS_PERSON_ROLES:
+            return True
+        if token.startswith(("COMPANY_ADMIN", "BRANCH_ADMIN", "TEAM_OPERATOR", "ADMIN_")) or token == "ADMIN":
+            return True
+    return False
+
+
 def person_ops_emails(session, tenant_id: str) -> set[str]:
     """Company/branch admins from the employee sheet (authority by mailbox, not dashboard)."""
     from sqlmodel import select
@@ -82,9 +98,56 @@ def person_ops_emails(session, tenant_id: str) -> set[str]:
     for person in session.exec(
         select(Person).where(Person.tenant_id == tenant_id, Person.is_active == True)  # noqa: E712
     ).all():
-        if (person.role or "").strip().upper() in _OPS_PERSON_ROLES and person.email:
+        if is_ops_person_role(person.role) and person.email:
             out.add(person.email.strip().lower())
     return out
+
+
+def _location_tree_ids(session, tenant_id: str, root_id: str) -> set[str]:
+    """Site plus child floors/rooms, and rows tagged with that site."""
+    from sqlmodel import select
+
+    from app.models.org import Location
+
+    rows = session.exec(select(Location).where(Location.tenant_id == tenant_id)).all()
+    out = {root_id}
+    changed = True
+    while changed:
+        changed = False
+        for loc in rows:
+            if loc.location_id in out:
+                continue
+            if loc.parent_id in out or (loc.site_id and loc.site_id in out):
+                out.add(loc.location_id)
+                changed = True
+    return out
+
+
+def analytics_scope_for_sender(session, tenant_id: str, sender: Optional[str]) -> tuple[Optional[list[str]], Optional[str]]:
+    """Branch admins only see their site tree. A mailbox with no home site sees the whole company."""
+    from email.utils import parseaddr
+
+    from sqlmodel import select
+
+    from app.models.org import Location, Person
+
+    addr = (sender or "").strip().lower()
+    if "<" in addr:
+        addr = parseaddr(sender or "")[1].strip().lower()
+    if not addr:
+        return None, None
+    person = session.exec(
+        select(Person).where(
+            Person.tenant_id == tenant_id,
+            Person.email == addr,
+            Person.is_active == True,  # noqa: E712
+        )
+    ).first()
+    if not person or not person.site_id:
+        return None, None
+    loc = session.get(Location, person.site_id)
+    label = (loc.name if loc else None) or "your branch"
+    return sorted(_location_tree_ids(session, tenant_id, person.site_id)), label
 
 
 def is_ops_authority(session, tenant_id: str, sender: Optional[str]) -> bool:

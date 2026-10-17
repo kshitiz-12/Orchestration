@@ -191,11 +191,14 @@ def work_order_status(session: Session, tenant_id: str, outcome_id: str) -> dict
     }
 
 
-def replace_due(session: Session, tenant_id: str) -> dict[str, Any]:
+def replace_due(session: Session, tenant_id: str, location_ids: Optional[list[str]] = None) -> dict[str, Any]:
+    allowed = set(location_ids) if location_ids is not None else None
     low_stock = []
     for sku in session.exec(
         select(StockSku).where(StockSku.tenant_id == tenant_id, StockSku.status == "ACTIVE")
     ).all():
+        if allowed is not None and sku.location_id not in allowed:
+            continue
         if float(sku.reorder_min or 0) > 0 and float(sku.qty_on_hand or 0) <= float(sku.reorder_min):
             low_stock.append(
                 {
@@ -211,6 +214,7 @@ def replace_due(session: Session, tenant_id: str) -> dict[str, Any]:
         session,
         tenant_id,
         event_types=["ASSET_ISSUE", "ASSET_RETURN", "TEAM_DONE"],
+        location_ids=location_ids,
         days=60,
         limit=50,
     )

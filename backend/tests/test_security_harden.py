@@ -111,6 +111,85 @@ def test_ops_analytics_rejects_unverified_sender(session: Session, env):
     ]
 
 
+def test_ops_analytics_accepts_gmail_neutral_spf_from_google(session: Session, env):
+    tid = _tid(session)
+    record(
+        session,
+        tid,
+        event_type="SPEND_RECORDED",
+        summary="branch paint",
+        amount=800.0,
+        department_code="FACILITIES",
+        actor_role="system",
+    )
+    session.commit()
+    mid = f"<{uuid.uuid4().hex}@mail>"
+    ev = RawEmailEvent(
+        tenant_id=tid,
+        idempotency_key=mid,
+        provider="CLOUDMAILIN",
+        provider_message_id=mid,
+        provider_conversation_id=mid,
+        gmail_message_id=mid,
+        gmail_thread_id=mid,
+        source="CLOUDMAILIN",
+        sender=ADMIN,
+        subject="Spent",
+        body_text="How much is the total spent till now",
+        body_for_ai="How much is the total spent till now",
+        headers={
+            "_envelope": {
+                "from": ADMIN,
+                "helo_domain": "mail-wr1-f46.google.com",
+                "remote_ip": "209.85.221.46",
+                "tls": True,
+                "spf": {"result": "neutral", "domain": "example.com"},
+            }
+        },
+    )
+    session.add(ev)
+    session.commit()
+    result = ProcessingPipeline(session, tid, llm=LLMService(HeuristicProvider())).process_event(ev.event_id)
+    assert result["status"] == "ops_analytics"
+    assert result["replied"] is True
+
+
+def test_branch_admin_spend_stays_on_their_site(session: Session):
+    from app.models.org import Location
+    from app.services.admin_ops import analytics_scope_for_sender, is_ops_authority
+    from app.agent.resolution_agent import answer_admin_question
+
+    tid = _tid(session)
+    pune = Location(tenant_id=tid, type="BRANCH", name="Pune Hq")
+    blr = Location(tenant_id=tid, type="BRANCH", name="Bengaluru Hq")
+    session.add(pune)
+    session.add(blr)
+    session.commit()
+    session.refresh(pune)
+    session.refresh(blr)
+    session.add(
+        Person(
+            tenant_id=tid,
+            email="pune.admin@example.com",
+            name="Pune Admin",
+            role="COMPANY ADMIN / ADMIN - PUNE",
+            site_id=pune.location_id,
+            is_active=True,
+        )
+    )
+    record(session, tid, event_type="SPEND_RECORDED", summary="pune ac", amount=100.0, location_id=pune.location_id, actor_role="system")
+    record(session, tid, event_type="SPEND_RECORDED", summary="blr ac", amount=9000.0, location_id=blr.location_id, actor_role="system")
+    session.commit()
+    assert is_ops_authority(session, tid, "pune.admin@example.com")
+    ids, label = analytics_scope_for_sender(session, tid, "pune.admin@example.com")
+    assert label == "Pune Hq"
+    assert pune.location_id in ids and blr.location_id not in ids
+    answer = answer_admin_question(session, tid, "How much is the total spent till now", location_ids=ids, scope_label=label)
+    assert "100.00" in answer.reply
+    assert "9,000" not in answer.reply
+    assert "Pune Hq" in answer.reply
+
+
 def test_bootstrap_uses_admin_password_env(session: Session, monkeypatch):
     monkeypatch.setenv("ADMIN_EMAIL", "boss@company.test")
     monkeypatch.setenv("ADMIN_PASSWORD", "Str0ng-Prod-Pass!")

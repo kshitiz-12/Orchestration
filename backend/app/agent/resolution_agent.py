@@ -228,8 +228,15 @@ def is_admin_analytics_question(text: str) -> bool:
     return bool(_SPEND.search(t) or _REPAIR.search(t) or _REPLACE.search(t) or _WHO.search(t))
 
 
-def answer_admin_question(session: Session, tenant_id: str, text: str) -> AdminAnswer:
-    """Grounded admin Q&A from ledger only."""
+def answer_admin_question(
+    session: Session,
+    tenant_id: str,
+    text: str,
+    *,
+    location_ids: Optional[list[str]] = None,
+    scope_label: Optional[str] = None,
+) -> AdminAnswer:
+    """Grounded admin Q&A from ledger only. location_ids limits a branch admin to their site."""
     days = 30
     if m := _DAYS.search(text or ""):
         days = max(1, min(365, int(m.group(1))))
@@ -241,12 +248,13 @@ def answer_admin_question(session: Session, tenant_id: str, text: str) -> AdminA
     case_ref = None
     if m := _CASE_REF.search(text or ""):
         case_ref = m.group(1).upper()
+    scope = f" for {scope_label}" if scope_label else ""
 
     if _REPLACE.search(text or ""):
-        data = replace_due(session, tenant_id)
+        data = replace_due(session, tenant_id, location_ids=location_ids)
         low = data.get("low_stock") or []
         assets = data.get("assets_attention") or []
-        lines = ["Here's what the ledger shows needs attention:", ""]
+        lines = [f"Here's what the ledger shows needs attention{scope}:", ""]
         if low:
             lines.append("Low stock:")
             for s in low[:15]:
@@ -263,9 +271,10 @@ def answer_admin_question(session: Session, tenant_id: str, text: str) -> AdminA
         return AdminAnswer(reply="\n".join(lines), grounded=True, data=data)
 
     if _SPEND.search(text or ""):
-        data = spend_summary(session, tenant_id, department_code=dept, days=days)
+        data = spend_summary(session, tenant_id, department_code=dept, location_ids=location_ids, days=days)
         lines = [
             f"Spend from the operational ledger (last {days} days"
+            + scope
             + (f", dept {dept}" if dept else "")
             + "):",
             f"Total recorded: INR {data['total']:,.2f} across {data['rows']} amount rows "
@@ -284,8 +293,8 @@ def answer_admin_question(session: Session, tenant_id: str, text: str) -> AdminA
         return AdminAnswer(reply="\n".join(lines), grounded=True, data=data)
 
     if _REPAIR.search(text or ""):
-        data = repairs_summary(session, tenant_id, department_code=dept, days=days)
-        lines = [f"Repairs / facilities ledger (last {days} days): {data['count']} events.", ""]
+        data = repairs_summary(session, tenant_id, department_code=dept, location_ids=location_ids, days=days)
+        lines = [f"Repairs / facilities ledger (last {days} days{scope}): {data['count']} events.", ""]
         for item in data["items"][:20]:
             lines.append(
                 f"- {item['when'][:10]} [{item.get('case') or '—'}] {item['type']} "
@@ -296,8 +305,10 @@ def answer_admin_question(session: Session, tenant_id: str, text: str) -> AdminA
         return AdminAnswer(reply="\n".join(lines), grounded=True, data=data)
 
     if _WHO.search(text or "") or case_ref:
-        data = who_did_what(session, tenant_id, case_reference=case_ref, department_code=dept, days=days)
-        lines = ["Who did what (ledger):", ""]
+        data = who_did_what(
+            session, tenant_id, case_reference=case_ref, department_code=dept, location_ids=location_ids, days=days
+        )
+        lines = [f"Who did what (ledger{scope}):", ""]
         for item in data["items"][:25]:
             lines.append(
                 f"- {item['when'][:16]} {item.get('actor') or 'system'} ({item['role']}) "
@@ -308,11 +319,12 @@ def answer_admin_question(session: Session, tenant_id: str, text: str) -> AdminA
         return AdminAnswer(reply="\n".join(lines), grounded=True, data=data)
 
     # Generic: try spend + repairs brief
-    spend = spend_summary(session, tenant_id, department_code=dept, days=days)
-    repairs = repairs_summary(session, tenant_id, department_code=dept, days=days)
+    spend = spend_summary(session, tenant_id, department_code=dept, location_ids=location_ids, days=days)
+    repairs = repairs_summary(session, tenant_id, department_code=dept, location_ids=location_ids, days=days)
     reply = (
         f"I can answer from the operational ledger. Last {days} days"
-        + (f" for {dept}" if dept else "")
+        + scope
+        + (f", {dept}" if dept else "")
         + f":\n- Recorded spend: INR {spend['total']:,.2f}\n"
         f"- Repair/facilities events: {repairs['count']}\n\n"
         "Ask specifically: spend, repairs, what needs replacing, or who did what on a case."
