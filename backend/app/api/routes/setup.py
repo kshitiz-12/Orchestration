@@ -23,11 +23,58 @@ from app.agent.importer import (
 from app.api.deps import SessionDep, TenantDep, UserDep
 from app.models.company import CostCentre, Department, KnowledgeEntry, ServiceTicket, SiteService, VisitorPass
 from app.agent.places import PLACE_TYPES, chain_ids, path_label
-from app.models.org import Location, Person, Resource, Vendor, utcnow
+from app.models.org import BusinessRule, Location, Person, Resource, Vendor, utcnow
 
 router = APIRouter(prefix="/setup", tags=["setup"])
 
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
+EXCEL_UPLOAD_CODE = "EXCEL_UPLOAD"
+
+
+def excel_progress(result: dict) -> dict:
+    """Rows saved against every data row in the file. Problem rows stay in the total."""
+    total = int(result.get("total") or 0)
+    saved = int(result.get("new") or 0) + int(result.get("updated") or 0)
+    problems = len(result.get("errors") or [])
+    percent = int(round(100 * saved / total)) if total else 0
+    return {"total": total, "saved": saved, "problems": problems, "percent": percent}
+
+
+def remember_excel_upload(session, tenant_id: str, filename: str, result: dict) -> dict:
+    progress = excel_progress(result)
+    progress["filename"] = (filename or "").strip()
+    row = session.exec(
+        select(BusinessRule).where(
+            BusinessRule.tenant_id == tenant_id,
+            BusinessRule.code == EXCEL_UPLOAD_CODE,
+        )
+    ).first()
+    if row is None:
+        row = BusinessRule(
+            tenant_id=tenant_id,
+            code=EXCEL_UPLOAD_CODE,
+            category="import",
+            description="Last Excel upload",
+            config=progress,
+        )
+    else:
+        row.config = progress
+        row.is_active = True
+    session.add(row)
+    session.commit()
+    return progress
+
+
+def last_excel_upload(session, tenant_id: str) -> dict | None:
+    row = session.exec(
+        select(BusinessRule).where(
+            BusinessRule.tenant_id == tenant_id,
+            BusinessRule.code == EXCEL_UPLOAD_CODE,
+        )
+    ).first()
+    if not row or not isinstance(row.config, dict):
+        return None
+    return row.config
 
 
 class DepartmentIn(BaseModel):
@@ -123,6 +170,7 @@ def setup_status(session: SessionDep, tenant_id: TenantDep, _: UserDep):
             ServiceTicket.tenant_id == tenant_id,
             ServiceTicket.status.notin_(["RESOLVED", "CLOSED", "CANCELLED", "REJECTED"]),
         ),
+        "excel_upload": last_excel_upload(session, tenant_id),
     }
 
 
@@ -555,7 +603,10 @@ async def import_company(
         raise HTTPException(status_code=422, detail=f"Could not read the file: {exc}") from exc
     if not bundles:
         raise HTTPException(status_code=422, detail="The file has no importable company data")
-    return run_bundle_import(session, tenant_id, bundles, commit=commit, source=source)
+    result = run_bundle_import(session, tenant_id, bundles, commit=commit, source=source)
+    if commit:
+        result["upload"] = remember_excel_upload(session, tenant_id, file.filename or "", result)
+    return result
 
 
 @router.post("/import/{kind}")
@@ -578,7 +629,10 @@ async def import_data(
         raise HTTPException(status_code=422, detail=f"Could not read the file: {exc}") from exc
     if not rows:
         raise HTTPException(status_code=422, detail="The file has no data rows")
-    return run_import(session, tenant_id, kind, rows, commit=commit)
+    result = run_import(session, tenant_id, kind, rows, commit=commit)
+    if commit:
+        result["upload"] = remember_excel_upload(session, tenant_id, file.filename or "", result)
+    return result
 
 
 @router.get("/tickets")

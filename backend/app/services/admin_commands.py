@@ -177,8 +177,10 @@ def verify_ops_sender(session: Session, tenant_id: str, headers: Any, sender: st
     # Known ops mailbox, envelope From matches, delivered by Gmail over TLS. SPF neutral is normal here.
     if result not in {"fail", "softfail", "permerror"} and _google_submitted(envelope):
         env = envelope if isinstance(envelope, dict) else {}
+        from app.agent.directory import base_mailbox
+
         envelope_from = parseaddr(str(env.get("from") or ""))[1].strip().lower() or str(env.get("from") or "").strip().lower()
-        if envelope_from == sender:
+        if envelope_from and base_mailbox(envelope_from) == base_mailbox(sender):
             from app.services.admin_ops import is_ops_authority
 
             if is_ops_authority(session, tenant_id, sender):

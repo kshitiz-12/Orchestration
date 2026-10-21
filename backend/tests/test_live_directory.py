@@ -58,7 +58,7 @@ def _reads(action: str, note: str) -> FakeGemini:
 
 
 def _orders(session, addr):
-    return [m for m in _mails_to(session, addr) if "WORK ORDER" in (m.subject or "") or "WORK ORDER" in (m.body or "")]
+    return [m for m in _mails_to(session, addr) if "work order" in (m.subject or "").lower() or "work order" in (m.body or "").lower()]
 
 
 def _reply(session, tid, body, sender, to_mail, provider=None):
@@ -300,7 +300,7 @@ def test_one_mail_many_cases_keeps_the_name_and_says_which_case(session: Session
          "details": {"employee_name": "Kapil Mantri", "start_date": "5 Oct"}},
     ))
     first = _mails_to(session, joiner)[0]
-    assert first.body.startswith("Hi Kapil,")
+    assert first.body.startswith("Dear Kapil")
     card = next(o for o in session.exec(select(Outcome)).all() if o.case_reference.startswith("ITS-"))
     decision = [m for m in _mails_to(session, ADMIN) if card.case_reference in m.subject and 'Reply "approve"' in m.body][-1]
     _reply(session, tid, "Approve", ADMIN, decision)
@@ -308,7 +308,7 @@ def test_one_mail_many_cases_keeps_the_name_and_says_which_case(session: Session
     later = [m for m in _mails_to(session, joiner) if m is not first]
     assert later, "the requester hears that the card was approved"
     for m in later:
-        assert m.body.startswith("Hi Kapil,"), m.body[:40]
+        assert m.body.startswith("Dear Kapil"), m.body[:40]
         assert m.subject == f"Access card and ID issuance [{card.case_reference}]", "an update names only its own request"
 
 def test_flight_and_taxi_details_later_keep_case_numbers_and_right_vendor(session: Session, live):
@@ -437,7 +437,7 @@ def test_overdue_alert_tells_the_admin_what_they_can_reply(session: Session, liv
     AdminDesk(session, tid, CommunicationService(session, tid))._notify_admin(
         case, kind="escalation", headline="SLA missed - Facilities has not closed this")
     session.commit()
-    alert = [m for m in _mails_to(session, ADMIN) if "ESCALATION" in (m.subject or "")][-1]
+    alert = [m for m in _mails_to(session, ADMIN) if "escalation" in (m.subject or "").lower()][-1]
     assert '"assign to <email>"' in alert.body and '"tell requester: <message>"' in alert.body
 
 

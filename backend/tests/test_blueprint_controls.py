@@ -35,7 +35,7 @@ def _team(session, tid, text, subject):
 def test_bare_done_asks_for_proof_and_proof_makes_closure_verified(session: Session, env):
     tid = _tid(session)
     case, subject = _repair(session, tid)
-    assert "only marked verified" in _mails_to(session, TEAM)[-1].body
+    assert "marked verified only" in _mails_to(session, TEAM)[-1].body
 
     _team(session, tid, "done", subject)
     session.refresh(case)
@@ -95,7 +95,7 @@ def test_unverified_question_goes_to_a_person_instead_of_a_guess(session: Sessio
     case = session.exec(select(Outcome)).one()
     assert case.facts["knowledge_gap"] is True
     reply = _mails_to(session, REQ)[-1].body
-    assert "10 days" not in reply and "rather than guess" in reply and case.case_reference in reply
+    assert "10 days" not in reply and "verified answer is not on record" in reply and case.case_reference in reply
     order = [m for m in _mails_to(session, ADMIN) if "verified answer" in m.subject.lower() or "verified answer" in m.body.lower()][-1]
 
     _run(session, tid, _mail(session, tid, "tell requester: it is 15 working days, see HR policy 4.2",

@@ -470,7 +470,7 @@ def test_meeting_room_proposes_then_confirms(session: Session):
     propose_mail = session.exec(
         select(Communication).where(Communication.outcome_id == outcome.outcome_id)
     ).all()
-    assert any("CONFIRM BOOKING" in (m.subject or "") for m in propose_mail)
+    assert any("confirm booking" in (m.subject or "").lower() for m in propose_mail)
     assert any('reply "confirm"' in (m.body or "").lower() for m in propose_mail)
     assert any("hybrid / av: no" in (m.body or "").lower() for m in propose_mail)
 
@@ -568,7 +568,7 @@ def test_meeting_room_addon_before_confirm_updates_proposal(session: Session):
     ).all()
     assert len(mails) >= 2
     assert any(
-        "updated" in (m.body or "").lower() or "CONFIRM BOOKING" in (m.subject or "")
+        "updated" in (m.body or "").lower() or "confirm booking" in (m.subject or "").lower()
         for m in mails
     )
 
@@ -616,8 +616,8 @@ def test_meeting_room_full_checklist_with_catering_proposes(session: Session):
     mails = session.exec(
         select(Communication).where(Communication.outcome_id == outcome.outcome_id)
     ).all()
-    assert any("CONFIRM BOOKING" in (m.subject or "") for m in mails)
-    confirm = next(m for m in mails if "CONFIRM BOOKING" in (m.subject or ""))
+    assert any("confirm booking" in (m.subject or "").lower() for m in mails)
+    confirm = next(m for m in mails if "confirm booking" in (m.subject or "").lower())
     body = (confirm.body or "").lower()
     assert 'reply "confirm"' in body
     assert "assumed" not in body and "extracted" not in body

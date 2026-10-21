@@ -2,6 +2,7 @@
 
 import { AppShell } from "@/components/AppShell";
 import { StatusBadge } from "@/components/Status";
+import { readLocalUpload, UploadMeter } from "@/components/UploadMeter";
 import { api } from "@/lib/api";
 import { friendlyPriority, friendlyStatus, priorityTone, requestType } from "@/lib/labels";
 import Link from "next/link";
@@ -14,6 +15,7 @@ export default function HomePage() {
   const [error, setError] = useState("");
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
   const [busy, setBusy] = useState(false);
+  const [localUpload, setLocalUpload] = useState<ReturnType<typeof readLocalUpload>>(null);
 
   const load = useCallback(async () => {
     setBusy(true);
@@ -27,6 +29,7 @@ export default function HomePage() {
       setKpis(k && typeof k === "object" ? k : null);
       setOutcomes(Array.isArray(o) ? o : []);
       setSetup(s);
+      setLocalUpload(s?.excel_upload ? null : readLocalUpload());
       setUpdatedAt(new Date());
     } catch (e: any) {
       setError(e.message || "Could not load");
@@ -116,7 +119,6 @@ export default function HomePage() {
   return (
     <AppShell
       title="Overview"
-      subtitle="What needs attention across your offices — and whether the company is ready for employee mail."
       actions={
         <>
           <span className="muted" style={{ fontSize: "0.82rem" }}>
@@ -138,150 +140,131 @@ export default function HomePage() {
         </div>
       )}
 
-      {!dataLoaded && (
-        <div className="setup-hero">
-          <div>
-            <h2>Get your company ready</h2>
-            <p>
-              Upload one Excel file with offices, teams, and employees. Until that&apos;s done,
-              only listed employees get replies — and teams need real mailboxes to receive work.
-            </p>
-          </div>
-          <div className="setup-steps">
-            <span className={`setup-step ${locations > 0 ? "done" : "warn"}`}>
-              {locations > 0 ? "Offices added" : "Add offices"}
-            </span>
-            <span className={`setup-step ${deptsPending === 0 && setup ? "done" : "warn"}`}>
-              {deptsPending === 0 && setup ? "Teams ready" : `${deptsPending || "—"} teams need email`}
-            </span>
-            <span className={`setup-step ${employees > 1 ? "done" : "warn"}`}>
-              {employees > 1 ? `${employees} people` : "Add employees"}
-            </span>
-          </div>
-          <div className="row">
-            <Link href="/setup" className="btn accent">
-              Open company data
-            </Link>
-            <Link href="/email" className="btn secondary">
-              Check mail inbox
-            </Link>
-          </div>
-        </div>
-      )}
-
-      {dataLoaded && !companyReady && (
-        <div className="next-card tone-warn" style={{ marginBottom: "1.15rem" }}>
-          <strong>{deptsPending} teams still use a placeholder mailbox</strong>
-          <span>
-            Employee directory is loaded. Work for those teams goes to Admin Ops until you set a real team email under Company data → Teams.
-          </span>
-        </div>
-      )}
-
-      <div className="panel" style={{ marginBottom: "1.15rem" }}>
-        <div className="panel-head">
-          <h2>Do this next</h2>
-        </div>
-        <div className="stack">
-          {nextSteps.map((step) => (
-            <Link key={step.title} href={step.href} className={`next-card tone-${step.tone}`}>
-              <strong>{step.title}</strong>
-              <span>{step.detail}</span>
-            </Link>
-          ))}
-        </div>
-      </div>
-
-      <div className="grid kpis">
-        <Link href="/outcomes" className="kpi clickable">
-          <div className="label">Open requests</div>
-          <div className="value">{openCases || "0"}</div>
-          <div className="hint">Still being handled</div>
-        </Link>
-        <Link href="/reviews" className="kpi clickable">
-          <div className="label">Need your decision</div>
-          <div className="value">{waitingYou || "0"}</div>
-          <div className="hint">Approvals & confirmations</div>
-        </Link>
-        <Link href="/outcomes" className="kpi clickable">
-          <div className="label">Past due</div>
-          <div className="value">{pastSla || "0"}</div>
-          <div className="hint">Missed team deadline</div>
-        </Link>
-        <Link href="/setup" className="kpi clickable">
-          <div className="label">Employees loaded</div>
-          <div className="value">{employees || "0"}</div>
-          <div className="hint">{locations || 0} offices on file</div>
-        </Link>
-      </div>
-
-      <div className="grid actions">
-        <Link href="/setup" className="action-tile">
-          <strong>Upload company Excel</strong>
-          <span>Branches, teams, and people in one file.</span>
-        </Link>
-        <Link href="/outcomes" className="action-tile">
-          <strong>Browse requests</strong>
-          <span>See status, who is waiting, and history.</span>
-        </Link>
-        <Link href="/email" className="action-tile">
-          <strong>Employee mail address</strong>
-          <span>The inbox staff should write to.</span>
-        </Link>
-      </div>
-
-      <div className="panel">
-        <div className="panel-head">
-          <h2>Recent requests</h2>
-          <Link href="/outcomes" className="btn ghost">
-            See all
+      <div className="dash">
+        <div className="metric-bar">
+          <Link href="/outcomes" className="metric">
+            <span>Open</span>
+            <strong>{openCases}</strong>
+            <em>Still with the teams</em>
+          </Link>
+          <Link href="/reviews" className="metric">
+            <span>Your decision</span>
+            <strong>{waitingYou}</strong>
+            <em>Approvals and confirmations</em>
+          </Link>
+          <Link href="/outcomes" className={`metric ${pastSla > 0 ? "hot" : ""}`}>
+            <span>Past due</span>
+            <strong>{pastSla}</strong>
+            <em>Missed the agreed time</em>
+          </Link>
+          <Link href="/setup" className="metric">
+            <span>People</span>
+            <strong>{employees}</strong>
+            <em>{locations} offices on file</em>
           </Link>
         </div>
-        {outcomes.length === 0 ? (
-          <div className="empty">
-            <strong>No requests yet</strong>
-            After company data is loaded, employee emails to the intake address appear here.
-          </div>
-        ) : (
-          <table>
-            <thead>
-              <tr>
-                <th>Case</th>
-                <th>Type</th>
-                <th>Team</th>
-                <th>From</th>
-                <th>Priority</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {outcomes.map((o) => (
-                <tr key={o.outcome_id}>
-                  <td>
-                    <Link className="table-link" href={`/outcomes/${o.outcome_id}`}>
-                      {o.case_reference}
-                    </Link>
-                    <div className="muted" style={{ fontSize: "0.78rem", marginTop: "0.2rem" }}>
-                      {(o.title || "").slice(0, 48)}
-                      {(o.title || "").length > 48 ? "…" : ""}
-                    </div>
-                  </td>
-                  <td>
-                    <span className="badge">{requestType(o)}</span>
-                  </td>
-                  <td className="muted">{o.department || "—"}</td>
-                  <td>{o.requester_email}</td>
-                  <td>
-                    <span className={`badge ${priorityTone(o.priority)}`}>{friendlyPriority(o.priority)}</span>
-                  </td>
-                  <td>
-                    <StatusBadge status={friendlyStatus(o.status)} />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
+
+        <div className="dash-split">
+          <section className="panel dash-work">
+            <div className="panel-head">
+              <h2>Requests</h2>
+              <Link href="/outcomes" className="btn ghost">
+                See all
+              </Link>
+            </div>
+            {nextSteps.length > 0 && (
+              <div className="attn-list">
+                {nextSteps.map((step) => (
+                  <Link key={step.title} href={step.href} className={`attn tone-${step.tone}`}>
+                    <strong>{step.title}</strong>
+                    <span>{step.detail}</span>
+                  </Link>
+                ))}
+              </div>
+            )}
+            {outcomes.length === 0 ? (
+              <div className="empty">
+                <strong>No requests yet</strong>
+                Employee mail shows up here after company data is loaded.
+              </div>
+            ) : (
+              <table>
+                <thead>
+                  <tr>
+                    <th>Case</th>
+                    <th>Type</th>
+                    <th>Team</th>
+                    <th>From</th>
+                    <th>Priority</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {outcomes.map((o) => (
+                    <tr key={o.outcome_id}>
+                      <td>
+                        <Link className="table-link" href={`/outcomes/${o.outcome_id}`}>
+                          {o.case_reference}
+                        </Link>
+                        <div className="muted" style={{ fontSize: "0.78rem", marginTop: "0.2rem" }}>
+                          {(o.title || "").slice(0, 48)}
+                          {(o.title || "").length > 48 ? "…" : ""}
+                        </div>
+                      </td>
+                      <td>
+                        <span className="badge">{requestType(o)}</span>
+                      </td>
+                      <td className="muted">{o.department || "—"}</td>
+                      <td>{o.requester_email}</td>
+                      <td>
+                        <span className={`badge ${priorityTone(o.priority)}`}>{friendlyPriority(o.priority)}</span>
+                      </td>
+                      <td>
+                        <StatusBadge status={friendlyStatus(o.status)} />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </section>
+
+          <aside className="dash-rail">
+            <div className="panel">
+              <h2>{companyReady ? "Company is ready" : "Company setup"}</h2>
+              <p className="muted dash-note">
+                {dataLoaded
+                  ? "Offices and people are on file. Teams without a real mailbox still send work to the admin inbox."
+                  : "Load offices, teams, and employees so employee mail can be routed."}
+              </p>
+              <div className="ready-list">
+                <div className="ready-row">
+                  <span>Offices</span>
+                  <b className={locations > 0 ? "ok" : ""}>{locations > 0 ? locations : "None yet"}</b>
+                </div>
+                <div className="ready-row">
+                  <span>Teams needing email</span>
+                  <b className={deptsPending === 0 && setup ? "ok" : ""}>{setup ? deptsPending : "—"}</b>
+                </div>
+                <div className="ready-row">
+                  <span>People</span>
+                  <b className={employees > 1 ? "ok" : ""}>{employees}</b>
+                </div>
+              </div>
+              <div className="row">
+                <Link href="/setup" className="btn accent">
+                  {dataLoaded ? "Edit company data" : "Upload Excel"}
+                </Link>
+                <Link href="/email" className="btn secondary">
+                  Mail inbox
+                </Link>
+              </div>
+            </div>
+            <div className="panel">
+              <UploadMeter source={setup?.excel_upload || localUpload} />
+            </div>
+          </aside>
+        </div>
       </div>
     </AppShell>
   );

@@ -14,6 +14,7 @@ from sqlmodel import Session, col, select
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.models.org import Contract, Vendor, VendorCoverage, utcnow
+from app.services.mail_style import letter
 from app.services.ops_ledger import query_events, record
 
 logger = get_logger(__name__)
@@ -134,20 +135,24 @@ def invite_vendor(
 
 def send_invite_email(comms: Any, vendor: Vendor) -> None:
     link = registration_url(vendor.invite_token or "")
-    body = (
-        f"Hello {vendor.contact_name or vendor.name},\n\n"
-        f"You have been invited to register as a vendor for our workplace operations desk "
-        f"({vendor.category}).\n\n"
-        f"Please complete your registration within {INVITE_DAYS} days:\n{link}\n\n"
-        "You will submit company details, documents, coverage, compliance and commercial information.\n"
-        "After review we will activate your account for work orders.\n\n"
-        f"{get_settings().mail_signature}\n"
+    who = vendor.contact_name or vendor.name
+    body = letter(
+        f"Dear {who},",
+        (
+            "You are invited to register as a vendor for workplace operations.\n\n"
+            f"Category: {vendor.category}\n"
+            f"Registration link: {link}\n"
+            f"This link is valid for {INVITE_DAYS} days.\n\n"
+            "Please submit your company details, documents, service coverage, compliance information, "
+            "and commercial terms using the link above. After review, the account may be activated for work orders."
+        ),
+        get_settings().mail_signature,
     )
     try:
         comms.send(
             communication_type="INFORMATION_ONLY",
             recipients=[vendor.contact_email],
-            subject=f"Vendor registration invite — {vendor.name}",
+                subject=f"Vendor registration: {vendor.name}",
             body=body,
             idempotency_key=f"vendor-invite:{vendor.vendor_id}:{vendor.invite_token}",
         )
@@ -430,12 +435,19 @@ def activate_vendor(
             comms.send(
                 communication_type="INFORMATION_ONLY",
                 recipients=[vendor.contact_email],
-                subject=f"Vendor activated — {vendor.name}",
-                body=(
-                    f"Hello {vendor.contact_name or vendor.name},\n\n"
-                    f"Your vendor registration has been activated (tier: {vendor.vendor_tier}, "
-                    f"score: {vendor.score}). You may receive work orders by email for "
-                    f"{vendor.category} services.\n\n{get_settings().mail_signature}\n"
+                subject=f"Vendor registration approved: {vendor.name}",
+                body=letter(
+                    f"Dear {vendor.contact_name or vendor.name},",
+                    (
+                        "Your vendor registration has been approved.\n\n"
+                        f"Vendor: {vendor.name}\n"
+                        f"Category: {vendor.category}\n"
+                        f"Tier: {vendor.vendor_tier}\n"
+                        f"Score: {vendor.score}\n\n"
+                        "Work orders for this category may now be sent to this mailbox. "
+                        "Please reply to each work order with the outcome."
+                    ),
+                    get_settings().mail_signature,
                 ),
                 idempotency_key=f"vendor-activated:{vendor.vendor_id}",
             )
@@ -475,11 +487,16 @@ def suspend_vendor(
             comms.send(
                 communication_type="INFORMATION_ONLY",
                 recipients=[vendor.contact_email],
-                subject=f"Vendor status: {vendor.status} — {vendor.name}",
-                body=(
-                    f"Hello {vendor.contact_name or vendor.name},\n\n"
-                    f"Your vendor status is now {vendor.status}.\nReason: {reason}\n\n"
-                    f"{get_settings().mail_signature}\n"
+                subject=f"Vendor status: {vendor.status.title()} — {vendor.name}",
+                body=letter(
+                    f"Dear {vendor.contact_name or vendor.name},",
+                    (
+                        f"Vendor: {vendor.name}\n"
+                        f"Status: {vendor.status}\n"
+                        f"Reason: {reason}\n\n"
+                        "Please contact the workplace operations desk if you require a review of this status."
+                    ),
+                    get_settings().mail_signature,
                 ),
                 idempotency_key=f"vendor-suspend:{vendor.vendor_id}:{vendor.status}",
             )

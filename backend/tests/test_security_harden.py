@@ -181,13 +181,40 @@ def test_branch_admin_spend_stays_on_their_site(session: Session):
     record(session, tid, event_type="SPEND_RECORDED", summary="blr ac", amount=9000.0, location_id=blr.location_id, actor_role="system")
     session.commit()
     assert is_ops_authority(session, tid, "pune.admin@example.com")
-    ids, label = analytics_scope_for_sender(session, tid, "pune.admin@example.com")
+    assert is_ops_authority(session, tid, "pune.admin+facilities@example.com")
+    ids, label = analytics_scope_for_sender(session, tid, "pune.admin+facilities@example.com")
     assert label == "Pune Hq"
     assert pune.location_id in ids and blr.location_id not in ids
     answer = answer_admin_question(session, tid, "How much is the total spent till now", location_ids=ids, scope_label=label)
     assert "100.00" in answer.reply
     assert "9,000" not in answer.reply
     assert "Pune Hq" in answer.reply
+
+    session.add(
+        Person(
+            tenant_id=tid,
+            email="main.admin@example.com",
+            name="Main Admin",
+            role="COMPANY_ADMIN",
+            site_id=pune.location_id,
+            is_active=True,
+        )
+    )
+    session.commit()
+    all_ids, all_label = analytics_scope_for_sender(session, tid, "main.admin@example.com")
+    assert all_ids is None and all_label == "all branches"
+    company = answer_admin_question(session, tid, "How much is the total spent till now", scope_label=all_label)
+    assert "9,100.00" in company.reply or "9100.00" in company.reply
+    assert "Pune Hq" in company.reply and "Bengaluru Hq" in company.reply
+
+
+def test_done_inr_amount_is_read_from_the_raw_reply():
+    from app.agent.desk import amount_in_text
+
+    assert amount_in_text("The AC on the 4th floor has been repaired.") is None
+    assert amount_in_text("Done inr 8000") == 8000.0
+    assert amount_in_text("The AC has been repaired.\nDone inr 8000") == 8000.0
+    assert amount_in_text("done, compressor replaced, INR 12500") == 12500.0
 
 
 def test_bootstrap_uses_admin_password_env(session: Session, monkeypatch):

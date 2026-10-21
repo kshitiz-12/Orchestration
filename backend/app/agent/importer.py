@@ -343,9 +343,15 @@ def run_bundle_import(
     """
     from sqlalchemy import text
 
+    def _relax_timeout() -> None:
+        bind = session.get_bind()
+        if bind is None or bind.dialect.name != "postgresql":
+            return
+        session.execute(text("SET LOCAL statement_timeout = '300s'"))
+
     parts: list[dict] = []
     if commit:
-        session.execute(text("SET LOCAL statement_timeout = '300s'"))
+        _relax_timeout()
     for kind in IMPORT_ORDER:
         rows = bundles.get(kind) or []
         if not rows:
@@ -356,7 +362,7 @@ def run_bundle_import(
         if commit:
             session.commit()
             _invalidate_places_cache(session)
-            session.execute(text("SET LOCAL statement_timeout = '300s'"))
+            _relax_timeout()
     if not commit:
         session.rollback()
     errors = [e for p in parts for e in p["errors"]]
@@ -476,6 +482,17 @@ def prepare_company_import(filename: str, content: bytes) -> tuple[dict[str, lis
     if bundles:
         source = "workbook" if name.endswith((".xlsx", ".xlsm")) else "structured"
         return bundles, source
+    if name.endswith((".xlsx", ".xlsm")):
+        from app.agent.workbook_map import read_flexible_workbook, workbook_is_titled
+
+        mapped = read_flexible_workbook(content)
+        if mapped:
+            return mapped, "mapped"
+        if workbook_is_titled(content):
+            raise ValueError(
+                "This workbook has no offices, people, vendors, or stock the desk can save. "
+                "KPI, safety, and training sheets stay in the file."
+            )
     return structure_freeform_with_ai(filename, content), "ai"
 
 

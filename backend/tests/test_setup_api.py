@@ -101,12 +101,18 @@ def test_employee_csv_preview_then_commit(client, auth_headers):
     assert preview["committed"] is False
     assert preview["new"] == 1 and preview["updated"] == 1
     assert preview["errors"][0]["row"] == 3
-    before = client.get(f"{BASE}/status", headers=auth_headers).json()["employees"]
+    status_before = client.get(f"{BASE}/status", headers=auth_headers).json()
+    before = status_before["employees"]
+    assert status_before["excel_upload"] is None
 
     files = {"file": ("people.csv", csv_text.encode(), "text/csv")}
     done = client.post(f"{BASE}/import/employees?commit=true", files=files, headers=auth_headers).json()
     assert done["committed"] is True and done["new"] == 1
-    assert client.get(f"{BASE}/status", headers=auth_headers).json()["employees"] == before + 1
+    assert done["upload"]["saved"] == 2 and done["upload"]["total"] == 3 and done["upload"]["percent"] == 67
+    status = client.get(f"{BASE}/status", headers=auth_headers).json()
+    assert status["employees"] == before + 1
+    assert status["excel_upload"]["filename"] == "people.csv"
+    assert status["excel_upload"]["percent"] == 67
 
 
 def test_department_xlsx_import_updates_existing(client, auth_headers):

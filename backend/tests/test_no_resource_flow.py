@@ -73,8 +73,8 @@ def test_short_subject_drops_gemini_narrative():
         title="The user is requesting an escalation for a larger venue for 20 participants",
     )
     assert "ROOM-2026-0009" in subj
-    assert "NO ROOM AVAILABLE" in subj
-    assert "The user is requesting" not in subj
+    assert "no room available" in subj.lower()
+    assert "the user is requesting" not in subj.lower()
     assert "Meeting for 20" in subj
 
 
@@ -159,7 +159,7 @@ def test_no_resource_choice_acks_without_resending_menu(session: Session):
     mails1 = session.exec(
         select(Communication).where(Communication.outcome_id == first.outcome_id)
     ).all()
-    assert any("NO ROOM AVAILABLE" in (m.subject or "") for m in mails1)
+    assert any("no room available" in (m.subject or "").lower() for m in mails1)
     assert all("Dear there" not in (m.body or "") for m in mails1)
 
     # Requester picks LARGER_VENUE + extras (same conversation → same outcome)
@@ -201,8 +201,8 @@ def test_no_resource_choice_acks_without_resending_menu(session: Session):
     mails2 = session.exec(
         select(Communication).where(Communication.outcome_id == second.outcome_id)
     ).all()
-    no_room = [m for m in mails2 if "NO ROOM AVAILABLE" in (m.subject or "")]
-    choice_mails = [m for m in mails2 if "CHOICE NOTED" in (m.subject or "")]
+    no_room = [m for m in mails2 if "no room available" in (m.subject or "").lower()]
+    choice_mails = [m for m in mails2 if "choice noted" in (m.subject or "").lower()]
     assert len(no_room) == 1
     assert len(choice_mails) >= 1
     assert "recorded your choice" in (choice_mails[-1].body or "").lower()
@@ -236,7 +236,7 @@ def test_no_resource_choice_acks_without_resending_menu(session: Session):
     mails3 = session.exec(
         select(Communication).where(Communication.outcome_id == third.outcome_id)
     ).all()
-    assert len([m for m in mails3 if "NO ROOM AVAILABLE" in (m.subject or "")]) == 1
+    assert len([m for m in mails3 if "no room available" in (m.subject or "").lower()]) == 1
 
     open_exc = session.exec(
         select(ExceptionRecord).where(

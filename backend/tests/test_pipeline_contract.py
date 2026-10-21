@@ -37,7 +37,7 @@ def test_incomplete_meeting_event_stays_communication_not_completed(session):
     assert (outcome.facts or {}).get("orchestration_stage") == "AWAITING_REQUIREMENTS"
     mails = meeting_comms(session, outcome.outcome_id)
     assert len(mails) == 1
-    assert "INFORMATION REQUIRED" in (mails[0].subject or "")
+    assert "information required" in (mails[0].subject or "").lower()
     assert "Dear" in (mails[0].body or "")
     assert "registered" in (mails[0].body or "").lower()
     body_l = (mails[0].body or "").lower()
@@ -79,7 +79,7 @@ def test_follow_up_clarification_keyed_by_event_id(session):
     assert event2.processing_stage != ProcessingStage.COMPLETED.value
     assert r2["status"] in {"clarification_sent", "no_resource"}
     mails = meeting_comms(session, outcome_id)
-    clarify = [m for m in mails if "INFORMATION REQUIRED" in (m.subject or "")]
+    clarify = [m for m in mails if "information required" in (m.subject or "").lower()]
     assert len(clarify) >= 2
     keys = {m.idempotency_key for m in clarify}
     assert any(second["event_id"] in (k or "") for k in keys)

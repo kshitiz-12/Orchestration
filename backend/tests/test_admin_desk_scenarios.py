@@ -120,10 +120,11 @@ def test_onboarding_fans_out_and_sends_day_one_note(session: Session, env):
     case = session.exec(select(Outcome)).one()
     assert case.case_reference.startswith("ONB-")
     assert _mails_to(session, "it-helpdesk@acme-real.com"), "IT gets its own work order"
-    admin_orders = [m for m in _mails_to(session, ADMIN) if "WORK ORDER" in m.subject]
+    admin_orders = [m for m in _mails_to(session, ADMIN) if "Work Order" in m.subject]
     assert len(admin_orders) == 1, "teams without a mailbox are merged into one admin mail"
     reply = _mails_to(session, "hr.lead@acme.demo")[-1]
-    assert "Day-1 note for Sneha Iyer" in reply.body and "Monday 12 Oct" in reply.body
+    assert ("Day-1 note for Sneha Iyer" in reply.body or "First-days note for Sneha Iyer" in reply.body)
+    assert "Monday 12 Oct" in reply.body
 
 
 _PRIYA = """Hi Admin team,
@@ -163,13 +164,13 @@ def test_each_team_gets_only_its_own_tasks_and_the_raising_team_gets_none(sessio
         "Allocate desk near the Marketing team, 3rd floor", "Issue ID and access card for office and 3rd floor",
     ])
     it = _mails_to(session, "it-helpdesk@acme-real.com")[-1].body
-    assert "YOUR TASKS:" in it and "1. Set up Windows laptop" in it and "2. Create company email ID" in it
+    assert "Tasks assigned:" in it and "1. Set up Windows laptop" in it and "2. Create company email ID" in it
     assert "desk" not in it.split("Requester:")[0].lower()
-    fac = [m.body for m in _mails_to(session, "facilities@acme-real.com") if "WORK ORDER" in m.subject]
+    fac = [m.body for m in _mails_to(session, "facilities@acme-real.com") if "Work Order" in m.subject]
     assert len(fac) == 1 and "Allocate desk near the Marketing team" in fac[0]
     assert "access card" not in fac[0].split("Requester:")[0]
     assert "3. Issue ID and access card" in it, "access cards are an IT category here, so they join IT's list"
-    assert not [m for m in _mails_to(session, "hr.lead@acme-real.com") if "WORK ORDER" in (m.subject or "")], \
+    assert not [m for m in _mails_to(session, "hr.lead@acme-real.com") if "Work Order" in (m.subject or "")], \
         "HR raised it, so HR gets no work order"
     hr = next(g for g in case.facts["team_groups"] if g["label"] == "People / HR")
     assert hr["done"] and hr["raised_by_team"]
@@ -185,7 +186,7 @@ def test_each_team_gets_only_its_own_tasks_and_the_raising_team_gets_none(sessio
     assert "IT Support has finished their part" in hr_update and "- Set up Windows laptop" in hr_update
     assert "Still in progress: Facilities & Maintenance" in hr_update
     assert any("IT Support done - still waiting on Facilities" in (m.body or "") for m in _mails_to(session, ADMIN))
-    fac_order = [m for m in _mails_to(session, "facilities@acme-real.com") if "WORK ORDER" in m.subject][-1]
+    fac_order = [m for m in _mails_to(session, "facilities@acme-real.com") if "Work Order" in m.subject][-1]
     _run(session, tid, _mail(session, tid, "done, desk 3F-12 allocated", sender="facilities@acme-real.com",
                              subject=f"Re: {fac_order.subject}"))
     session.refresh(case)
@@ -205,7 +206,7 @@ def test_admin_standing_in_for_a_team_only_finishes_that_team(session: Session, 
     ))
     _run(session, tid, _mail(session, tid, _PRIYA, subject="New Joining - Naman", sender="hr.lead@acme-real.com"), fake)
     case = session.exec(select(Outcome)).one()
-    it_order = [m for m in _mails_to(session, ADMIN) if "WORK ORDER" in m.subject][-1]
+    it_order = [m for m in _mails_to(session, ADMIN) if "Work Order" in m.subject][-1]
     _run(session, tid, _mail(session, tid, "i have arranged everything, will hand over when he arrives",
                              sender=ADMIN, subject=f"Re: {it_order.subject}"))
     session.refresh(case)
@@ -216,7 +217,7 @@ def test_admin_standing_in_for_a_team_only_finishes_that_team(session: Session, 
     session.refresh(case)
     assert case.facts["agent_stage"] != "RESOLVED", "a repeat reply from a finished team doesn't close the case"
 
-    fac_order = [m for m in _mails_to(session, "facilities@acme-real.com") if "WORK ORDER" in m.subject][-1]
+    fac_order = [m for m in _mails_to(session, "facilities@acme-real.com") if "Work Order" in m.subject][-1]
     _run(session, tid, _mail(session, tid, "desk is ready", sender="facilities@acme-real.com",
                              subject=f"Re: {fac_order.subject}"))
     session.refresh(case)
@@ -235,7 +236,7 @@ def test_team_replies_are_read_by_the_ai_not_keywords(session: Session, env):
     ))
     _run(session, tid, _mail(session, tid, _PRIYA, subject="New Joining - Naman", sender="hr.lead@acme-real.com"), fake)
     case = session.exec(select(Outcome)).one()
-    fac_order = [m for m in _mails_to(session, "facilities@acme-real.com") if "WORK ORDER" in m.subject][-1]
+    fac_order = [m for m in _mails_to(session, "facilities@acme-real.com") if "Work Order" in m.subject][-1]
 
     reader = FakeGemini({"action": "done", "note": "Workstation 3F-12 is good to go", "confidence": 0.95})
     _run(session, tid, _mail(session, tid, "the workstation is good to go, 3F-12", sender="facilities@acme-real.com",
@@ -269,7 +270,7 @@ def test_tasks_are_read_from_the_email_list_when_the_ai_gives_none(session: Sess
     _priya_case(session, tid, [])
     it = _mails_to(session, "it-helpdesk@acme-real.com")[-1].body
     assert "1. Laptop, company email ID and system access" in it
-    fac = [m.body for m in _mails_to(session, "facilities@acme-real.com") if "WORK ORDER" in m.subject][0]
+    fac = [m.body for m in _mails_to(session, "facilities@acme-real.com") if "Work Order" in m.subject][0]
     assert "A desk/workstation near the marketing team" in fac
     assert "2. ID and access card for the office" in it
     assert "Name: Priya Sharma" not in fac.split("Requester:")[0], "'Key: value' facts are not tasks"
@@ -395,7 +396,8 @@ def test_ungrounded_draft_is_replaced_by_the_truth(session: Session, env):
     ))
     _run(session, tid, _mail(session, tid, "pantry drain blocked"), fake)
     reply = _mails_to(session, REQ)[-1]
-    assert "has been fixed" not in reply.body and "assigned it to" in reply.body
+    assert "has been fixed" not in reply.body.lower()
+    assert "assigned it to" in reply.body.lower()
 
 
 def test_question_is_answered_without_opening_a_case(session: Session, env):
@@ -414,7 +416,7 @@ def test_admin_can_change_details_and_close_any_case(session: Session, env):
     tid = _tid(session)
     _run(session, tid, _mail(session, tid, "Fan not working in cabin 12", subject="fan"))
     case = session.exec(select(Outcome)).one()
-    order = [m for m in _mails_to(session, ADMIN) if "WORK ORDER" in m.subject][-1]
+    order = [m for m in _mails_to(session, ADMIN) if "Work Order" in m.subject][-1]
     assert '"change <detail> to <value>"' in order.body
 
     result = _run(session, tid, _mail(session, tid, "change visit slot to Friday 4 PM", sender=ADMIN, subject=f"Re: {order.subject}"))
@@ -445,7 +447,7 @@ def test_digest_mode_batches_completion_notes(session: Session, env):
     assert not any("Completed by the desk" in m.subject for m in _mails_to(session, ADMIN))
 
     assert send_admin_digest(session, tid, force=True)["sent"] is True
-    digest = [m for m in _mails_to(session, ADMIN) if "daily summary" in m.subject][-1]
+    digest = [m for m in _mails_to(session, ADMIN) if "operations summary" in m.subject.lower()][-1]
     assert case.case_reference in digest.body
 
 

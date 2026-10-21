@@ -72,20 +72,56 @@ def trusted_ops_senders() -> set[str]:
     return out
 
 
-def is_ops_person_role(role: Optional[str]) -> bool:
-    """Employee-sheet roles, including 'COMPANY ADMIN / ADMIN - PUNE' style labels."""
+def _role_tokens(role: Optional[str]) -> set[str]:
     raw = (role or "").strip().upper()
-    if raw in _OPS_PERSON_ROLES:
-        return True
+    tokens: set[str] = set()
     for part in re.split(r"[/,|]", raw):
         token = re.sub(r"[\s\-]+", "_", part.strip()).strip("_")
-        if not token:
-            continue
-        if token in _OPS_PERSON_ROLES:
-            return True
-        if token.startswith(("COMPANY_ADMIN", "BRANCH_ADMIN", "TEAM_OPERATOR", "ADMIN_")) or token == "ADMIN":
-            return True
-    return False
+        if token:
+            tokens.add(token)
+    if raw in _OPS_PERSON_ROLES:
+        tokens.add(raw)
+    return tokens
+
+
+def is_branch_scoped_role(role: Optional[str]) -> bool:
+    """ADMIN - PUNE / BRANCH_ADMIN covers specific sites. A bare company admin does not."""
+    return any(t == "BRANCH_ADMIN" or t.startswith(("BRANCH_ADMIN_", "ADMIN_")) for t in _role_tokens(role))
+
+
+def is_company_wide_role(role: Optional[str]) -> bool:
+    """Main admin sees every branch. A branch token in the same role string wins."""
+    if is_branch_scoped_role(role):
+        return False
+    return any(
+        t in {"COMPANY_ADMIN", "OPERATOR", "ADMIN"} or t.startswith("COMPANY_ADMIN")
+        for t in _role_tokens(role)
+    )
+
+
+def is_ops_person_role(role: Optional[str]) -> bool:
+    """Employee-sheet roles, including 'COMPANY ADMIN / ADMIN - PUNE' style labels."""
+    if is_company_wide_role(role) or is_branch_scoped_role(role):
+        return True
+    return any(t in _OPS_PERSON_ROLES or t.startswith("TEAM_OPERATOR") for t in _role_tokens(role))
+
+
+def _plain_addr(sender: Optional[str]) -> str:
+    from email.utils import parseaddr
+
+    addr = (sender or "").strip().lower()
+    if "<" in addr:
+        addr = parseaddr(sender or "")[1].strip().lower()
+    return addr
+
+
+def _same_mailbox(left: str, right: str) -> bool:
+    """flexx@gmail.com and flexx+facilities@gmail.com are the same person."""
+    from app.agent.directory import base_mailbox
+
+    if not left or not right:
+        return False
+    return left == right or base_mailbox(left) == base_mailbox(right)
 
 
 def person_ops_emails(session, tenant_id: str) -> set[str]:
@@ -123,45 +159,81 @@ def _location_tree_ids(session, tenant_id: str, root_id: str) -> set[str]:
     return out
 
 
-def analytics_scope_for_sender(session, tenant_id: str, sender: Optional[str]) -> tuple[Optional[list[str]], Optional[str]]:
-    """Branch admins only see their site tree. A mailbox with no home site sees the whole company."""
-    from email.utils import parseaddr
-
+def person_for_mailbox(session, tenant_id: str, sender: Optional[str]):
+    """Match the employee row, treating a Gmail plus-tag as the same mailbox."""
     from sqlmodel import select
 
-    from app.models.org import Location, Person
+    from app.models.org import Person
 
-    addr = (sender or "").strip().lower()
-    if "<" in addr:
-        addr = parseaddr(sender or "")[1].strip().lower()
+    addr = _plain_addr(sender)
+    if not addr:
+        return None
+    exact = None
+    base_hit = None
+    for person in session.exec(
+        select(Person).where(Person.tenant_id == tenant_id, Person.is_active == True)  # noqa: E712
+    ).all():
+        email = (person.email or "").strip().lower()
+        if not email:
+            continue
+        if email == addr:
+            exact = person
+            break
+        if _same_mailbox(email, addr):
+            base_hit = base_hit or person
+    return exact or base_hit
+
+
+def _scope_roots(person) -> list[str]:
+    """Sites this admin may see. Company-wide role with no extra sites means every branch."""
+    if is_company_wide_role(person.role) and not (person.allowed_site_ids or []):
+        return []
+    roots: list[str] = []
+    for site_id in list(person.allowed_site_ids or []):
+        if site_id and site_id not in roots:
+            roots.append(site_id)
+    if person.site_id and person.site_id not in roots and not is_company_wide_role(person.role):
+        roots.append(person.site_id)
+    return roots
+
+
+def analytics_scope_for_sender(session, tenant_id: str, sender: Optional[str]) -> tuple[Optional[list[str]], Optional[str]]:
+    """None location ids = every branch. A list = those sites and their floors.
+
+    One admin can cover several branches via allowed_site_ids. A main admin
+    (company-wide role, no branch list) sees all of them.
+    """
+    from app.models.org import Location
+
+    addr = _plain_addr(sender)
     if not addr:
         return None, None
-    person = session.exec(
-        select(Person).where(
-            Person.tenant_id == tenant_id,
-            Person.email == addr,
-            Person.is_active == True,  # noqa: E712
-        )
-    ).first()
-    if not person or not person.site_id:
-        return None, None
-    loc = session.get(Location, person.site_id)
-    label = (loc.name if loc else None) or "your branch"
-    return sorted(_location_tree_ids(session, tenant_id, person.site_id)), label
+    person = person_for_mailbox(session, tenant_id, addr)
+    if person and is_ops_person_role(person.role):
+        roots = _scope_roots(person)
+        if not roots:
+            return None, "all branches"
+        ids: set[str] = set()
+        labels: list[str] = []
+        for root in roots:
+            ids |= _location_tree_ids(session, tenant_id, root)
+            loc = session.get(Location, root)
+            labels.append((loc.name if loc else None) or root)
+        return sorted(ids), ", ".join(labels)
+    if any(_same_mailbox(addr, known) for known in trusted_ops_senders()):
+        return None, "all branches"
+    return None, None
 
 
 def is_ops_authority(session, tenant_id: str, sender: Optional[str]) -> bool:
     """True when this mailbox may approve / command cases (env ops or Person role)."""
-    addr = (sender or "").strip().lower()
-    if "@" in addr and "<" in addr:
-        from email.utils import parseaddr
-
-        addr = parseaddr(sender or "")[1].strip().lower()
+    addr = _plain_addr(sender)
     if not addr:
         return False
-    if addr in trusted_ops_senders():
+    if any(_same_mailbox(addr, known) for known in trusted_ops_senders()):
         return True
-    return addr in person_ops_emails(session, tenant_id)
+    person = person_for_mailbox(session, tenant_id, addr)
+    return bool(person and is_ops_person_role(person.role))
 
 
 def _open_request_texts(facts: dict[str, Any]) -> list[str]:
@@ -350,7 +422,7 @@ def _booked_briefing(outcome: Outcome, bag: dict[str, Any], *, event_title: str,
     setup = bag.get("setup_buffer_minutes")
     if setup:
         room += f", setup {setup} min before"
-    lines = [f"{case} — {event_title}", ""]
+    lines = ["Dear Colleague,", "", f"Request: {case}", f"Subject: {event_title}", ""]
     lines += [f"{label}: {value}" for label, value in (
         ("Requester", _requester_label(outcome, bag)),
         ("When", _when_line(bag)),
@@ -365,9 +437,9 @@ def _booked_briefing(outcome: Outcome, bag: dict[str, Any], *, event_title: str,
         lines += ["", detail.strip()]
     lines.append("")
     if kind == "decision":
-        lines.append('Reply "approve" or "reject, <reason>". To change the booking, just say so — e.g. "move to 3pm".')
+        lines.append('Reply "approve" or "reject, <reason>". To change the booking, reply with the change, for example "move to 3pm".')
     else:
-        lines.append('To change anything, just reply — e.g. "move to 3pm", "make it 20 people" or "cancel".')
+        lines.append('No action is required. To change the booking, please reply, for example "move to 3pm", "make it 20 people", or "cancel".')
     return "\n".join(lines) + "\n"
 
 
@@ -432,7 +504,7 @@ def build_admin_briefing(
     if gaps:
         rows.append(("Waiting on requester", ", ".join(dict.fromkeys(gaps))))
 
-    lines = [f"{case} — {event_title}"]
+    lines = ["Dear Colleague,", "", f"Request: {case}", f"Subject: {event_title}"]
     if detail.strip():
         lines.append(detail.strip())
     lines.append("")
@@ -440,13 +512,13 @@ def build_admin_briefing(
     lines.append("")
     if kind == "decision":
         lines.append(
-            'Your call. Reply in plain words, e.g. "approve", "reject, no budget", '
+            'Your call. Please reply with the decision, for example "approve", "reject, no budget", '
             '"book F2-R3", "split it", or "move to 3pm".'
         )
     else:
         lines.append(
-            'No action needed. To change anything, just reply — e.g. "move them to F2-R3", '
-            '"make it 20 people" or "cancel".'
+            'No action needed. To change anything, please reply, for example "move them to F2-R3", '
+            '"make it 20 people", or "cancel".'
         )
     return hint, "\n".join(lines) + "\n"
 

@@ -88,9 +88,21 @@ from app.services.stock import issue_and_maybe_reorder, refill_from_confirm
 logger = get_logger(__name__)
 
 _AMOUNT_IN_NOTE = re.compile(
-    r"(?:INR|Rs\.?|₹)\s*([\d,]+(?:\.\d+)?)",
+    r"(?:(?:INR|Rs\.?|₹)\s*(\d[\d,]*(?:\.\d+)?)|(\d[\d,]*(?:\.\d+)?)\s*(?:INR|Rs\.?|₹))",
     re.I,
 )
+
+
+def amount_in_text(text: Optional[str]) -> Optional[float]:
+    """Pull a reported amount from a team reply, including 'done inr 8000'."""
+    m = _AMOUNT_IN_NOTE.search(text or "")
+    if not m:
+        return None
+    raw = m.group(1) or m.group(2)
+    try:
+        return float(raw.replace(",", ""))
+    except (TypeError, ValueError):
+        return None
 
 SERVICE_TEMPLATE = "SERVICE_REQUEST"
 _CLOSED = {OutcomeStatus.CLOSED.value, OutcomeStatus.CANCELLED.value, OutcomeStatus.ADMINISTRATIVELY_CLOSED.value}
@@ -453,11 +465,14 @@ class AdminDesk:
             # Empty/placeholder updates to dead ticket numbers must not fall through to the legacy path
             # (that used to invent a GENERAL case titled like the old subject).
             if self._dead_template_updates(decision, f"{event.subject or ''}\n{text}"):
-                body = (
-                    f"{'Hi ' + name.split()[0] + ',' if name and name not in {'there', 'team'} else 'Hi,'}\n\n"
-                    "Those older request numbers aren't open anymore, so I haven't opened new tickets from that "
-                    "template. Send a fresh mail for anything you still need and I'll take it from there.\n\n"
-                    f"{self.settings.mail_signature}\n"
+                from app.services.mail_style import letter
+                from app.services.no_resource_flow import format_outbound_greeting
+
+                body = letter(
+                    format_outbound_greeting(name),
+                    "Those request numbers are no longer open, so no new request has been raised from that "
+                    "message. Please send a new email for any item that still requires action.",
+                    self.settings.mail_signature,
                 )
                 self._send_reply(event, conversation, None, body, [])
                 self.session.commit()
@@ -812,12 +827,20 @@ class AdminDesk:
         own = f"{outcome.title}\n{' '.join(facts.get('tasks') or [])}\n{details}"
         # When one mail asked for several things, its words (a flight, an amount) belong to only one of the cases.
         split = sum(1 for i in decision.intents if i.type in {"new_request", "update_case"}) > 1 or bool(self._sibling_cases(outcome))
+        from app.services.record_decisions import decide_for_case
+
+        record_decision = decide_for_case(self.session, self.tenant_id, outcome)
+        facts = _set_facts(self.session, outcome, record_decision=record_decision)
+        if record_decision.get("action") == "ESCALATE" and outcome.priority not in {"URGENT", "HIGH"}:
+            outcome.priority = "HIGH"
+            self.session.add(outcome)
+        needs_record_approval = record_decision.get("action") == "NEEDS_APPROVAL"
         risk = assess_risk(
             category=category,
             text=own if split else f"{facts.get('raw_request') or ''}\n{text}\n{own}",
             details=details,
-            agent_flag=intent.needs_admin_decision,
-            agent_reason=intent.decision_reason,
+            agent_flag=intent.needs_admin_decision or needs_record_approval,
+            agent_reason=record_decision.get("reason") if needs_record_approval else intent.decision_reason,
             confidence=decision.confidence,
             spend_limit=route.spend_approval_limit,
             known=has_playbook(category) or handles_category(self.session, self.tenant_id, category),
@@ -1053,7 +1076,7 @@ class AdminDesk:
             return {"intent": intent, "status": "allocated" if done else "dispatched", "outcome": outcome, "parking": slots}
         _set_facts(self.session, outcome, agent_stage="DISPATCHED", missing=[])
         self._ticket_status(outcome, "ASSIGNED", assignee=route.recipients[0] if route.recipients else None)
-        if category == "supplies":
+        if category == "supplies" and (facts.get("record_decision") or {}).get("action") != "EXPIRED":
             blob = f"{outcome.title}\n{facts.get('raw_request') or ''}\n{facts.get('details') or {}}"
             stock = issue_and_maybe_reorder(
                 self.session,
@@ -1076,12 +1099,13 @@ class AdminDesk:
                 )
         if category in {"laptop", "asset", "phone_sim", "access_card"}:
             self._touch_asset(outcome, status="PENDING_ISSUE")
-        headline = "New work order"
+        decision_headline = (facts.get("record_decision") or {}).get("headline") or ""
+        headline = decision_headline or "New work order"
         if facts.get("knowledge_gap"):
             headline = 'Question needs a verified answer - reply "tell requester: <answer>"'
-        elif outcome.priority == "URGENT":
+        elif outcome.priority == "URGENT" and not decision_headline:
             headline = "URGENT work order - please act now"
-        elif outcome.priority == "HIGH":
+        elif outcome.priority == "HIGH" and not decision_headline:
             headline = "High-priority work order"
         self._work_order(outcome, route, headline=headline, final=False)
         return {"intent": intent, "status": "dispatched", "outcome": outcome, "team": route.department_name}
@@ -1337,11 +1361,33 @@ class AdminDesk:
     def _briefing(self, outcome: Outcome, headline: str, *, kind: str, tasks: Optional[list[str]] = None) -> str:
         facts = outcome.facts or {}
         name = resolve_requester_name(self.session, outcome=outcome)
-        lines = [f"{outcome.case_reference} - {outcome.title}", "", headline, ""]
+        from app.services.mail_style import signoff
+
+        opening = {
+            "work": "A work order has been assigned to your team. The particulars are below.",
+            "decision": "Your approval is requested. The particulars are below.",
+            "urgent": "The following request is urgent and requires attention.",
+            "escalation": "The following request has been escalated and requires attention.",
+            "at_risk": "The following request is at risk of missing its due time.",
+        }.get(kind, "Please note the following update.")
+        lines = [
+            "Dear Team,",
+            "",
+            opening,
+            "",
+            f"Request: {outcome.case_reference}",
+            f"Subject: {outcome.title}",
+            "",
+            headline,
+            "",
+        ]
+        decision = facts.get("record_decision") or {}
+        if decision.get("checks"):
+            lines += ["Record check:", *[f"- {line}" for line in decision["checks"]], ""]
         if tasks is None and kind in {"work", "decision"} and not facts.get("team_groups"):
             tasks = facts.get("tasks")
         if tasks:
-            lines += ["YOUR TASKS:" if kind == "work" else "Requested:", *[f"{i}. {t}" for i, t in enumerate(tasks, 1)], ""]
+            lines += ["Tasks assigned:" if kind == "work" else "Requested:", *[f"{i}. {t}" for i, t in enumerate(tasks, 1)], ""]
         lines.append(f"Requester: {name} <{outcome.requester_email}>" if name not in {"there", "team"} else f"Requester: {outcome.requester_email}")
         lines.append(f"Type: {facts.get('category_label') or label_for(facts.get('agent_category'))}")
         if facts.get("location_name"):
@@ -1379,25 +1425,29 @@ class AdminDesk:
             lines.append(f"- Vehicle {p['vehicle']}: " + (f"slot {p['slot']}" if p.get("slot") else "no free slot"))
         lines.append("")
         if kind == "decision":
-            lines.append('Reply "approve" or "reject, <reason>". You can also say "tell requester: <message>".')
+            lines.append('Reply "approve" or "reject, <reason>". You may also reply "tell requester: <message>".')
         elif kind == "work":
             proof = evidence_hint(facts.get("agent_category"))
-            done = f'"done - <{proof}>"' if proof else '"done" when finished (add a note if you like)'
-            lines.append('Reply "on it" / "ETA 4 pm" to update the requester, "issue: <what is blocking>" if stuck, '
-                         f'{done}, "assign to <email>", '
-                         '"tell requester: <message>", "change <detail> to <value>", "close" or "cancel".')
+            done = f'"done - <{proof}>"' if proof else '"done" when the work is complete, with a short note'
+            lines.append("Please reply to this email with one of the following:")
+            lines.append(f'- "on it" or "ETA 4 pm" to update the requester')
+            lines.append('- "issue: <what is blocking>" if the work cannot proceed')
+            lines.append(f"- {done}")
+            lines.append('- "assign to <email>" to transfer the work order')
+            lines.append('- "tell requester: <message>", "change <detail> to <value>", "close", or "cancel"')
             if proof:
-                lines.append("A job is only marked verified once we have that note or a photo attached to your reply.")
+                lines.append("The request is marked verified only when that note, or a photograph, is attached to your reply.")
             if facts.get("agent_category") in _COLLECTABLE:
                 on_file = self._handover_info(facts)
-                lines.append("When it is ready, say where and from whom to collect it (e.g. \"done - card ready, collect "
-                             "from IT desk, 3rd floor, ask for Rahul\") so the requester knows where to go."
-                             + (f" If you don't, we'll share what's on file: {on_file}" if on_file else ""))
-            lines.append('Wrong team or type? Reply "change team to <team>", "change type to <type>" or '
-                         '"change priority to high" - the desk learns from these corrections.')
+                lines.append('When the item is ready, state where and from whom to collect it '
+                             '(for example, "done - card ready, collect from IT desk, 3rd floor, ask for Rahul").'
+                             + (f" If this is omitted, the requester will be told what is on file: {on_file}" if on_file else ""))
+            lines.append('If the team, type, or priority is wrong, reply "change team to <team>", '
+                         '"change type to <type>", or "change priority to high".')
         elif kind in {"escalation", "at_risk", "urgent"}:
-            lines.append('Reply "assign to <email>" to hand it to someone else, "tell requester: <message>" to update '
-                         'them, "done - <note>" if it is already handled, or "cancel".')
+            lines.append('Please reply "assign to <email>" to transfer it, "tell requester: <message>" to update '
+                         'the requester, "done - <note>" if it is already complete, or "cancel".')
+        lines += ["", signoff(self.settings.mail_signature)]
         return "\n".join(lines) + "\n"
 
     @staticmethod
@@ -1576,75 +1626,101 @@ class AdminDesk:
         return not re.search(r"\b(?:has been|is now)\s+(?:fixed|resolved|approved|booked|repaired)\b", low)
 
     def _template_reply(self, results: list[dict], name: str, *, split: bool) -> str:
-        first = name.split(" ")[0] if name and name not in {"there", "team"} else ""
-        lines = [f"Hi {first}," if first else "Hi,", ""]
+        from app.services.mail_style import signoff
+        from app.services.no_resource_flow import format_outbound_greeting
+
+        lines = [format_outbound_greeting(name), ""]
         for r in results:
             outcome: Optional[Outcome] = r.get("outcome")
             status = r["status"]
             ref = outcome.case_reference if outcome else ""
             what = (outcome.title if outcome else "") or "your request"
             if status == "awaiting_info":
-                lines.append(f"I've logged {what} as {ref}. To take it forward I just need:")
+                lines.append(f"Your request has been logged.\n\nRequest: {ref}\nSubject: {what}\n\nPlease reply with the following:")
                 lines += [f"- {q}" for q in r.get("missing", [])]
             elif status == "awaiting_approval":
-                lines.append(f"I've logged {what} as {ref} and passed it to the admin for approval. I'll update you here.")
+                lines.append(
+                    f"Your request has been logged and sent for approval.\n\nRequest: {ref}\nSubject: {what}\n\n"
+                    "You will be updated on this thread once a decision is recorded."
+                )
             elif status == "linked":
                 update = (r.get("employee_update") or "").strip()
                 if update:
                     lines.append(update)
                 else:
                     lines.append(
-                        f"This looks related to open case {ref} ({what}). I've linked your report so the team can continue there."
+                        f"This report has been linked to the open request {ref} ({what}). "
+                        "The assigned team will continue on that request."
                     )
             elif status == "dispatched":
-                team = r.get("team") or ((outcome.facts or {}).get("department_name") if outcome else None) or "the team"
+                team = r.get("team") or ((outcome.facts or {}).get("department_name") if outcome else None) or "the assigned team"
                 employee_update = ((outcome.facts or {}).get("resolution_employee_update") if outcome else None) or ""
                 if employee_update and outcome is not None and should_investigate(
                     (outcome.facts or {}).get("agent_category") or ""
                 ):
                     lines.append(employee_update if ref in employee_update else f"{employee_update} (Ref: {ref})")
+                    if "assigned it to" not in employee_update.lower():
+                        lines.append(f"Assigned it to {team}.")
                 elif outcome is not None and outcome.priority == "URGENT":
-                    lines.append(f"I've logged {what} as {ref} as URGENT and alerted {team} and the admin right away.")
+                    lines.append(
+                        f"Your request has been logged as urgent and the assigned team has been notified.\n\n"
+                        f"Request: {ref}\nSubject: {what}\nAssigned to: {team}\nPriority: Urgent"
+                    )
                 else:
-                    lines.append(f"I've logged {what} as {ref} and assigned it to {team}. I'll let you know once it's done.")
+                    lines.append(
+                        f"We have logged your request and assigned it to {team}.\n\n"
+                        f"Request: {ref}\nSubject: {what}\nStatus: Open\n\n"
+                        "You will be updated on this thread when the work is complete."
+                    )
+                    decision = (outcome.facts or {}).get("record_decision") or {}
+                    if decision.get("summary"):
+                        lines.append(decision["summary"])
                 if r.get("missing"):
-                    lines += ["", "To help them, could you also tell me:"] + [f"- {q}" for q in r["missing"]]
+                    lines += ["", "Please also provide:"] + [f"- {q}" for q in r["missing"]]
                 if r.get("day1"):
                     lines += ["", r["day1"]]
             elif status == "knowledge_gap":
-                lines.append("I couldn't find a verified answer to that in our records, so rather than guess I've passed "
-                             f"your question to the admin team ({ref}). They'll reply to you here.")
+                lines.append(
+                    "A verified answer is not on record for that question. It has been referred to the "
+                    f"administrator ({ref}). The reply will come on this thread."
+                )
             elif status == "reopened":
-                team = r.get("team") or "the team"
-                lines.append(f"Sorry it's still not sorted - I've reopened {ref} ({what}) and sent it back to {team} "
-                             "with your note. I'll update you here.")
+                team = r.get("team") or "the assigned team"
+                lines.append(
+                    f"Request {ref} ({what}) has been reopened and returned to {team}, together with your note. "
+                    "You will be updated on this thread."
+                )
             elif status == "issued":
-                lines.append(f"Your visitors are pre-registered ({ref}):")
+                lines.append(f"Your visitors have been pre-registered.\n\nRequest: {ref}")
                 lines += [f"- {p['name']}: pass {p['pass_code']}" for p in r.get("passes", [])]
-                lines.append("Please ask them to carry a photo ID and meet you at reception.")
+                lines.append("Please ask each visitor to carry a photo identity card and meet you at reception.")
             elif status == "allocated":
-                lines.append(f"Parking is arranged ({ref}):")
+                lines.append(f"Parking has been arranged.\n\nRequest: {ref}")
                 lines += [f"- {p['vehicle']}: slot {p['slot']}" for p in r.get("parking", [])]
             elif status == "updated":
-                lines.append(f"Thanks - I've added that to {ref}.")
+                lines.append(f"The additional details have been added to request {ref}.")
             elif status == "cancelled":
-                lines.append(f"Done - {ref} is cancelled.")
+                lines.append(f"Request {ref} has been cancelled.")
             elif status == "closed":
-                lines.append(f"Great, I've closed {ref}. Thanks for confirming!")
+                lines.append(f"Request {ref} has been closed. Thank you for confirming.")
             elif status == "status" and outcome:
                 state = case_state(outcome)
-                lines.append(f"{ref} ({outcome.title}) is currently: {str(state.get('stage') or outcome.status).replace('_', ' ').lower()}.")
+                stage = str(state.get("stage") or outcome.status).replace("_", " ").lower()
+                lines.append(f"Request: {ref}\nSubject: {outcome.title}\nStatus: {stage}")
             elif status == "status":
-                lines.append("I couldn't find an open request for you - could you share the reference number?")
+                lines.append("No open request was found for this mailbox. Please reply with the request number.")
             elif status == "empty":
-                lines.append("Your mail seems to have come through empty - could you resend it with the details?")
+                lines.append("The message arrived without details. Please resend it with the request.")
             elif status in {"small_talk", "question"}:
-                lines.append("How can I help you today? I can help with rooms, visitors, parking, repairs, IT, supplies, travel and more.")
+                lines.append(
+                    "Please state the request. This desk handles meeting rooms, visitors, parking, repairs, "
+                    "IT, supplies, travel, and related workplace services."
+                )
             lines.append("")
         if split:
-            lines.append("Your other request is being handled in a separate mail on this thread.")
+            lines.append("The other item in your message is covered in a separate email on this thread.")
             lines.append("")
-        lines.append(self.settings.mail_signature)
+        lines.append(signoff(self.settings.mail_signature))
         return "\n".join(lines).strip() + "\n"
 
     def _attach_flight_options(self, outcome: Outcome, text: str) -> None:
@@ -2136,7 +2212,7 @@ class AdminDesk:
             evidence = "not_required"
         else:
             evidence = "missing"
-        self._resolve(outcome, note=note, actor=actor, evidence=evidence)
+        self._resolve(outcome, note=note, actor=actor, evidence=evidence, raw_text=body)
         days = max(1, round(float(getattr(self.settings, "desk_autoclose_hours", 72) or 72) / 24))
         if facts.get("knowledge_gap") and note:
             self._tell_requester(outcome, f"About your question ({outcome.case_reference}): {note}")
@@ -2348,7 +2424,15 @@ class AdminDesk:
         add_correction(self.session, outcome, "priority_changed", actor, before=old, after=new)
         return {"applied": True, "action": "priority", "priority": new}
 
-    def _resolve(self, outcome: Outcome, *, note: str, actor: str, evidence: str) -> None:
+    def _resolve(
+        self,
+        outcome: Outcome,
+        *,
+        note: str,
+        actor: str,
+        evidence: str,
+        raw_text: Optional[str] = None,
+    ) -> None:
         facts = outcome.facts or {}
         if facts.get("bulk_reorder") and re.search(r"\b(?:confirm\s+received|received|refilled?|delivered)\b", note or "", re.I):
             filled = refill_from_confirm(self.session, outcome, note or "")
@@ -2388,28 +2472,28 @@ class AdminDesk:
                 FacilitiesOpsService(self.session, self.tenant_id).complete_pm(pm_id, notes=note)
             except Exception:  # noqa: BLE001
                 pass
-        amount = None
-        if m := _AMOUNT_IN_NOTE.search(note or ""):
-            try:
-                amount = float(m.group(1).replace(",", ""))
-            except ValueError:
-                amount = None
-        # V3 §16.4/§31: team 'done, INR X' is REPORTED operational cost only — never posted/paid.
+        amount = amount_in_text("\n".join(part for part in (raw_text, note) if part))
+        # Team 'done, INR X' is REPORTED operational cost only — never posted/paid.
         cost_snap = None
         if amount is not None and self.settings.unified_outcome_spine:
+            from app.services.commercial_cost import CommercialCostService
+
             try:
                 from datetime import date
 
                 from app.engines.budget import BudgetEngine
-                from app.services.commercial_cost import CommercialCostService
 
-                period = date.today().isoformat()[:7]
-                BudgetEngine(self.session, self.tenant_id).check(amount=amount, period=period)
+                BudgetEngine(self.session, self.tenant_id).check(
+                    amount=amount, period=date.today().isoformat()[:7]
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("budget_check_on_reported_spend_failed", error=str(exc)[:200])
+            try:
                 cost = CommercialCostService(self.session, self.tenant_id).report_operational(
                     outcome.outcome_id,
                     amount,
                     actor=actor,
-                    note=note,
+                    note=note or raw_text,
                 )
                 cost_snap = {
                     "cost_id": cost.cost_id,
@@ -2417,8 +2501,8 @@ class AdminDesk:
                     "reported_amount": cost.reported_amount,
                     "authoritative_finance": False,
                 }
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("reported_spend_not_stored", error=str(exc)[:200])
         self._ledger(
             outcome,
             "TEAM_DONE",
@@ -2426,6 +2510,7 @@ class AdminDesk:
             actor_email=actor,
             actor_role="team",
             amount=amount,
+            asset_tag=((outcome.facts or {}).get("record_decision") or {}).get("asset_tag"),
             payload={
                 "evidence": evidence,
                 "evidence_gate": evidence_gate,
@@ -2495,7 +2580,10 @@ class AdminDesk:
         facts = outcome.facts or {}
         team = ", ".join(facts.get("teams") or []) if status == "dispatched" and facts.get("team_groups") else ""
         team = team or facts.get("department_name") or "the team"
-        text = f"{outcome.case_reference} ({outcome.title}) is approved and assigned to {team}. I'll update you once it's done."
+        text = (
+            f"Request {outcome.case_reference} ({outcome.title}) is approved and assigned to {team}. "
+            "You will be updated on this thread when the work is complete."
+        )
         collect = self._collect_info(outcome)
         if collect:
             text += f"\nOnce it's ready, you can collect it: {collect}"
@@ -2555,9 +2643,11 @@ class AdminDesk:
     def _tell_requester(self, outcome: Outcome, message: str) -> None:
         if not outcome.requester_email:
             return
+        from app.services.mail_style import letter
+        from app.services.no_resource_flow import format_outbound_greeting
+
         name = resolve_requester_name(self.session, outcome=outcome)
-        first = name.split(" ")[0] if name and name not in {"there", "team"} else ""
-        body = f"{'Hi ' + first + ',' if first else 'Hi,'}\n\n{message.strip()}\n\n{self.settings.mail_signature}\n"
+        body = letter(format_outbound_greeting(name), message.strip(), self.settings.mail_signature)
         self.comms.send_case_update(
             outcome=outcome,
             communication_type=CommunicationType.INFORMATION_ONLY.value,

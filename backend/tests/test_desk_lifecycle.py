@@ -77,7 +77,7 @@ def test_urgent_safety_issue_is_dispatched_at_once_and_admin_alerted(session: Se
     assert case.priority == "URGENT"
     assert case.facts["agent_stage"] == "DISPATCHED", "safety work must not wait for missing details"
     assert _mails_to(session, "facilities@acme-real.com")
-    assert any("URGENT" in m.subject for m in _mails_to(session, ADMIN))
+    assert any("urgent" in (m.subject or "").lower() for m in _mails_to(session, ADMIN))
     ticket = session.exec(select(ServiceTicket)).one()
     assert ticket.sla_due_at is not None and ticket.sla_due_at - utcnow() <= timedelta(hours=4, minutes=5)
 
@@ -178,7 +178,7 @@ def test_sweep_reminds_then_escalates_once(session: Session, env):
     assert counts["escalated"] == 1
     session.refresh(case)
     assert case.status == "AT_RISK" and case.facts["sla_breached"] is True
-    assert any("ESCALATION" in m.subject for m in _mails_to(session, ADMIN))
+    assert any("escalation" in (m.subject or "").lower() for m in _mails_to(session, ADMIN))
     assert sweep_desk_cases(session, tid, now=case.due_at + timedelta(hours=2))["escalated"] == 0
 
 

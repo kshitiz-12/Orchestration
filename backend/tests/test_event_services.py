@@ -54,7 +54,7 @@ def _set(monkeypatch, **values) -> None:
 def _facts(**extra) -> dict:
     base = {
         "attendees": 6,
-        "date": "15th october",
+        "date": "28th october",
         "preferred_time": "3 pm",
         "end_time": "5pm",
         "duration_hours": 2.0,
@@ -165,7 +165,7 @@ def test_included_services_need_no_approval_and_close_financially(session: Sessi
         select(Requirement).where(Requirement.outcome_id == case.outcome.outcome_id, Requirement.code == "INVOICE")
     ).first()
     assert invoice.applicability == "NOT_APPLICABLE"
-    confirmed = next(m for m in case.mails(REQ) if "BOOKING CONFIRMED" in (m.subject or ""))
+    confirmed = next(m for m in case.mails(REQ) if "booking confirmed" in (m.subject or "").lower())
     assert "No separate approval is needed" in confirmed.body
 
     case.say("all good, satisfied")
@@ -181,7 +181,7 @@ def test_approval_covers_only_the_chargeable_part(session: Session, env):
     assert "Tea / coffee (vending and pantry)" in plan["included"]
     approval = session.exec(select(Approval).where(Approval.outcome_id == case.outcome.outcome_id)).first()
     assert approval.approval_type == "CATERING_SPEND" and approval.decision == "PENDING"
-    mail = next(m for m in case.mails("mgr@example.com") if "[APPROVAL REQUIRED]" in (m.subject or ""))
+    mail = next(m for m in case.mails("mgr@example.com") if "approval required" in (m.subject or "").lower())
     assert "only for the chargeable part" in mail.body and "Included at no incremental charge" in mail.body
 
 
@@ -196,7 +196,7 @@ def test_real_department_gets_its_list_and_done_marks_ready(session: Session, en
     packages = {p["owner"]: p for p in case.facts["task_packages"]}
     assert packages["CAFETERIA"]["recipients"] == [CAFE] and not packages["CAFETERIA"]["redirected"]
     assert packages["ADMIN"]["redirected"]
-    cafe_mail = [m for m in case.mails(CAFE) if "[ACTION REQUIRED]" in (m.subject or "")]
+    cafe_mail = [m for m in case.mails(CAFE) if "action required" in (m.subject or "").lower()]
     assert len(cafe_mail) == 1 and "Working lunch" in cafe_mail[0].body and "Ready by:" in cafe_mail[0].body
     admin_mails = [m for m in case.mails(ADMIN) if "Booking confirmed" in (m.body or "")]
     assert admin_mails and "Task lists by owner:" in admin_mails[-1].body
@@ -205,12 +205,12 @@ def test_real_department_gets_its_list_and_done_marks_ready(session: Session, en
     assert result["action"] == "PACKAGE_DONE"
     session.refresh(case.outcome)
     assert {p["owner"]: p for p in case.facts["task_packages"]}["CAFETERIA"]["status"] == "DONE"
-    assert not any("[READY]" in s for s in case.subjects(REQ))
+    assert not any(s.lower().startswith("ready:") for s in case.subjects(REQ))
 
     ProcessingPipeline(session, tid).process_event(_event(session, tid, case.outcome, "done", sender=ADMIN).event_id)
     session.refresh(case.outcome)
     assert case.facts["orchestration_stage"] == "READY"
-    assert any("[READY]" in s for s in case.subjects(REQ))
+    assert any(s.lower().startswith("ready:") for s in case.subjects(REQ))
 
 
 def test_department_issue_raises_at_risk(session: Session, env):
@@ -222,7 +222,7 @@ def test_department_issue_raises_at_risk(session: Session, env):
     body = "Sorry, we are short of staff that day and can't serve lunch"
     result = ProcessingPipeline(session, tid).process_event(_event(session, tid, case.outcome, body, sender=CAFE).event_id)
     assert result["action"] == "PACKAGE_ISSUE"
-    assert any("[AT RISK]" in (m.subject or "") for m in case.mails(ADMIN))
+    assert any("at risk" in (m.subject or "").lower() for m in case.mails(ADMIN))
 
 
 def test_admin_reject_is_not_read_as_a_package_issue(session: Session, env):
@@ -250,7 +250,7 @@ def test_pending_approval_gets_one_reminder_then_one_escalation(session: Session
     assert orch.run_followups(case.outcome, now=start + timedelta(hours=25))["escalations"] == 1
     assert orch.run_followups(case.outcome, now=start + timedelta(hours=30)) == {"reminders": 0, "escalations": 0}
     session.commit()
-    assert sum("[AT RISK]" in (m.subject or "") for m in case.mails(ADMIN)) == 1
+    assert sum("at risk" in (m.subject or "").lower() for m in case.mails(ADMIN)) == 1
 
 
 # ---------- after the meeting: COMPLETED, service entry, invoice
@@ -260,7 +260,7 @@ def _completed_lunch_case(session: Session, tid: str, thread: str) -> Case:
     orch = case.orchestrator()
     assert orch.request_completion(case.outcome, now=utcnow() + timedelta(days=400))
     session.commit()
-    assert any("[COMPLETED]" in s for s in case.subjects(REQ))
+    assert any(s.lower().startswith("completed:") for s in case.subjects(REQ))
     case.say("Fully delivered, all good - satisfied")
     assert case.facts["operational_status"] == "CLOSED"
     assert case.facts["financial_status"] == "SERVICE_ENTRY_PENDING"
@@ -286,7 +286,7 @@ def test_service_entry_variance_and_invoice_mismatch_are_billing_exceptions(sess
     case = _completed_lunch_case(session, tid, "t-entry-var")
     case.say("only lunch 4 were served")
     assert case.facts["financial_status"] == "BILLING_EXCEPTION"
-    assert any("[BILLING EXCEPTION]" in (m.subject or "") for m in case.mails(ADMIN))
+    assert any("billing exception" in (m.subject or "").lower() for m in case.mails(ADMIN))
     entry = case.facts["service_entries"][0]
     assert entry["actual_qty"] == 4 and entry["status"] == "VARIANCE"
     match = case.orchestrator().match_event_invoice(case.outcome, invoice_number="FS-2", amount=99999, actor="test")
@@ -412,7 +412,7 @@ def test_signed_link_approves_once(client, session: Session, env):
     tid = _tenant(session)
     case = Case(session, tid, "t-link", _facts(catering="high tea", attendees=10))
     case.confirm()
-    mail = next(m for m in case.mails("mgr@example.com") if "[APPROVAL REQUIRED]" in (m.subject or ""))
+    mail = next(m for m in case.mails("mgr@example.com") if "approval required" in (m.subject or "").lower())
     link = re.search(r"Approve: (\S+)", mail.body).group(1)
     parsed = urlparse(link)
     assert parsed.netloc == "ops.example.com"

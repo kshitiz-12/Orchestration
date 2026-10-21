@@ -190,26 +190,12 @@ def format_outbound_greeting(name: str) -> str:
 
 
 def short_case_subject(*, case_reference: str, action_label: str, summary: str, title: str) -> str:
-    """Stage + case + short human hint — not a Gemini narrative dump."""
-    summary = (summary or "").strip()
-    title = (title or "").strip()
-    hint = summary or title
-    low = hint.lower()
-    if low.startswith(
-        (
-            "the user ",
-            "user ",
-            "user is ",
-            "user provided",
-            "requester ",
-        )
-    ):
-        hint = summary if summary and not summary.lower().startswith(low[:12]) else ""
-    if not hint:
-        hint = "Update"
-    if len(hint) > 90:
-        hint = hint[:87] + "…"
-    return f"[{action_label}] [{case_reference}] {hint}"
+    """Action: request [case]. The action is written out, not as a bracket tag."""
+    from app.services.mail_style import case_subject
+
+    return case_subject(
+        case_reference=case_reference, action_label=action_label, summary=summary, title=title
+    )
 
 
 def same_no_resource_fingerprint(facts: dict[str, Any], fingerprint: str | None = None) -> bool:

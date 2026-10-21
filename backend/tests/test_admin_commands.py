@@ -173,9 +173,9 @@ def test_admin_approve_on_no_resource_informs_requester(session: Session, admin_
     assert facts.get("raw_reply") != "Approve"
 
     mails = _mails(session, outcome)
-    to_req = [m for m in mails if "big.team@company.com" in (m.recipients or []) and "OPS APPROVED" in (m.subject or "")]
+    to_req = [m for m in mails if "big.team@company.com" in (m.recipients or []) and "ops approved" in (m.subject or "").lower()]
     assert to_req and "larger venue" in (to_req[0].body or "").lower()
-    acks = [m for m in mails if ADMIN in (m.recipients or []) and "OPS DONE" in (m.subject or "")]
+    acks = [m for m in mails if ADMIN in (m.recipients or []) and "ops done" in (m.subject or "").lower()]
     assert acks and "once the venue is fixed" in (acks[0].body or "")
 
 
@@ -191,7 +191,7 @@ def test_admin_book_offsite_resolves_exception(session: Session, admin_env):
     assert (outcome.facts.get("booked_room") or {}).get("name") == "Hyatt Regency Ballroom"
     mails = _mails(session, outcome)
     assert any(
-        "BOOKING CONFIRMED" in (m.subject or "") and "big.team@company.com" in (m.recipients or [])
+        "booking confirmed" in (m.subject or "").lower() and "big.team@company.com" in (m.recipients or [])
         for m in mails
     )
     open_exc = session.exec(
@@ -215,7 +215,7 @@ def test_admin_reject_asks_requester_for_another_option(session: Session, admin_
     assert "no_resource_choice" not in outcome.facts
     to_req = [
         m for m in _mails(session, outcome)
-        if "big.team@company.com" in (m.recipients or []) and "OPS UPDATE" in (m.subject or "")
+        if "big.team@company.com" in (m.recipients or []) and "ops update" in (m.subject or "").lower()
     ]
     assert to_req and "no off-site budget" in (to_req[-1].body or "")
 
@@ -230,7 +230,7 @@ def test_admin_unknown_reply_changes_nothing(session: Session, admin_env):
     assert result["action"] == "NONE" and result["applied"] is False
     session.refresh(outcome)
     assert outcome.facts.get("last_action") == before
-    acks = [m for m in _mails(session, outcome) if ADMIN in (m.recipients or []) and "OPS NOT APPLIED" in (m.subject or "")]
+    acks = [m for m in _mails(session, outcome) if ADMIN in (m.recipients or []) and "ops not applied" in (m.subject or "").lower()]
     assert acks and "plain words" in (acks[0].body or "")
 
 
@@ -265,8 +265,8 @@ def test_gemini_reads_free_text_book_plus_message(session: Session, admin_env, m
     session.refresh(outcome)
     assert outcome.facts["booked_room"]["name"] == "Hyatt Regency Ballroom"
     to_req = [m for m in _mails(session, outcome) if "big.team@company.com" in (m.recipients or [])]
-    assert any("BOOKING CONFIRMED" in (m.subject or "") for m in to_req)
-    assert any("UPDATE FROM OPS" in (m.subject or "") and "Monday at 11am" in (m.body or "") for m in to_req)
+    assert any("booking confirmed" in (m.subject or "").lower() for m in to_req)
+    assert any("update from ops" in (m.subject or "").lower() and "Monday at 11am" in (m.body or "") for m in to_req)
     assert outcome.facts["admin_commands"][-1]["understood_as"].startswith("Book Hyatt")
 
 
@@ -291,7 +291,7 @@ def test_gemini_fact_update_reruns_search(session: Session, admin_env, monkeypat
     session.refresh(outcome)
     assert int(outcome.facts["attendees"]) == 8
     assert outcome.facts["orchestration_stage"] != "NO_RESOURCE"
-    acks = [m for m in _mails(session, outcome) if ADMIN in (m.recipients or []) and "OPS DONE" in (m.subject or "")]
+    acks = [m for m in _mails(session, outcome) if ADMIN in (m.recipients or []) and "ops done" in (m.subject or "").lower()]
     assert acks and "attendees → 8" in (acks[-1].body or "")
 
 
@@ -318,7 +318,7 @@ def test_gemini_unsure_changes_nothing(session: Session, admin_env, monkeypatch)
     session.refresh(outcome)
     assert not outcome.facts.get("booked_room")
     assert outcome.facts.get("last_action") == before.get("last_action")
-    acks = [m for m in _mails(session, outcome) if ADMIN in (m.recipients or []) and "OPS NOT APPLIED" in (m.subject or "")]
+    acks = [m for m in _mails(session, outcome) if ADMIN in (m.recipients or []) and "ops not applied" in (m.subject or "").lower()]
     assert acks and "Which venue" in (acks[-1].body or "")
 
 

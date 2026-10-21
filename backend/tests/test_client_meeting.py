@@ -154,7 +154,7 @@ def test_minimal_request_date_only_does_not_book(session: Session):
     mails = session.exec(
         select(Communication).where(Communication.outcome_id == complete.outcome_id)
     ).all()
-    assert any("BOOKING CONFIRMED" in (m.subject or "") for m in mails)
+    assert any("booking confirmed" in (m.subject or "").lower() for m in mails)
     assert not complete.facts.get("visitors")
     assert not complete.facts.get("catering_quote")
     reqs = {
@@ -200,9 +200,9 @@ def test_client_meeting_propose_confirm_and_parallel_tracks(session: Session):
     mails = session.exec(
         select(Communication).where(Communication.outcome_id == outcome.outcome_id)
     ).all()
-    assert any("CONFIRM BOOKING" in (c.subject or "") for c in mails)
-    assert not any("REQUEST REGISTERED" in (c.subject or "") for c in mails)
-    confirm = next(c for c in mails if "CONFIRM BOOKING" in (c.subject or ""))
+    assert any("confirm booking" in (c.subject or "").lower() for c in mails)
+    assert not any("request registered" in (c.subject or "").lower() for c in mails)
+    confirm = next(c for c in mails if "confirm booking" in (c.subject or "").lower())
     assert "Dear" in (confirm.body or "")
     assert "requester" not in (confirm.body or "").lower().split("dear", 1)[-1][:40]
 
@@ -414,4 +414,4 @@ def test_oversize_headcount_is_no_resource_and_emails(session: Session):
     mails = session.exec(
         select(Communication).where(Communication.outcome_id == outcome.outcome_id)
     ).all()
-    assert any("NO ROOM AVAILABLE" in (m.subject or "") for m in mails)
+    assert any("no room available" in (m.subject or "").lower() for m in mails)

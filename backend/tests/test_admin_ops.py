@@ -63,7 +63,7 @@ def test_briefing_puts_special_requests_in_own_section():
     assert "parking for 1 (HR26 AB 1234)" in body
     assert "No action needed" in body
     assert "══" not in body
-    assert len(body.splitlines()) <= 12
+    assert len(body.splitlines()) <= 16
 
 
 def test_decision_briefing_uses_ops_decision_label():
@@ -87,7 +87,9 @@ def test_decision_briefing_uses_ops_decision_label():
     )
     assert "OPS DECISION" in hint
     assert "FYI" not in hint
-    assert body.startswith("ROOM-2026-0080 — No suitable room in inventory")
+    assert body.startswith("Dear Colleague,")
+    assert "Request: ROOM-2026-0080" in body
+    assert "Subject: No suitable room in inventory" in body
     assert "Room: none fits — No room fits 80 people (largest holds 40)." in body
     assert "Your call." in body
 
@@ -155,7 +157,7 @@ def test_complete_fit_sends_structured_ops_update(session: Session, monkeypatch)
     )
     sent = admin_mails()
     assert len(sent) == 1
-    assert "[OPS UPDATE]" in (sent[0].subject or "")
+    assert "Ops Update" in (sent[0].subject or "")
     assert "Booking confirmed" in (sent[0].subject or "")
     body = sent[0].body or ""
     assert "To arrange:" in body
@@ -211,7 +213,7 @@ def test_no_resource_sends_ops_decision(session: Session, monkeypatch):
     admin_decision = [
         m
         for m in mails
-        if "ops-desk@example.com" in (m.recipients or []) and "[OPS DECISION]" in (m.subject or "")
+        if "ops-desk@example.com" in (m.recipients or []) and "Ops Decision" in (m.subject or "")
     ]
     assert admin_decision
     assert "Your call." in (admin_decision[0].body or "")
@@ -255,6 +257,6 @@ def test_admin_notify_disabled_when_env_blank(session: Session, monkeypatch):
     mails = session.exec(
         select(Communication).where(Communication.outcome_id == outcome.outcome_id)
     ).all()
-    assert not any("[OPS UPDATE]" in (m.subject or "") for m in mails)
-    assert not any("[FYI]" in (m.subject or "") for m in mails)
+    assert not any("ops update" in (m.subject or "").lower() for m in mails)
+    assert not any("fyi" in (m.subject or "").lower() for m in mails)
     get_settings.cache_clear()

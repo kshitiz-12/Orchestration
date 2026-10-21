@@ -557,8 +557,11 @@ class ProcessingPipeline:
             location_ids=location_ids,
             scope_label=scope_label,
         )
-        body = f"{answer.reply}\n\n{self.settings.mail_signature}\n"
-        subject = f"Re: {event.subject or 'Ops question'}"
+        from app.services.mail_style import letter
+
+        scope = scope_label or "your offices"
+        body = letter("Dear Colleague,", answer.reply, self.settings.mail_signature)
+        subject = f"Operations report: {scope}"
         self.comms.send(
             communication_type="INFORMATION_ONLY",
             recipients=[sender_address(event.sender)],
@@ -605,14 +608,17 @@ class ProcessingPipeline:
         addr = sender_address(event.sender)
         dept_mail = department_emails(self.session, self.tenant_id)
         # Team mail may be stored as user+tag@…; Gmail always replies as user@…
-        if (
-            not is_admin_sender(event.sender)
-            and not is_ops_authority(self.session, self.tenant_id, event.sender)
-            and addr not in dept_mail
-            and base_mailbox(addr) not in dept_mail
-            and addr not in cost_centre_approver_emails(self.session, self.tenant_id)
-        ):
-            return None
+        known = (
+            is_admin_sender(event.sender)
+            or is_ops_authority(self.session, self.tenant_id, event.sender)
+            or addr in dept_mail
+            or base_mailbox(addr) in dept_mail
+            or addr in cost_centre_approver_emails(self.session, self.tenant_id)
+        )
+        if not known:
+            ok, how = verify_ops_sender(self.session, self.tenant_id, event.headers, addr)
+            if not (ok and how == "reply_to_our_mail"):
+                return None
         from app.models.outcome import Outcome
 
         outcome = None

@@ -141,7 +141,10 @@ def _heuristic_plan(bundle: dict[str, Any], text: str) -> ResolutionPlan:
             priority="HIGH" if urgent else None,
             urgency_reason="Business impact language in request" if urgent else None,
             vendor_hint=vendor_hint,
-            employee_update=f"This looks related to open case {link}. I've linked your report so the team can continue there.",
+            employee_update=(
+                f"This report has been linked to open request {link}. "
+                "The assigned team will continue on that request."
+            ),
             ops_notes="; ".join(notes) or None,
             recommended_actions=["link_existing"],
             investigation=bundle,
@@ -151,7 +154,10 @@ def _heuristic_plan(bundle: dict[str, Any], text: str) -> ResolutionPlan:
         priority="URGENT" if urgent and re.search(r"\btomorrow|client\b", text or "", re.I) else ("HIGH" if urgent else None),
         urgency_reason="Client / deadline impact mentioned" if urgent else None,
         vendor_hint=vendor_hint,
-        employee_update="I've logged this with the facilities team and asked them to prioritise it. I'll update you here.",
+        employee_update=(
+            "Your request has been logged with the facilities team and marked for priority handling. "
+            "You will be updated on this thread."
+        ),
         ops_notes="; ".join(notes) or None,
         recommended_actions=["dispatch_work_order"],
         investigation=bundle,
@@ -223,9 +229,34 @@ _DAYS = re.compile(r"\b(?:last|past)\s+(\d+)\s+days?\b", re.I)
 _MONTH = re.compile(r"\b(?:this|current)\s+month\b", re.I)
 
 
+_QUESTION = re.compile(
+    r"(\?|\b(?:how|what|who|which|where|when|list|show|total|status|open|pending|stock|branch)\b)",
+    re.I,
+)
+
+
 def is_admin_analytics_question(text: str) -> bool:
     t = text or ""
-    return bool(_SPEND.search(t) or _REPAIR.search(t) or _REPLACE.search(t) or _WHO.search(t))
+    return bool(_SPEND.search(t) or _REPAIR.search(t) or _REPLACE.search(t) or _WHO.search(t) or _QUESTION.search(t))
+
+
+def _branch_spend_lines(session: Session, by_location: dict) -> list[str]:
+    if not by_location:
+        return []
+    from app.models.org import Location
+
+    named: list[tuple[str, float]] = []
+    for loc_id, total in by_location.items():
+        if loc_id == "unassigned":
+            name = "Unassigned"
+        else:
+            loc = session.get(Location, loc_id)
+            name = loc.name if loc else str(loc_id)
+        named.append((name, float(total)))
+    lines = ["By branch:"]
+    for name, total in sorted(named, key=lambda row: (-row[1], row[0])):
+        lines.append(f"- {name}: INR {total:,.2f}")
+    return lines
 
 
 def answer_admin_question(
@@ -248,13 +279,16 @@ def answer_admin_question(
     case_ref = None
     if m := _CASE_REF.search(text or ""):
         case_ref = m.group(1).upper()
-    scope = f" for {scope_label}" if scope_label else ""
-
     if _REPLACE.search(text or ""):
         data = replace_due(session, tenant_id, location_ids=location_ids)
         low = data.get("low_stock") or []
         assets = data.get("assets_attention") or []
-        lines = [f"Here's what the ledger shows needs attention{scope}:", ""]
+        lines = [
+            "Replacement and stock report",
+            "",
+            f"Scope: {scope_label or 'your offices'}",
+            "",
+        ]
         if low:
             lines.append("Low stock:")
             for s in low[:15]:
@@ -273,14 +307,23 @@ def answer_admin_question(
     if _SPEND.search(text or ""):
         data = spend_summary(session, tenant_id, department_code=dept, location_ids=location_ids, days=days)
         lines = [
-            f"Spend from the operational ledger (last {days} days"
-            + scope
-            + (f", dept {dept}" if dept else "")
-            + "):",
-            f"Total recorded: INR {data['total']:,.2f} across {data['rows']} amount rows "
-            f"(scanned {data['scanned']} related events).",
+            "Operational spend report",
+            "",
+            f"Period: last {days} days",
+            f"Scope: {scope_label or 'your offices'}",
+        ]
+        if dept:
+            lines.append(f"Department: {dept}")
+        lines += [
+            f"Recorded spend: INR {data['total']:,.2f}",
+            f"Amount rows: {data['rows']} (from {data['scanned']} related records)",
+            "",
+            "These amounts are reported operational figures. They are not payment records.",
             "",
         ]
+        if len(data.get("by_location") or {}) != 1 or scope_label == "all branches":
+            lines.extend(_branch_spend_lines(session, data.get("by_location") or {}))
+            lines.append("")
         if data["top"]:
             lines.append("Top lines:")
             for row in data["top"][:12]:
@@ -294,7 +337,14 @@ def answer_admin_question(
 
     if _REPAIR.search(text or ""):
         data = repairs_summary(session, tenant_id, department_code=dept, location_ids=location_ids, days=days)
-        lines = [f"Repairs / facilities ledger (last {days} days{scope}): {data['count']} events.", ""]
+        lines = [
+            "Repairs report",
+            "",
+            f"Period: last {days} days",
+            f"Scope: {scope_label or 'your offices'}",
+            f"Records: {data['count']}",
+            "",
+        ]
         for item in data["items"][:20]:
             lines.append(
                 f"- {item['when'][:10]} [{item.get('case') or '—'}] {item['type']} "
@@ -308,7 +358,13 @@ def answer_admin_question(
         data = who_did_what(
             session, tenant_id, case_reference=case_ref, department_code=dept, location_ids=location_ids, days=days
         )
-        lines = [f"Who did what (ledger{scope}):", ""]
+        lines = [
+            "Activity report",
+            "",
+            f"Period: last {days} days",
+            f"Scope: {scope_label or 'your offices'}",
+            "",
+        ]
         for item in data["items"][:25]:
             lines.append(
                 f"- {item['when'][:16]} {item.get('actor') or 'system'} ({item['role']}) "
@@ -322,12 +378,13 @@ def answer_admin_question(
     spend = spend_summary(session, tenant_id, department_code=dept, location_ids=location_ids, days=days)
     repairs = repairs_summary(session, tenant_id, department_code=dept, location_ids=location_ids, days=days)
     reply = (
-        f"I can answer from the operational ledger. Last {days} days"
-        + scope
-        + (f", {dept}" if dept else "")
-        + f":\n- Recorded spend: INR {spend['total']:,.2f}\n"
-        f"- Repair/facilities events: {repairs['count']}\n\n"
-        "Ask specifically: spend, repairs, what needs replacing, or who did what on a case."
+        "Operations report\n\n"
+        f"Period: last {days} days\n"
+        f"Scope: {scope_label or 'your offices'}"
+        + (f"\nDepartment: {dept}" if dept else "")
+        + f"\nRecorded spend: INR {spend['total']:,.2f}\n"
+        f"Repair records: {repairs['count']}\n\n"
+        "Please ask for spend, repairs, items due for replacement, or the activity on a request number."
     )
     return AdminAnswer(reply=reply, grounded=True, data={"spend": spend, "repairs": repairs})
 

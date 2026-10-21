@@ -115,7 +115,7 @@ def test_team_done_with_amount_records_spend(session: Session, env):
     ev = _mail(session, tid, "AC not cooling in 4th floor bay", subject="AC")
     _run(session, tid, ev, fake)
     case = session.exec(select(Outcome)).one()
-    order = [m for m in _mails_to(session, ADMIN) if "WORK ORDER" in (m.subject or "")][-1]
+    order = [m for m in _mails_to(session, ADMIN) if "Work Order" in (m.subject or "")][-1]
     done = _mail(
         session,
         tid,
@@ -129,7 +129,7 @@ def test_team_done_with_amount_records_spend(session: Session, env):
     assert case.facts.get("agent_stage") == "RESOLVED"
     types = _ledger_types(session, tid)
     assert "TEAM_DONE" in types
-    assert "SPEND_RECORDED" in types
+    assert "SPEND_REPORTED_OPS" in types
     spend = spend_summary(session, tid, days=7)
     assert spend["total"] >= 12500
 

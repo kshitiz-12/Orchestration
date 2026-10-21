@@ -201,7 +201,7 @@ def test_employee_and_office_free_requests_are_not_asked(session: Session, compa
 def test_work_order_subject_names_the_task(session: Session, company):
     _request(session, company, ANANYA, "hey fix the fan in room 302", "fix fan", FAN)
     case = _only_case(session)
-    assert _orders(session, PUNE_FAC)[0].subject == f"[WORK ORDER] [{case.case_reference}] Fix fan in room 302"
+    assert _orders(session, PUNE_FAC)[0].subject == f"Work Order: Fix fan in room 302 [{case.case_reference}]"
 
 
 def test_each_request_from_one_mail_gets_its_own_update_subject(session: Session, company):

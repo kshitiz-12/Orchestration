@@ -146,7 +146,7 @@ def test_hold_reminder_then_expiry_then_confirm_rebooks(session: Session, env):
     session.add(hold)
     session.commit()
     assert sweep_proposal_holds(session, tid, comms=comms)["reminded"] == 1
-    assert any("REMINDER" in (m.subject or "") for m in case.mails(REQ))
+    assert any("reminder" in (m.subject or "").lower() for m in case.mails(REQ))
 
     hold.hold_expires_at = utcnow() - timedelta(minutes=1)
     session.add(hold)
@@ -154,7 +154,7 @@ def test_hold_reminder_then_expiry_then_confirm_rebooks(session: Session, env):
     assert sweep_proposal_holds(session, tid, comms=comms)["expired"] == 1
     session.refresh(hold)
     assert hold.status == "EXPIRED"
-    assert any("HOLD RELEASED" in (m.subject or "") for m in case.mails(REQ))
+    assert any("hold released" in (m.subject or "").lower() for m in case.mails(REQ))
 
     session.refresh(case.outcome)
     case.confirm()
@@ -175,7 +175,7 @@ def test_requester_cancel_releases_room(session: Session, env):
     assert case.outcome.status == "CANCELLED"
     assert case.facts["orchestration_stage"] == "CANCELLED"
     assert {b.status for b in case.bookings()} == {"CANCELLED"}
-    assert any("CANCELLED" in (m.subject or "") for m in case.mails(REQ))
+    assert any("cancelled" in (m.subject or "").lower() for m in case.mails(REQ))
 
 
 def test_admin_cancel_via_gemini(session: Session, env):
@@ -206,7 +206,7 @@ def test_headcount_change_after_booking_moves_room(session: Session, env):
     assert booked["name"] != old and booked["moved_from"] == old
     assert (session.get(Resource, booked["resource_id"]).attributes or {}).get("capacity") >= 14
     assert [b.room_name for b in case.bookings() if b.status == "CONFIRMED"] == [booked["name"]]
-    assert any("ROOM CHANGED" in (m.subject or "") for m in case.mails(REQ))
+    assert any("room changed" in (m.subject or "").lower() for m in case.mails(REQ))
 
 
 def test_time_change_after_booking_keeps_room_when_free(session: Session, env):
@@ -218,7 +218,7 @@ def test_time_change_after_booking_keeps_room_when_free(session: Session, env):
     assert case.facts["booked_room"]["name"] == room
     row = [b for b in case.bookings() if b.status == "CONFIRMED"][0]
     assert row.starts_at.hour <= 11
-    assert any("BOOKING UPDATED" in (m.subject or "") for m in case.mails(REQ))
+    assert any("booking updated" in (m.subject or "").lower() for m in case.mails(REQ))
 
 
 # ---------- 6. off-site + split
@@ -305,7 +305,7 @@ def test_catering_approval_goes_to_manager_with_contract_rate(session: Session, 
     quote = case.facts["catering_quote"]
     assert quote["rate"] == 600.0 and quote["amount_ex_tax"] == 3600.0 and quote["rate_source"] == "contract"
     assert "acceptance_breach_demo" not in (case.facts.get("vendor_sla") or {})
-    assert any("Approval needed" in (m.body or "") or "APPROVAL" in (m.subject or "").upper()
+    assert any("Approval needed" in (m.body or "") or "approval" in (m.subject or "").lower().upper()
                for m in case.mails("mgr@example.com"))
 
     ev = _admin_event(session, tid, case.outcome, "approved", sender="Manager <mgr@example.com>")

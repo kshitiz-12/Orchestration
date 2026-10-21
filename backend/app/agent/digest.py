@@ -31,17 +31,22 @@ def build_digest(session: Session, tenant_id: str, since: datetime) -> Optional[
     if not finished and not open_rows:
         return None
     now = utcnow()
-    lines = [f"Admin desk summary - {(now + _IST).strftime('%A %d %b %Y')}", ""]
-    lines.append(f"Finished since yesterday ({len(finished)}):" if finished else "Nothing finished since yesterday.")
+    lines = [
+        "Dear Colleague,",
+        "",
+        f"Daily operations summary — {(now + _IST).strftime('%A %d %B %Y')}",
+        "",
+    ]
+    lines.append(f"Completed since yesterday: {len(finished)}" if finished else "Nothing was completed since yesterday.")
     for t in sorted(finished, key=lambda x: x.updated_at or now):
         lines.append(f"- {t.reference} {t.title} - {t.status.lower()} ({t.department_code or 'ADMIN'}, {t.requester_email})")
     if open_rows:
         overdue = [t for t in open_rows if t.sla_due_at and t.sla_due_at < now]
-        lines += ["", f"Still open ({len(open_rows)}, {len(overdue)} past SLA):"]
+        lines += ["", f"Still open: {len(open_rows)} ({len(overdue)} past the agreed time):"]
         for t in sorted(open_rows, key=lambda x: x.sla_due_at or now)[:30]:
-            late = " - PAST SLA" if t.sla_due_at and t.sla_due_at < now else ""
+            late = " — past the agreed time" if t.sla_due_at and t.sla_due_at < now else ""
             lines.append(f"- {t.reference} {t.title} - {t.status.lower().replace('_', ' ')}{late}")
-    lines += ["", "Reply on any case mail to act on it."]
+    lines += ["", "Please reply on the request email if any item requires a decision.", "", "Regards,", get_settings().mail_signature]
     return "\n".join(lines) + "\n"
 
 
@@ -63,8 +68,8 @@ def send_admin_digest(session: Session, tenant_id: str, *, force: bool = False) 
     _comms(session, tenant_id).send(
         communication_type=CommunicationType.INFORMATION_ONLY.value,
         recipients=[admin],
-        subject=f"Admin desk daily summary - {local.strftime('%d %b %Y')}",
-        body=body + f"\n{get_settings().mail_signature}\n",
+        subject=f"Daily operations summary — {local.strftime('%d %b %Y')}",
+        body=body,
         idempotency_key=f"admin-digest:{tenant_id}:{day}",
     )
     session.commit()

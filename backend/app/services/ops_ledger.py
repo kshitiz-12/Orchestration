@@ -172,10 +172,14 @@ def spend_summary(
     )
     total = 0.0
     with_amount = []
+    by_location: dict[str, float] = {}
     for r in rows:
-        if r.amount is not None:
-            total += float(r.amount)
-            with_amount.append(r)
+        if r.amount is None:
+            continue
+        total += float(r.amount)
+        with_amount.append(r)
+        key = r.location_id or "unassigned"
+        by_location[key] = round(by_location.get(key, 0.0) + float(r.amount), 2)
     return {
         "total": round(total, 2),
         "currency": "INR",
@@ -186,6 +190,7 @@ def spend_summary(
         "location_id": location_id,
         "location_ids": location_ids,
         "category": category,
+        "by_location": by_location,
         "top": [
             {
                 "when": r.occurred_at.isoformat(),

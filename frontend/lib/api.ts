@@ -95,11 +95,45 @@ async function rawRequest(path: string, options: RequestInit = {}): Promise<Resp
   return res;
 }
 
-export async function apiUpload<T = any>(path: string, file: File): Promise<T> {
+export async function apiUpload<T = any>(
+  path: string,
+  file: File,
+  onProgress?: (percent: number) => void
+): Promise<T> {
   const form = new FormData();
   form.append("file", file);
-  const res = await rawRequest(path, { method: "POST", body: form });
-  return res.json();
+  const token = getToken();
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${API_BASE}${path}`);
+    if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+    xhr.upload.onprogress = (event) => {
+      if (!onProgress || !event.lengthComputable || event.total <= 0) return;
+      onProgress(Math.min(100, Math.round((100 * event.loaded) / event.total)));
+    };
+    xhr.onload = () => {
+      let detail = xhr.responseText || xhr.statusText;
+      let parsed: any = null;
+      try {
+        parsed = JSON.parse(xhr.responseText);
+        detail = parsed.detail || parsed.message || detail;
+      } catch {
+        parsed = null;
+      }
+      if (xhr.status === 401) {
+        clearToken();
+        reject(new Error("Session expired — sign in again."));
+        return;
+      }
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(new Error(typeof detail === "string" && detail ? detail : `Request failed (${xhr.status})`));
+        return;
+      }
+      resolve((parsed ?? {}) as T);
+    };
+    xhr.onerror = () => reject(new Error(`Cannot reach API at ${API_BASE}.`));
+    xhr.send(form);
+  });
 }
 
 export async function apiDownload(path: string, filename: string): Promise<void> {

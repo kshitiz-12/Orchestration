@@ -233,7 +233,9 @@ def open_bulk_reorder(
         logger.warning("stock_ledger_reorder_failed", error=str(exc)[:160])
 
     body_lines = [
-        "Stock is below minimum. Please supply / confirm the following in one delivery:",
+        "Stock is below the reorder minimum. Please arrange supply of the following in one delivery.",
+        "",
+        f"Request: {outcome.case_reference}",
         "",
     ]
     for line in lines:
@@ -243,14 +245,22 @@ def open_bulk_reorder(
         )
     body_lines += [
         "",
-        f"Case: {outcome.case_reference}",
-        'Reply DONE when shipped, or CONFIRM RECEIVED with quantities so we can refill stock.',
+        'Please reply "Done" when the goods are shipped, or "Confirm received" with the quantities, '
+        "so the stock record for this location can be updated.",
     ]
     if recipients:
+        from app.core.config import get_settings
+        from app.services.mail_style import case_subject, letter
+
         comms.send(
             communication_type=CommunicationType.ACTION_REQUIRED.value,
-            subject=f"[ACTION] Stock reorder {outcome.case_reference}",
-            body="\n".join(body_lines),
+            subject=case_subject(
+                case_reference=outcome.case_reference or "",
+                action_label="Stock reorder",
+                summary=outcome.title or "Items below minimum",
+                title="",
+            ),
+            body=letter("Dear Team,", "\n".join(body_lines), get_settings().mail_signature),
             recipients=recipients,
             outcome_id=outcome.outcome_id,
             conversation_id=outcome.conversation_id,

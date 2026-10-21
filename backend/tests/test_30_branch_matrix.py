@@ -334,7 +334,7 @@ def test_tc05_missing_information_loop_catering(session: Session, matrix):
                or "veg" in str(q).lower() or "dietary" in str(q).lower()
                for q in (case.facts.get("missing") or []) + [str(case.facts.get("missing") or "")])
     # No work order to cafeteria / facilities while waiting
-    assert not [m for m in session.exec(select(Communication)).all() if "WORK ORDER" in (m.subject or "")]
+    assert not [m for m in session.exec(select(Communication)).all() if "work order" in (m.subject or "").lower()]
     assert _mails_to(session, sender), "clarification to requester"
 
 
@@ -372,7 +372,7 @@ def test_team_done_reply_closes_without_duplicate(session: Session, matrix):
     assert len(cases) == 1
     assert cases[0].case_reference == case_ref
     assert cases[0].facts.get("agent_stage") in {"RESOLVED", "COMPLETED", "CLOSED"}
-    assert any("VPN" in (m.subject or "") or "resolved" in (m.body or "").lower() or "Charger" in (m.body or "")
+    assert any("vpn" in (m.subject or "").lower() or "resolved" in (m.body or "").lower() or "Charger" in (m.body or "")
                for m in _mails_to(session, sender))
 
 

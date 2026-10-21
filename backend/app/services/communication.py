@@ -376,7 +376,9 @@ class CommunicationService:
                 case_reference=ref, action_label="RECEIVED + INFORMATION REQUIRED", summary=hint, title=""
             )
         else:
-            subject = f"[INFORMATION REQUIRED] [{ref}] Additional details needed"
+            subject = short_case_subject(
+                case_reference=ref, action_label="INFORMATION REQUIRED", summary="Additional details needed", title=""
+            )
         case_facts = dict((current.facts if current else None) or {})
 
         parts: list[str] = [f"{format_outbound_greeting(name)}\n"]

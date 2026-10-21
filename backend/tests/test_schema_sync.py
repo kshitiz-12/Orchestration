@@ -37,8 +37,8 @@ def test_old_database_gets_new_tables_and_columns_and_keeps_rows(tmp_path):
         conn.execute(sa.text("ALTER TABLE locations DROP COLUMN code"))
         conn.execute(sa.text("DROP TABLE learning_records"))
         conn.execute(sa.text(
-            "INSERT INTO tenants (tenant_id, name, region, status, created_at, updated_at) "
-            "VALUES ('t1', 'Acme', 'IN', 'ACTIVE', '2026-01-01', '2026-01-01')"
+            "INSERT INTO tenants (tenant_id, name, region, status, default_timezone, default_currency, created_at, updated_at) "
+            "VALUES ('t1', 'Acme', 'IN', 'ACTIVE', 'Asia/Kolkata', 'INR', '2026-01-01', '2026-01-01')"
         ))
         conn.execute(sa.text(
             "INSERT INTO departments (department_id, tenant_id, code, name, categories, backup_emails, sla_hours, "
@@ -69,8 +69,8 @@ def test_new_column_with_a_simple_default_fills_existing_rows(tmp_path):
     with eng.begin() as conn:
         _models().create_all(conn)
         conn.execute(sa.text(
-            "INSERT INTO tenants (tenant_id, name, region, status, created_at, updated_at) "
-            "VALUES ('t1', 'Acme', 'IN', 'ACTIVE', '2026-01-01', '2026-01-01')"
+            "INSERT INTO tenants (tenant_id, name, region, status, default_timezone, default_currency, created_at, updated_at) "
+            "VALUES ('t1', 'Acme', 'IN', 'ACTIVE', 'Asia/Kolkata', 'INR', '2026-01-01', '2026-01-01')"
         ))
         conn.execute(sa.text(
             "INSERT INTO departments (department_id, tenant_id, code, name, categories, backup_emails, sla_hours, "

@@ -36,7 +36,11 @@ def find_open_cases_for_location_resource(
 ) -> list[dict[str, Any]]:
     q = select(Outcome).where(Outcome.tenant_id == tenant_id)
     rows = list(session.exec(q.order_by(col(Outcome.created_at).desc()).limit(80)).all())
-    tokens = [t for t in re.split(r"[^a-z0-9]+", (text or "").lower()) if len(t) >= 3][:12]
+    stop = {
+        "issue", "issues", "problem", "problems", "request", "please", "the", "and", "for",
+        "with", "this", "that", "from", "have", "has", "was", "are", "not", "need", "needs",
+    }
+    tokens = [t for t in re.split(r"[^a-z0-9]+", (text or "").lower()) if len(t) >= 3 and t not in stop][:12]
     out = []
     for o in rows:
         facts = o.facts or {}

@@ -1,6 +1,7 @@
 "use client";
 
 import { AppShell } from "@/components/AppShell";
+import { rememberUploadLocally, UploadMeter } from "@/components/UploadMeter";
 import { api, apiDownload, apiUpload } from "@/lib/api";
 import { useEffect, useState } from "react";
 
@@ -924,19 +925,27 @@ function ImportTab({ onChange, setMsg }: TabProps) {
   const [file, setFile] = useState<File | null>(null);
   const [result, setResult] = useState<any>(null);
   const [busy, setBusy] = useState(false);
+  const [sent, setSent] = useState(0);
+  const [phase, setPhase] = useState<"send" | "save" | "">("");
   const selected = IMPORT_KINDS.find((k) => k.id === kind)!;
 
   async function run(commit: boolean) {
     if (!file) return;
     setBusy(true);
+    setSent(0);
+    setPhase("send");
     try {
       const path =
         mode === "company"
           ? `/setup/import/company?commit=${commit}`
           : `/setup/import/${kind}?commit=${commit}`;
-      const res = await apiUpload(path, file);
+      const res = await apiUpload(path, file, (percent) => {
+        setSent(percent);
+        if (percent >= 100) setPhase("save");
+      });
       setResult(res);
       if (commit) {
+        rememberUploadLocally(res);
         const label = mode === "company" ? "company rows" : selected.label.toLowerCase();
         setMsg({ text: `Imported ${res.new} new and updated ${res.updated} ${label}`, tone: "ok" });
         onChange();
@@ -945,6 +954,7 @@ function ImportTab({ onChange, setMsg }: TabProps) {
       setMsg({ text: e.message, tone: "danger" });
     } finally {
       setBusy(false);
+      setPhase("");
     }
   }
 
@@ -987,14 +997,29 @@ function ImportTab({ onChange, setMsg }: TabProps) {
             <div className="muted" style={{ marginBottom: "0.9rem", lineHeight: 1.5 }}>
               Include sheets for offices, teams, employees, rooms & assets, vendors, policies, site services, and cost centres as needed.
             </div>
-            <input
-              type="file"
-              accept=".csv,.xlsx,.xlsm,.json,.txt"
-              onChange={(e) => {
-                setFile(e.target.files?.[0] || null);
-                setResult(null);
+            <label
+              className="dropzone"
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => {
+                e.preventDefault();
+                const next = e.dataTransfer.files?.[0];
+                if (next) {
+                  setFile(next);
+                  setResult(null);
+                }
               }}
-            />
+            >
+              <strong>{file ? file.name : "Drop the Excel file here"}</strong>
+              <span className="muted">{file ? "Ready to save" : "or click to choose a workbook"}</span>
+              <input
+                type="file"
+                accept=".csv,.xlsx,.xlsm,.json,.txt"
+                onChange={(e) => {
+                  setFile(e.target.files?.[0] || null);
+                  setResult(null);
+                }}
+              />
+            </label>
           </>
         ) : (
           <>
@@ -1039,7 +1064,7 @@ function ImportTab({ onChange, setMsg }: TabProps) {
         )}
         <div className="row" style={{ marginTop: "0.75rem" }}>
           <button className="btn secondary" disabled={!file || busy} onClick={() => run(false)}>
-            {busy ? "Working…" : "Preview"}
+            {busy ? (phase === "save" ? "Reading rows…" : `Sending ${sent}%`) : "Preview"}
           </button>
           <button
             className="btn accent"
@@ -1056,12 +1081,23 @@ function ImportTab({ onChange, setMsg }: TabProps) {
               run(true);
             }}
           >
-            {busy ? "Importing…" : "Import & save"}
+            {busy ? (phase === "save" ? "Saving rows…" : `Sending ${sent}%`) : "Import & save"}
           </button>
         </div>
+        {busy && (
+          <div className="upload-track" style={{ marginTop: "0.85rem" }}>
+            <div className="upload-fill" style={{ width: `${phase === "save" ? 100 : sent}%` }} />
+          </div>
+        )}
         <p className="muted" style={{ marginTop: "0.65rem", fontSize: "0.82rem" }}>
-          Large files (hundreds of employees) — use Import &amp; save directly. Preview can time out on the free API.
+          Offices, people, vendors, and stock are read from the sheet directly. A file with no recognisable columns is the only one sent to Gemini.
         </p>
+
+        {result?.committed && (
+          <div style={{ marginTop: "1rem" }}>
+            <UploadMeter source={result} />
+          </div>
+        )}
 
         {result && (
           <div style={{ marginTop: "1rem" }}>

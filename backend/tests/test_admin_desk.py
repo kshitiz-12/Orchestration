@@ -153,7 +153,7 @@ def test_sensitive_request_waits_for_admin_then_proceeds(session: Session, env):
     case = session.exec(select(Outcome)).one()
     assert case.facts["agent_stage"] == "AWAITING_APPROVAL"
     assert session.exec(select(Approval).where(Approval.outcome_id == case.outcome_id)).one().decision == "PENDING"
-    decision_mail = [m for m in _mails_to(session, ADMIN) if "OPS DECISION" in m.subject][-1]
+    decision_mail = [m for m in _mails_to(session, ADMIN) if "ops decision" in (m.subject or "").lower()][-1]
     assert 'Reply "approve"' in decision_mail.body
 
     reply = _mail(session, tid, "approve", sender=f"Ops <{ADMIN}>", subject=f"Re: {decision_mail.subject}")
@@ -174,7 +174,7 @@ def test_department_done_closes_loop_with_requester(session: Session, env):
     _run(session, tid, ev)
     case = session.exec(select(Outcome)).one()
     order = _mails_to(session, "housekeeping@acme-real.com")[-1]
-    assert "WORK ORDER" in order.subject and "No Housekeeping contact" not in order.body
+    assert "Work Order" in order.subject and "No Housekeeping contact" not in order.body
 
     done = _mail(session, tid, "done, cleaned and restocked", sender="housekeeping@acme-real.com", subject=f"Re: {order.subject}")
     result = _run(session, tid, done)
