@@ -203,6 +203,18 @@ def test_branch_admin_spend_stays_on_their_site(session: Session):
     session.commit()
     all_ids, all_label = analytics_scope_for_sender(session, tid, "main.admin@example.com")
     assert all_ids is None and all_label == "all branches"
+    session.add(
+        Person(
+            tenant_id=tid,
+            email="floating.admin@example.com",
+            name="Floating Admin",
+            role="ADMIN - PUNE",
+            is_active=True,
+        )
+    )
+    session.commit()
+    none_ids, none_label = analytics_scope_for_sender(session, tid, "floating.admin@example.com")
+    assert none_ids == [] and none_label == "no office assigned"
     company = answer_admin_question(session, tid, "How much is the total spent till now", scope_label=all_label)
     assert "9,100.00" in company.reply or "9100.00" in company.reply
     assert "Pune Hq" in company.reply and "Bengaluru Hq" in company.reply

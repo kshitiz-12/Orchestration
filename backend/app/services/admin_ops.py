@@ -197,11 +197,14 @@ def _scope_roots(person) -> list[str]:
     return roots
 
 
+NO_OFFICE_SCOPE = "no office assigned"
+
+
 def analytics_scope_for_sender(session, tenant_id: str, sender: Optional[str]) -> tuple[Optional[list[str]], Optional[str]]:
     """None location ids = every branch. A list = those sites and their floors.
 
-    One admin can cover several branches via allowed_site_ids. A main admin
-    (company-wide role, no branch list) sees all of them.
+    Company-wide scope comes only from an explicit company role. A branch role
+    with no office on the person row sees nothing.
     """
     from app.models.org import Location
 
@@ -212,6 +215,8 @@ def analytics_scope_for_sender(session, tenant_id: str, sender: Optional[str]) -
     if person and is_ops_person_role(person.role):
         roots = _scope_roots(person)
         if not roots:
+            if is_branch_scoped_role(person.role):
+                return [], NO_OFFICE_SCOPE
             return None, "all branches"
         ids: set[str] = set()
         labels: list[str] = []

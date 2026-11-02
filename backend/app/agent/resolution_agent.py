@@ -17,6 +17,7 @@ from app.agent.resolution_tools import (
     replace_due,
     run_tool,
     search_knowledge,
+    stock_on_hand,
     team_route_info,
 )
 from app.core.config import get_settings
@@ -222,6 +223,8 @@ def investigate_stalled(
 _SPEND = re.compile(r"\b(?:spend|spent|expenditure|cost|how\s+much)\b", re.I)
 _REPAIR = re.compile(r"\b(?:repair|repaired|fixed|maintenance\s+done|what\s+was\s+repaired)\b", re.I)
 _REPLACE = re.compile(r"\b(?:replace|replacement|low\s+stock|needs?\s+replacing|reorder)\b", re.I)
+_STOCK = re.compile(r"\b(?:stock|inventory|on\s+hand)\b", re.I)
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 _WHO = re.compile(r"\b(?:who\s+(?:did|closed|handled|worked)|what\s+happened\s+on|history\s+of)\b", re.I)
 _CASE_REF = re.compile(r"\b([A-Z]{2,5}-\d{4}-\d{3,})\b", re.I)
 _DEPT = re.compile(r"\b([A-Z]{2,}(?:_[A-Z0-9]+)+)\b")
@@ -257,6 +260,51 @@ def _branch_spend_lines(session: Session, by_location: dict) -> list[str]:
     for name, total in sorted(named, key=lambda row: (-row[1], row[0])):
         lines.append(f"- {name}: INR {total:,.2f}")
     return lines
+
+
+def _plain_day(value: Optional[str]) -> str:
+    text = str(value or "")[:10]
+    parts = text.split("-")
+    if len(parts) != 3:
+        return ""
+    try:
+        year, month, day = (int(part) for part in parts)
+        return f"{day} {_MONTHS[month - 1]} {year}"
+    except (ValueError, IndexError):
+        return ""
+
+
+def _stock_answer(
+    session: Session,
+    tenant_id: str,
+    *,
+    location_ids: Optional[list[str]],
+    scope_label: Optional[str],
+) -> AdminAnswer:
+    """One stock letter. Branch admins only receive rows stored on their offices."""
+    data = stock_on_hand(session, tenant_id, location_ids=location_ids)
+    items = data.get("items") or []
+    lines = ["Stock on hand", "", f"Scope: {scope_label or 'your offices'}", ""]
+    if not items:
+        lines.append("No stock is on file for this office.")
+        return AdminAnswer(reply="\n".join(lines), grounded=True, data=data)
+    office = None
+    for item in items:
+        if item["office"] != office:
+            if office is not None:
+                lines.append("")
+            office = item["office"]
+            lines.append(office)
+        name = item["name"] if item["name"] and item["name"] != item["sku_code"] else f"Unnamed item {item['sku_code'].replace('_', '-')}"
+        unit = "" if (item.get("unit") or "each") == "each" else f" {item['unit']}"
+        sentence = f"- {name}: {float(item['qty_on_hand']):g}{unit}."
+        if float(item.get("reorder_min") or 0) > 0:
+            sentence += f" Reorder below {float(item['reorder_min']):g}."
+        expiry = _plain_day(item.get("expires_on"))
+        if expiry:
+            sentence += f" Expires {expiry}."
+        lines.append(sentence)
+    return AdminAnswer(reply="\n".join(lines), grounded=True, data=data)
 
 
 def answer_admin_question(
@@ -303,6 +351,9 @@ def answer_admin_question(
         else:
             lines.append("No recent asset replace/damage ledger rows.")
         return AdminAnswer(reply="\n".join(lines), grounded=True, data=data)
+
+    if _STOCK.search(text or ""):
+        return _stock_answer(session, tenant_id, location_ids=location_ids, scope_label=scope_label)
 
     if _SPEND.search(text or ""):
         data = spend_summary(session, tenant_id, department_code=dept, location_ids=location_ids, days=days)

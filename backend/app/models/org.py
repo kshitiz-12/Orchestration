@@ -244,6 +244,8 @@ class Vendor(TimestampMixin, table=True):
     equipment: list = Field(default_factory=list, sa_column=Column(JSON))
     financial: dict = Field(default_factory=dict, sa_column=Column(JSON))
     sla_terms: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    # Six-step company/vendor onboarding wizard draft (steps, tables, declarations).
+    onboarding: dict = Field(default_factory=dict, sa_column=Column(JSON))
     score: Optional[float] = None
     score_breakdown: dict = Field(default_factory=dict, sa_column=Column(JSON))
     vendor_tier: Optional[str] = None  # PREFERRED | APPROVED | CONDITIONAL

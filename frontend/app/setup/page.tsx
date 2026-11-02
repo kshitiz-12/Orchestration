@@ -2,6 +2,7 @@
 
 import { AppShell } from "@/components/AppShell";
 import { rememberUploadLocally, UploadMeter } from "@/components/UploadMeter";
+import { AsKpi, AsTabs } from "@/components/ui/PageBits";
 import { api, apiDownload, apiUpload } from "@/lib/api";
 import { useEffect, useState } from "react";
 
@@ -121,74 +122,59 @@ export default function SetupPage() {
 
   return (
     <AppShell
-      title="Company data"
-      subtitle="Load offices, teams, and people once — then Desk can route every employee request to the right branch."
+      title="Master Data"
+      subtitle="Load offices, teams, and people once — then AdminServices can route every employee request to the right branch."
+      breadcrumbs={[{ label: "Dashboard", href: "/" }, { label: "Master Data" }]}
     >
       <div className="stack">
-        <div className="grid kpis">
-          <div className="kpi">
-            <div className="label">Offices</div>
-            <div className="value">{locations || "0"}</div>
-            <div className="hint">Branches & buildings on file</div>
-          </div>
-          <div className="kpi">
-            <div className="label">Teams</div>
-            <div className="value">{status?.departments ?? "0"}</div>
-            <div className="hint">
-              {pending.length > 0 ? (
-                <span className="badge warn">{pending.length} need a work email</span>
-              ) : status ? (
-                <span className="badge ok">Mailboxes ready</span>
-              ) : (
-                "—"
-              )}
-            </div>
-          </div>
-          <div className="kpi">
-            <div className="label">Employees</div>
-            <div className="value">{employees || "0"}</div>
-            <div className="hint">Only these people get replies</div>
-          </div>
-          <div className="kpi">
-            <div className="label">Open requests</div>
-            <div className="value">{status?.open_tickets ?? "0"}</div>
-            <div className="hint">{status?.resources ?? 0} rooms & assets</div>
-          </div>
+        <div className="as-kpi-grid">
+          <AsKpi label="Offices" value={locations || 0} hint="Branches & buildings" />
+          <AsKpi
+            label="Teams"
+            value={status?.departments ?? 0}
+            hint={pending.length > 0 ? `${pending.length} need a work email` : "Mailboxes ready"}
+          />
+          <AsKpi label="Employees" value={employees || 0} hint="Only these people get replies" />
+          <AsKpi
+            label="Open requests"
+            value={status?.open_tickets ?? 0}
+            hint={`${status?.resources ?? 0} rooms & assets`}
+          />
         </div>
 
         {pending.length > 0 && (
-          <div className="next-card tone-warn">
+          <div className="as-card" style={{ borderColor: "#fde68a", background: "#fffbeb" }}>
             <strong>Some teams still need a real work email</strong>
-            <span>
+            <p className="muted" style={{ margin: "0.35rem 0 0" }}>
               Until then, their work goes to the main admin mailbox: {pending.join(", ")}.
-            </span>
+            </p>
           </div>
         )}
 
         {employees <= 1 && (
-          <div className="setup-hero">
-            <div>
-              <h2>Start with one Excel upload</h2>
-              <p>
+          <div className="as-split">
+            <div className="as-card">
+              <h2 style={{ marginTop: 0, fontSize: "1.05rem" }}>Start with one Excel upload</h2>
+              <p className="muted">
                 Download the company template, fill offices / teams / employees, then Preview and Confirm.
-                You can edit individual rows later under Offices and Teams.
+                You can edit rows later under Offices and Teams.
               </p>
-            </div>
-            <div className="row">
               <button className="btn accent" type="button" onClick={() => setTab("import")}>
                 Go to Upload Excel
               </button>
             </div>
+            <aside className="as-side-help">
+              <h3>Recommended order</h3>
+              <ul>
+                <li>Offices / branches</li>
+                <li>Teams with mailbox emails</li>
+                <li>Employees mapped to offices</li>
+              </ul>
+            </aside>
           </div>
         )}
 
-        <div className="chip-row">
-          {TABS.map((t) => (
-            <button key={t.id} className={`btn ${tab === t.id ? "accent" : "secondary"}`} onClick={() => setTab(t.id)}>
-              {t.label}
-            </button>
-          ))}
-        </div>
+        <AsTabs tabs={[...TABS]} value={tab} onChange={(id) => setTab(id as typeof tab)} />
 
         {msg && (
           <p className={`badge ${msg.tone}`} onClick={() => setMsg(null)} style={{ cursor: "pointer" }}>
@@ -196,12 +182,14 @@ export default function SetupPage() {
           </p>
         )}
 
-        {tab === "import" && <ImportTab onChange={loadStatus} setMsg={setMsg} />}
-        {tab === "places" && <PlacesTab onChange={loadStatus} setMsg={setMsg} />}
-        {tab === "departments" && <Departments onChange={loadStatus} setMsg={setMsg} />}
-        {tab === "services" && <ServicesTab onChange={loadStatus} setMsg={setMsg} />}
-        {tab === "cost_centres" && <CostCentresTab onChange={loadStatus} setMsg={setMsg} />}
-        {tab === "knowledge" && <KnowledgeTab onChange={loadStatus} setMsg={setMsg} />}
+        <div className="as-card" style={{ borderTopLeftRadius: 0, borderTopRightRadius: 0, marginTop: "-1rem" }}>
+          {tab === "import" && <ImportTab onChange={loadStatus} setMsg={setMsg} />}
+          {tab === "places" && <PlacesTab onChange={loadStatus} setMsg={setMsg} />}
+          {tab === "departments" && <Departments onChange={loadStatus} setMsg={setMsg} />}
+          {tab === "services" && <ServicesTab onChange={loadStatus} setMsg={setMsg} />}
+          {tab === "cost_centres" && <CostCentresTab onChange={loadStatus} setMsg={setMsg} />}
+          {tab === "knowledge" && <KnowledgeTab onChange={loadStatus} setMsg={setMsg} />}
+        </div>
       </div>
     </AppShell>
   );
@@ -402,7 +390,7 @@ function Departments({ onChange, setMsg }: TabProps) {
         </button>
       </div>
       <p className="muted" style={{ marginTop: 0 }}>
-        Desk routes each request to the team that handles its category, at the employee&apos;s branch.
+        AdminServices routes each request to the team that handles its category, at the employee&apos;s branch.
         A team set to cover a branch, city or region takes that place&apos;s work; teams covering the whole company take
         everything else. Name branch teams after the main team (FACILITIES_PUNE, ADMIN_PUNE): an ADMIN_ team is that
         branch&apos;s admin and gets its approvals and alerts. Spends above the limit need the approver.
@@ -870,7 +858,7 @@ function KnowledgeTab({ onChange, setMsg }: TabProps) {
         </button>
       </div>
       <p className="muted" style={{ marginTop: 0 }}>
-        Company profile, offices, policies and FAQs. Desk answers employee questions from this and does not invent
+        Company profile, offices, policies and FAQs. AdminServices answers employee questions from this and does not invent
         policy that isn&apos;t here. The sample entries are placeholders; replace them with your real details.
       </p>
       {draft && (
@@ -964,7 +952,7 @@ function ImportTab({ onChange, setMsg }: TabProps) {
         <h2>Upload company Excel</h2>
         <p className="muted">
           Use the multi-sheet workbook (offices, teams, employees, rooms). Or drop any structured Excel / CSV —
-          Desk maps it, shows a preview, and saves only when you confirm.
+          AdminServices maps it, shows a preview, and saves only when you confirm.
         </p>
         <div className="toolbar">
           <button

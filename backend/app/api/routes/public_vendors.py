@@ -40,17 +40,43 @@ class RegisterIn(BaseModel):
     coverage_rows: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class OnboardingDraftIn(BaseModel):
+    draft: dict[str, Any] = Field(default_factory=dict)
+
+
 @router.get("/register/{token}")
 def get_registration(token: str, session: SessionDep):
     try:
-        vendor = vl.get_by_invite_token(session, token)
-        return vl.public_registration_form(vendor)
+        payload = vl.get_onboarding_by_token(session, token)
+        session.commit()
+        return payload
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.put("/register/{token}")
+def save_registration_draft(token: str, body: OnboardingDraftIn, session: SessionDep):
+    try:
+        payload = vl.save_onboarding_by_token(session, token, body.draft)
+        session.commit()
+        return payload
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/register/{token}/submit")
+def submit_onboarding(token: str, session: SessionDep):
+    try:
+        result = vl.submit_onboarding_by_token(session, token)
+        session.commit()
+        return result
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
 
 @router.post("/register/{token}")
 def submit_registration(token: str, body: RegisterIn, session: SessionDep):
+    """Legacy one-shot register. Prefer PUT draft + POST submit for the six-step wizard."""
     try:
         payload = body.model_dump(exclude_none=True)
         vendor = vl.register_by_token(session, token, payload)

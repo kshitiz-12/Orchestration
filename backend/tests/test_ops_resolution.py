@@ -253,3 +253,29 @@ def test_resolution_heuristic_fallback_when_gemini_off(session: Session, env):
     assert plan.create_new is True
     assert plan.priority in {"HIGH", "URGENT", None} or plan.priority == "URGENT"
     assert "dispatch_work_order" in plan.recommended_actions
+
+
+def test_stock_question_lists_only_the_askers_office(session: Session):
+    from app.agent.resolution_agent import answer_admin_question
+    from app.models.org import Location, StockSku
+
+    tid = _tid(session)
+    pune = Location(tenant_id=tid, type="BRANCH", name="Pune Operations Office", code="PNQ")
+    gurgaon = Location(tenant_id=tid, type="CAMPUS", name="Gurugram Campus", code="GGN")
+    session.add(pune)
+    session.add(gurgaon)
+    session.commit()
+    session.add(StockSku(tenant_id=tid, sku_code="HELM", name="Safety Helmet", location_id=pune.location_id, qty_on_hand=18, reorder_min=18, unit="each"))
+    session.add(StockSku(tenant_id=tid, sku_code="CHEM", name="Floor cleaner", location_id=gurgaon.location_id, qty_on_hand=950, reorder_min=800, unit="Litre"))
+    session.commit()
+
+    pune_answer = answer_admin_question(
+        session, tid, "What stock do we have?", location_ids=[pune.location_id], scope_label="Pune Operations Office"
+    )
+    assert "Safety Helmet: 18." in pune_answer.reply
+    assert "Floor cleaner" not in pune_answer.reply
+    assert "Pune Operations Office" in pune_answer.reply
+
+    company = answer_admin_question(session, tid, "What stock do we have?", scope_label="all branches")
+    assert "Safety Helmet" in company.reply
+    assert "Floor cleaner" in company.reply

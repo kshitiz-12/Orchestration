@@ -98,10 +98,14 @@ async function rawRequest(path: string, options: RequestInit = {}): Promise<Resp
 export async function apiUpload<T = any>(
   path: string,
   file: File,
-  onProgress?: (percent: number) => void
+  onProgress?: (percent: number) => void,
+  fields?: Record<string, string>
 ): Promise<T> {
   const form = new FormData();
   form.append("file", file);
+  for (const [key, value] of Object.entries(fields || {})) {
+    if (value) form.append(key, value);
+  }
   const token = getToken();
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();

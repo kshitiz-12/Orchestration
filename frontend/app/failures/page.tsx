@@ -1,6 +1,7 @@
 "use client";
 
 import { AppShell } from "@/components/AppShell";
+import { AsEmpty, AsStatus } from "@/components/ui/PageBits";
 import { api } from "@/lib/api";
 import { useEffect, useState } from "react";
 
@@ -20,21 +21,25 @@ export default function FailuresPage() {
 
   return (
     <AppShell
-      title="Problems"
-      subtitle="Things that failed while processing email. You can retry them."
+      title="Failures"
+      subtitle="Jobs that failed while processing mail — retry without leaving the console."
+      breadcrumbs={[
+        { label: "Reports", href: "/learning" },
+        { label: "Failures" },
+      ]}
       actions={
         <button className="btn secondary" onClick={load}>
           Refresh
         </button>
       }
     >
-      {msg && <p className="badge danger">{msg}</p>}
-      <div className="panel">
+      {msg && <p className="badge danger" style={{ marginBottom: "0.85rem" }}>{msg}</p>}
+      <section className="as-card">
+        <div className="panel-head">
+          <h2>Failed jobs</h2>
+        </div>
         {rows.length === 0 ? (
-          <div className="empty">
-            <strong>No problems</strong>
-            Everything is processing cleanly.
-          </div>
+          <AsEmpty title="No problems" body="Everything is processing cleanly right now." />
         ) : (
           <table>
             <thead>
@@ -43,7 +48,7 @@ export default function FailuresPage() {
                 <th>Status</th>
                 <th>Tries</th>
                 <th>Error</th>
-                <th></th>
+                <th />
               </tr>
             </thead>
             <tbody>
@@ -55,7 +60,9 @@ export default function FailuresPage() {
                       {j.stage || j.job_type}
                     </div>
                   </td>
-                  <td>{j.status}</td>
+                  <td>
+                    <AsStatus status={j.status} />
+                  </td>
                   <td>{j.attempts}</td>
                   <td className="muted">{j.last_error || "—"}</td>
                   <td>
@@ -79,7 +86,7 @@ export default function FailuresPage() {
             </tbody>
           </table>
         )}
-      </div>
+      </section>
     </AppShell>
   );
 }

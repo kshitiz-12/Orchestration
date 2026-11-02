@@ -1,10 +1,19 @@
 "use client";
 
 import { AppShell } from "@/components/AppShell";
+import { AsTabs } from "@/components/ui/PageBits";
 import { api } from "@/lib/api";
 import { useEffect, useState } from "react";
 
+const TABS = [
+  { id: "controls", label: "Demo controls" },
+  { id: "templates", label: "Templates" },
+  { id: "rules", label: "Rules" },
+  { id: "notifications", label: "Notifications" },
+] as const;
+
 export default function ConfigPage() {
+  const [tab, setTab] = useState<(typeof TABS)[number]["id"]>("controls");
   const [templates, setTemplates] = useState<any[]>([]);
   const [rules, setRules] = useState<any[]>([]);
   const [notes, setNotes] = useState<any[]>([]);
@@ -31,10 +40,18 @@ export default function ConfigPage() {
   }, []);
 
   return (
-    <AppShell title="Preferences" subtitle="How Desk handles turnaround times, notifications, and request rules for your company.">
-      <div className="stack">
-        <div className="panel">
-          <h2>Demo controls</h2>
+    <AppShell
+      title="Settings"
+      subtitle="Turnaround times, notifications, and request rules for your company."
+      breadcrumbs={[{ label: "Dashboard", href: "/" }, { label: "Settings" }]}
+    >
+      <AsTabs tabs={[...TABS]} value={tab} onChange={(id) => setTab(id as typeof tab)} />
+
+      {tab === "controls" ? (
+        <section className="as-card">
+          <div className="panel-head">
+            <h2>Demo controls</h2>
+          </div>
           <p className="muted" style={{ marginTop: 0 }}>
             Soft reset clears emails, outcomes, and reviews. Org masters (people, rooms, rules) stay.
           </p>
@@ -95,49 +112,73 @@ export default function ConfigPage() {
               Tick SLA clocks
             </button>
           </div>
-          {msg && <p className="badge ok" style={{ marginTop: "0.75rem" }}>{msg}</p>}
-        </div>
-
-        {policy && (
-          <div className="panel">
-            <h2>Meeting-room policy v{policy.version}</h2>
-            <div className="muted" style={{ marginBottom: "0.5rem" }}>
-              {policy.code} · auto-book ≥ {policy.auto_book_min_score} · buffers{" "}
-              {policy.setup_buffer_internal_minutes}/{policy.release_buffer_internal_minutes} (internal)
+          {msg ? <p className="badge ok" style={{ marginTop: "0.75rem" }}>{msg}</p> : null}
+          {policy ? (
+            <div style={{ marginTop: "1.25rem" }}>
+              <h3 style={{ margin: "0 0 0.35rem", fontSize: "0.95rem" }}>
+                Meeting-room policy v{policy.version}
+              </h3>
+              <p className="muted" style={{ marginTop: 0 }}>
+                {policy.code} · auto-book ≥ {policy.auto_book_min_score} · buffers{" "}
+                {policy.setup_buffer_internal_minutes}/{policy.release_buffer_internal_minutes} (internal)
+              </p>
             </div>
-            <div className="pre">{JSON.stringify(policy, null, 2)}</div>
+          ) : null}
+        </section>
+      ) : null}
+
+      {tab === "templates" ? (
+        <section className="as-card">
+          <div className="panel-head">
+            <h2>Outcome templates</h2>
           </div>
-        )}
-
-        <div className="panel">
-          <h2>Outcome templates</h2>
-          {templates.map((t) => (
-            <div key={t.template_id} style={{ marginBottom: "0.75rem" }}>
-              <strong>{t.code}</strong> — {t.name}
-              <div className="muted">
-                {t.tasks?.length || 0} tasks · {t.requirements?.length || 0} requirements · prefix {t.case_prefix}
+          <div className="as-settings-list">
+            {templates.map((t) => (
+              <div key={t.template_id} className="as-settings-row">
+                <div>
+                  <strong>{t.code}</strong>
+                  <span className="muted"> — {t.name}</span>
+                </div>
+                <span className="muted" style={{ fontSize: "0.8rem" }}>
+                  {t.tasks?.length || 0} tasks · {t.requirements?.length || 0} requirements · prefix {t.case_prefix}
+                </span>
               </div>
-            </div>
-          ))}
-        </div>
-        <div className="panel">
-          <h2>Rules</h2>
-          {rules.map((r) => (
-            <div key={r.rule_id}>
-              <strong>{r.code}</strong>
-              <div className="pre">{JSON.stringify(r.config, null, 2)}</div>
-            </div>
-          ))}
-        </div>
-        <div className="panel">
-          <h2>Notification templates</h2>
-          {notes.map((n) => (
-            <div key={n.template_id} className="muted">
-              {n.code}: {n.subject_template}
-            </div>
-          ))}
-        </div>
-      </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
+      {tab === "rules" ? (
+        <section className="as-card">
+          <div className="panel-head">
+            <h2>Rules</h2>
+          </div>
+          <div className="as-settings-list">
+            {rules.map((r) => (
+              <div key={r.rule_id} className="as-settings-row">
+                <strong>{r.code}</strong>
+                <pre className="as-pre">{JSON.stringify(r.config, null, 2)}</pre>
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
+      {tab === "notifications" ? (
+        <section className="as-card">
+          <div className="panel-head">
+            <h2>Notification templates</h2>
+          </div>
+          <div className="as-settings-list">
+            {notes.map((n) => (
+              <div key={n.template_id} className="as-settings-row">
+                <strong>{n.code}</strong>
+                <span className="muted">{n.subject_template}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
     </AppShell>
   );
 }

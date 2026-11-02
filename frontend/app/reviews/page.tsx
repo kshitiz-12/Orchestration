@@ -89,8 +89,13 @@ export default function ReviewsPage() {
 
   return (
     <AppShell
-      title="Needs a decision"
+      title="Approvals"
       subtitle="Approvals and confirmations waiting on the admin team — act here so work can continue."
+      breadcrumbs={[
+        { label: "Dashboard", href: "/" },
+        { label: "Vendor Management", href: "/vendors" },
+        { label: "Approvals" },
+      ]}
       actions={
         <button className="btn secondary" onClick={load}>
           Refresh

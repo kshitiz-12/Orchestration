@@ -343,10 +343,16 @@ def close_outcome(outcome_id: str, session: SessionDep, tenant_id: TenantDep, us
         from app.services.approval_actions import default_comms
 
         desk = AdminDesk(session, tenant_id, default_comms(session, tenant_id))
-        facts = outcome.facts or {}
-        proven = facts.get("agent_stage") == "RESOLVED" and facts.get("evidence_status") in {"provided", "admin_confirmed", "not_required"}
-        desk._close(outcome, f"Closed from the dashboard by {user.email}",
-                    closure="verified_evidence" if proven else "administrative")
+        if not desk._evidence_allows_close(outcome):
+            raise HTTPException(
+                400,
+                "This case stays open until a note or a photograph of the finished work is on file.",
+            )
+        desk._close(
+            outcome,
+            f"Closed from the dashboard by {user.email}",
+            closure="verified_evidence",
+        )
         session.commit()
         return outcome
     engine = OutcomeEngine(session, tenant_id)

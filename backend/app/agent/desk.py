@@ -1233,6 +1233,10 @@ class AdminDesk:
         self._ledger(outcome, "CLOSED", "Cancelled", actor_role="employee", payload={"closure": "cancelled"})
         return {"intent": intent, "status": "cancelled", "outcome": outcome}
 
+    def _evidence_allows_close(self, outcome: Outcome) -> bool:
+        """Proof on file, or the service does not ask for any. A role alone is not proof."""
+        return (outcome.facts or {}).get("evidence_status") in {"provided", "admin_confirmed", "not_required"}
+
     def _close(self, outcome: Outcome, note: str, *, closure: str = "administrative") -> dict:
         outcome.status = OutcomeStatus.CLOSED.value
         outcome.closed_at = utcnow()
@@ -1968,7 +1972,18 @@ class AdminDesk:
             )
             return {"applied": True, "action": "change", "field": field, "value": value}
         if re.match(r"^\s*(?:close|close\s+it|close\s+the\s+case)\b", low):
-            self._close(outcome, f"Closed by {actor}", closure="administrative")
+            if not self._evidence_allows_close(outcome):
+                self.comms.send_case_update(
+                    outcome=outcome,
+                    communication_type=CommunicationType.ACTION_REQUIRED.value,
+                    body=self._briefing(
+                        outcome,
+                        "This case stays open. A note or a photograph of the finished work is still required before it can close.",
+                    ),
+                    recipients=[actor],
+                )
+                return {"applied": True, "action": "close_blocked", "evidence": "missing"}
+            self._close(outcome, f"Closed by {actor}", closure="verified_evidence")
             self._tell_requester(outcome, f"{outcome.case_reference} ({outcome.title}) is now closed. Reply here if you need anything else.")
             return {"applied": True, "action": "close"}
         if not re.match(r"^\s*cancel", low):
@@ -2206,8 +2221,6 @@ class AdminDesk:
         if files or len(note.split()) >= 3:
             self._record_evidence(outcome, note, actor, files)
             evidence = "provided"
-        elif actor == admin:
-            evidence = "admin_confirmed"
         elif not hint or facts.get("knowledge_gap"):
             evidence = "not_required"
         else:

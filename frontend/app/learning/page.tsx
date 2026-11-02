@@ -36,12 +36,10 @@ function show(v: any) {
 
 function Metric({ title, value, note }: { title: string; value: number | null | undefined; note: string }) {
   return (
-    <div className="panel">
-      <div className="muted" style={{ fontSize: "0.78rem", fontWeight: 600 }}>{title}</div>
-      <div style={{ fontSize: "1.6rem", fontWeight: 700, margin: "0.25rem 0" }}>
-        <span className={`badge ${tone(value)}`} style={{ fontSize: "1.1rem" }}>{pct(value)}</span>
-      </div>
-      <div className="muted" style={{ fontSize: "0.78rem" }}>{note}</div>
+    <div className={`as-kpi ${tone(value) === "danger" ? "hot" : ""}`}>
+      <span className="label">{title}</span>
+      <span className="value">{pct(value)}</span>
+      <span className="hint">{note}</span>
     </div>
   );
 }
@@ -104,8 +102,9 @@ export default function LearningPage() {
 
   return (
     <AppShell
-      title="AI learning"
+      title="Reports"
       subtitle="How well the assistant reads requests, what admins keep correcting, and what it has learned. Nothing changes until you approve it."
+      breadcrumbs={[{ label: "Dashboard", href: "/" }, { label: "Reports" }]}
       actions={
         <>
           <button className="btn secondary" onClick={load}>Refresh</button>
@@ -117,17 +116,17 @@ export default function LearningPage() {
     >
       {msg && <p className="badge ok">{msg}</p>}
       {!data ? (
-        <div className="panel empty">Loading…</div>
+        <div className="as-empty">Loading…</div>
       ) : (
         <div className="stack">
-          <div className="grid-4" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: "1rem" }}>
+          <div className="as-kpi-grid">
             <Metric title="Right request type" value={overall.type_accuracy_pct} note={`${overall.cases || 0} cases in the last ${acc?.window_days} days`} />
             <Metric title="Right team first time" value={overall.team_accuracy_pct} note="No admin had to re-route" />
             <Metric title="Right priority" value={overall.priority_accuracy_pct} note="No admin had to change it" />
             <Metric title="Handled without a person" value={data.automation?.automation_rate_pct} note={`Verified closures: ${pct(data.automation?.verified_closure_pct)}`} />
           </div>
 
-          <div className="panel">
+          <div className="as-card">
             <div className="panel-head">
               <div>
                 <h3 style={{ marginBottom: "0.25rem" }}>Accuracy check</h3>
@@ -185,7 +184,7 @@ export default function LearningPage() {
             )}
           </div>
 
-          <div className="panel">
+          <div className="as-card">
             <h3>Suggested rule changes</h3>
             <p className="muted" style={{ marginTop: 0, fontSize: "0.82rem" }}>
               When admins make the same correction again and again, it shows up here as a rule you can accept.
@@ -222,7 +221,7 @@ export default function LearningPage() {
             )}
           </div>
 
-          <div className="panel">
+          <div className="as-card">
             <h3>Learned answers waiting for approval</h3>
             <p className="muted" style={{ marginTop: 0, fontSize: "0.82rem" }}>
               When the AI didn&apos;t know an answer and an admin replied, that answer is saved here. Once approved, the AI uses it for
@@ -263,7 +262,7 @@ export default function LearningPage() {
           </div>
 
           <div className="cols-2">
-            <div className="panel">
+            <div className="as-card">
               <h3>Accuracy by request type</h3>
               {(acc?.by_type || []).length === 0 ? (
                 <p className="muted">No cases in this period yet.</p>
@@ -287,7 +286,7 @@ export default function LearningPage() {
                 </table>
               )}
             </div>
-            <div className="panel">
+            <div className="as-card">
               <h3>What admins correct most</h3>
               {(acc?.correction_trend || []).length === 0 ? (
                 <p className="muted">No corrections yet.</p>

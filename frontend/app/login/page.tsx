@@ -26,13 +26,26 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="login-wrap">
-      <section className="login-hero">
-        <p className="eyebrow">Workplace admin</p>
-        <h1>Desk</h1>
-        <p>
-          One place for company admins to load people and teams, watch employee requests,
-          and keep every branch moving — without living in the shared inbox.
+    <div className="login-wrap as-login">
+      <section className="login-hero as-login-hero">
+        <div className="as-logo" style={{ marginBottom: "1.5rem" }}>
+          <span className="as-mark">A</span>
+          <div>
+            <div className="brand-mark" style={{ color: "#fff", fontSize: "1.35rem" }}>
+              AdminServices
+            </div>
+            <p className="brand-sub" style={{ color: "rgba(255,255,255,0.65)" }}>
+              Workplace admin
+            </p>
+          </div>
+        </div>
+        <p className="eyebrow" style={{ color: "#93c5fd" }}>
+          Corporate console
+        </p>
+        <h1 style={{ color: "#fff" }}>Run vendors, facilities, and master data in one place</h1>
+        <p style={{ color: "rgba(255,255,255,0.75)" }}>
+          Onboard vendors, track employee requests, import company data, and keep every office moving —
+          without living in the shared inbox.
         </p>
       </section>
       <section className="login-side">
@@ -60,7 +73,7 @@ export default function LoginPage() {
             </p>
           )}
           <button className="btn accent" style={{ width: "100%" }} disabled={loading}>
-            {loading ? "Signing in…" : "Enter Desk"}
+            {loading ? "Signing in…" : "Enter AdminServices"}
           </button>
         </form>
       </section>

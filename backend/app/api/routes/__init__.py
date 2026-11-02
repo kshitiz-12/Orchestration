@@ -7,6 +7,7 @@ from app.api.routes import (
     auth,
     budgets,
     control_tower,
+    desk_chat,
     enterprise_v3,
     entities,
     facilities,
@@ -53,6 +54,7 @@ api_router.include_router(gmail.router)
 api_router.include_router(outlook.router)
 api_router.include_router(webhooks.router)
 api_router.include_router(setup.router)
+api_router.include_router(desk_chat.router)
 api_router.include_router(learning.router)
 api_router.include_router(public_approvals.router)
 api_router.include_router(public_vendors.router)

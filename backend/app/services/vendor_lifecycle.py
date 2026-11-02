@@ -139,12 +139,13 @@ def send_invite_email(comms: Any, vendor: Vendor) -> None:
     body = letter(
         f"Dear {who},",
         (
-            "You are invited to register as a vendor for workplace operations.\n\n"
+            "You are invited to complete vendor onboarding for workplace operations.\n\n"
             f"Category: {vendor.category}\n"
-            f"Registration link: {link}\n"
+            f"Onboarding link: {link}\n"
             f"This link is valid for {INVITE_DAYS} days.\n\n"
-            "Please submit your company details, documents, service coverage, compliance information, "
-            "and commercial terms using the link above. After review, the account may be activated for work orders."
+            "Open the link to fill the same six steps used by the company desk: basic information, "
+            "business details, compliance documents, pricing, bank and commercials, then review and submit. "
+            "After review, the account may be activated for work orders."
         ),
         get_settings().mail_signature,
     )
@@ -255,6 +256,7 @@ def _apply_profile(vendor: Vendor, patch: dict[str, Any]) -> None:
         "financial",
         "sla_terms",
         "pricing",
+        "onboarding",
         "notes",
     }
     for key, value in (patch or {}).items():
@@ -624,7 +626,402 @@ def _get(session: Session, tenant_id: str, vendor_id: str) -> Vendor:
     return vendor
 
 
+ONBOARDING_STEPS = (
+    {"id": 1, "key": "basic", "title": "Basic Information", "subtitle": "Company details"},
+    {"id": 2, "key": "business", "title": "Business Details", "subtitle": "Services, categories"},
+    {"id": 3, "key": "compliance", "title": "Compliance & Documents", "subtitle": "Statutory & certificates"},
+    {"id": 4, "key": "pricing", "title": "Pricing / Rates", "subtitle": "Services and pricing"},
+    {"id": 5, "key": "bank", "title": "Bank & Commercials", "subtitle": "Payment details, terms"},
+    {"id": 6, "key": "review", "title": "Review & Submit", "subtitle": "Verify and submit"},
+)
+
+
+def empty_onboarding_draft(*, name: str = "", category: str = "general", contact_email: str = "", contact_name: str = "") -> dict[str, Any]:
+    """Blank six-step wizard used by company console and vendor mail link."""
+    return {
+        "current_step": 1,
+        "basic": {
+            "vendor_type": category or "Facilities Management",
+            "legal_entity_name": name or "",
+            "trade_name": name or "",
+            "year_of_incorporation": "",
+            "website": "",
+            "pan": "",
+            "cin": "",
+            "gstin": "",
+            "tan": "",
+            "address_line1": "",
+            "address_line2": "",
+            "country": "India",
+            "state": "",
+            "city": "",
+            "pin_code": "",
+            "same_as_registered": True,
+            "contact_name": contact_name or "",
+            "contact_email": contact_email or "",
+            "contact_phone": "",
+        },
+        "business": {
+            "service_categories": [],
+            "primary_category": "",
+            "services_offered": [],
+            "equipment_expertise": [],
+            "service_type": "",
+            "service_model": "",
+            "years_experience": "",
+            "coverage_mode": "Multiple cities",
+            "cities": [],
+            "technicians": "",
+            "supervisors": "",
+            "vehicles": "",
+            "spare_parts": "",
+            "clients": [],
+            "working_hours_from": "09:00",
+            "working_hours_to": "18:00",
+            "emergency_support": "24 x 7",
+            "response_time": "",
+        },
+        "compliance": {
+            "region": "India (Default)",
+            "documents": [
+                {"type": "PAN Card", "applicable": "Yes", "details": "", "file_name": "", "expiry": "", "status": "Pending"},
+                {"type": "GST Registration", "applicable": "Yes", "details": "", "file_name": "", "expiry": "", "status": "Pending"},
+                {"type": "Trade License", "applicable": "Yes", "details": "", "file_name": "", "expiry": "", "status": "Pending"},
+                {"type": "Certificate of Incorporation", "applicable": "Yes", "details": "", "file_name": "", "expiry": "", "status": "Pending"},
+            ],
+            "insurance": [],
+            "certificates": [],
+            "labor_compliant": True,
+            "safety_declared": False,
+            "statutory_declared": False,
+            "verified_by": "",
+            "verified_on": "",
+        },
+        "pricing": {
+            "active_tab": "AMC Contracts",
+            "amc_contracts": [],
+            "labour_rates": [],
+            "spare_parts": [],
+            "manpower_rates": [],
+            "catalogue": [],
+        },
+        "bank": {
+            "account_type": "Current Account",
+            "beneficiary_name": name or "",
+            "bank_name": "",
+            "account_number": "",
+            "ifsc": "",
+            "branch_name": "",
+            "pan": "",
+            "gstin": "",
+            "default_for_payments": True,
+            "bank_verified": False,
+            "payment_term_type": "Credit",
+            "credit_period": "30 Days",
+            "invoice_frequency": "Monthly",
+            "payment_method": "NEFT/RTGS",
+            "applies_to": "All services",
+            "retention_pct": "",
+            "tds_applicable": True,
+            "tds_section": "",
+            "gst_reg_type": "",
+            "place_of_supply": "",
+            "msme_number": "",
+            "invoice_format": "",
+            "invoice_submission": "Email + Vendor Portal",
+            "invoice_email": contact_email or "",
+            "invoice_cc": "",
+            "mandatory_invoice_fields": ["PO/WO Number", "GST Details"],
+            "price_validity": "90 Days",
+            "escalation_basis": "",
+            "freight": "",
+            "min_order_value": "",
+            "warranty": "",
+            "special_terms": "",
+            "vendor_category": "Standard Vendor",
+            "financial_limit": "",
+            "require_finance_approval": True,
+            "require_ops_approval": True,
+        },
+        "review": {
+            "truthful_declaration": False,
+            "policy_declaration": False,
+            "submitted": False,
+            "submitted_at": None,
+        },
+    }
+
+
+def _merge_onboarding(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    out = dict(base or {})
+    for key, value in (patch or {}).items():
+        if key in {"basic", "business", "compliance", "pricing", "bank", "review"} and isinstance(value, dict):
+            out[key] = {**(out.get(key) or {}), **value}
+        else:
+            out[key] = value
+    return out
+
+
+def ensure_onboarding(vendor: Vendor) -> dict[str, Any]:
+    draft = vendor.onboarding if isinstance(vendor.onboarding, dict) and vendor.onboarding else None
+    if not draft:
+        draft = empty_onboarding_draft(
+            name=vendor.name or "",
+            category=vendor.category or "general",
+            contact_email=vendor.contact_email or "",
+            contact_name=vendor.contact_name or "",
+        )
+        # Seed from existing vendor columns when present.
+        basic = draft["basic"]
+        basic["legal_entity_name"] = vendor.legal_name or vendor.name or ""
+        basic["trade_name"] = vendor.name or ""
+        basic["website"] = vendor.website or ""
+        basic["pan"] = vendor.pan or ""
+        basic["cin"] = vendor.cin or ""
+        basic["gstin"] = vendor.gstin or ""
+        basic["address_line1"] = vendor.registered_address or ""
+        basic["contact_name"] = vendor.contact_name or ""
+        basic["contact_email"] = vendor.contact_email or ""
+        basic["contact_phone"] = vendor.contact_phone or ""
+        draft["business"]["cities"] = list(vendor.coverage_cities or [])
+        draft["business"]["service_categories"] = list(vendor.approved_services or [])
+        if vendor.pricing:
+            draft["pricing"] = {**draft["pricing"], **(vendor.pricing if isinstance(vendor.pricing, dict) else {})}
+        if vendor.financial:
+            draft["bank"] = {**draft["bank"], **(vendor.financial if isinstance(vendor.financial, dict) else {})}
+        if vendor.documents:
+            draft["compliance"]["documents"] = vendor.documents.get("checklist") or draft["compliance"]["documents"]
+        vendor.onboarding = draft
+    return draft
+
+
+def onboarding_readiness(draft: dict[str, Any]) -> dict[str, Any]:
+    basic = draft.get("basic") or {}
+    business = draft.get("business") or {}
+    compliance = draft.get("compliance") or {}
+    bank = draft.get("bank") or {}
+    review = draft.get("review") or {}
+    checks = [
+        ("Legal name", bool((basic.get("legal_entity_name") or "").strip())),
+        ("PAN", bool((basic.get("pan") or "").strip())),
+        ("GSTIN", bool((basic.get("gstin") or "").strip())),
+        ("Service categories", bool(business.get("service_categories"))),
+        ("Coverage cities", bool(business.get("cities"))),
+        ("Documents listed", bool(compliance.get("documents"))),
+        ("Bank account", bool((bank.get("account_number") or "").strip()) and bool((bank.get("ifsc") or "").strip())),
+        ("Beneficiary name", bool((bank.get("beneficiary_name") or "").strip())),
+        ("Declarations", bool(review.get("truthful_declaration")) and bool(review.get("policy_declaration"))),
+    ]
+    done = sum(1 for _, ok in checks if ok)
+    return {
+        "percent": int(round(100 * done / max(1, len(checks)))),
+        "checks": [{"label": label, "ok": ok} for label, ok in checks],
+        "ready": all(ok for _, ok in checks),
+    }
+
+
+def get_onboarding(session: Session, tenant_id: str, vendor_id: str) -> dict[str, Any]:
+    vendor = _get(session, tenant_id, vendor_id)
+    draft = ensure_onboarding(vendor)
+    session.add(vendor)
+    session.flush()
+    return {
+        "vendor_id": vendor.vendor_id,
+        "name": vendor.name,
+        "status": vendor.status,
+        "contact_email": vendor.contact_email,
+        "registration_url": registration_url(vendor.invite_token or "") if vendor.invite_token else None,
+        "steps": list(ONBOARDING_STEPS),
+        "draft": draft,
+        "readiness": onboarding_readiness(draft),
+        "mode": "company",
+    }
+
+
+def save_onboarding(
+    session: Session,
+    tenant_id: str,
+    vendor_id: str,
+    *,
+    draft_patch: dict[str, Any],
+    actor_email: Optional[str] = None,
+    actor_role: str = "admin",
+) -> dict[str, Any]:
+    vendor = _get(session, tenant_id, vendor_id)
+    current = ensure_onboarding(vendor)
+    merged = _merge_onboarding(current, draft_patch or {})
+    step = int(merged.get("current_step") or 1)
+    merged["current_step"] = max(1, min(6, step))
+    vendor.onboarding = merged
+    # Keep master columns loosely in sync while drafting.
+    basic = merged.get("basic") or {}
+    if basic.get("legal_entity_name"):
+        vendor.legal_name = str(basic["legal_entity_name"])[:200]
+        vendor.name = str(basic.get("trade_name") or basic["legal_entity_name"])[:200]
+    if basic.get("pan"):
+        vendor.pan = str(basic["pan"])[:20]
+    if basic.get("gstin"):
+        vendor.gstin = str(basic["gstin"])[:20]
+    if basic.get("cin"):
+        vendor.cin = str(basic["cin"])[:30]
+    if basic.get("website"):
+        vendor.website = str(basic["website"])[:200]
+    if basic.get("contact_name"):
+        vendor.contact_name = str(basic["contact_name"])[:120]
+    if basic.get("contact_phone"):
+        vendor.contact_phone = str(basic["contact_phone"])[:40]
+    if basic.get("vendor_type"):
+        vendor.category = str(basic["vendor_type"])[:80]
+    addr = ", ".join(
+        p
+        for p in [
+            basic.get("address_line1"),
+            basic.get("address_line2"),
+            basic.get("city"),
+            basic.get("state"),
+            basic.get("pin_code"),
+            basic.get("country"),
+        ]
+        if p
+    )
+    if addr:
+        vendor.registered_address = addr[:500]
+    business = merged.get("business") or {}
+    if isinstance(business.get("cities"), list):
+        vendor.coverage_cities = [str(c)[:80] for c in business["cities"] if c][:80]
+    if isinstance(business.get("service_categories"), list):
+        vendor.approved_services = [str(c)[:80] for c in business["service_categories"] if c][:40]
+    vendor.pricing = merged.get("pricing") or vendor.pricing or {}
+    vendor.financial = merged.get("bank") or vendor.financial or {}
+    vendor.documents = {"checklist": (merged.get("compliance") or {}).get("documents") or []}
+    vendor.compliance = merged.get("compliance") or vendor.compliance or {}
+    vendor.updated_at = utcnow()
+    session.add(vendor)
+    session.flush()
+    record(
+        session,
+        tenant_id,
+        event_type="VENDOR_ONBOARDING_SAVED",
+        summary=f"Onboarding draft saved: {vendor.name}",
+        actor_email=actor_email,
+        actor_role=actor_role,
+        category=vendor.category,
+        payload={"vendor_id": vendor.vendor_id, "step": merged.get("current_step")},
+    )
+    return get_onboarding(session, tenant_id, vendor_id)
+
+
+def submit_onboarding(
+    session: Session,
+    tenant_id: str,
+    vendor_id: str,
+    *,
+    actor_email: Optional[str] = None,
+    actor_role: str = "admin",
+) -> dict[str, Any]:
+    vendor = _get(session, tenant_id, vendor_id)
+    draft = ensure_onboarding(vendor)
+    readiness = onboarding_readiness(draft)
+    if not readiness["ready"]:
+        missing = [c["label"] for c in readiness["checks"] if not c["ok"]]
+        raise ValueError("Complete required fields before submit: " + ", ".join(missing[:8]))
+    draft = _merge_onboarding(
+        draft,
+        {
+            "review": {
+                **(draft.get("review") or {}),
+                "submitted": True,
+                "submitted_at": utcnow().isoformat(),
+            },
+            "current_step": 6,
+        },
+    )
+    vendor.onboarding = draft
+    vendor.status = "UNDER_REVIEW"
+    vendor.registration_submitted_at = utcnow()
+    vendor.updated_at = utcnow()
+    # Flatten bank PAN/GST if filled.
+    bank = draft.get("bank") or {}
+    if bank.get("pan") and not vendor.pan:
+        vendor.pan = str(bank["pan"])[:20]
+    if bank.get("gstin") and not vendor.gstin:
+        vendor.gstin = str(bank["gstin"])[:20]
+    if bank.get("msme_number"):
+        vendor.msme_number = str(bank["msme_number"])[:40]
+    session.add(vendor)
+    session.flush()
+    compute_score(session, tenant_id, vendor_id)
+    session.refresh(vendor)
+    record(
+        session,
+        tenant_id,
+        event_type="VENDOR_ONBOARDING_SUBMITTED",
+        summary=f"Vendor onboarding submitted: {vendor.name}",
+        actor_email=actor_email or vendor.contact_email,
+        actor_role=actor_role,
+        category=vendor.category,
+        payload={"vendor_id": vendor.vendor_id, "score": vendor.score, "tier": vendor.vendor_tier},
+    )
+    return {
+        "status": "submitted",
+        "vendor_id": vendor.vendor_id,
+        "name": vendor.name,
+        "review_status": vendor.status,
+        "score": vendor.score,
+        "tier": vendor.vendor_tier,
+        "readiness": readiness,
+        "message": "Onboarding submitted for company review. Ops will activate the vendor after approval.",
+    }
+
+
+def get_onboarding_by_token(session: Session, token: str) -> dict[str, Any]:
+    vendor = get_by_invite_token(session, token)
+    draft = ensure_onboarding(vendor)
+    session.add(vendor)
+    session.flush()
+    return {
+        "vendor_id": vendor.vendor_id,
+        "name": vendor.name,
+        "status": vendor.status,
+        "contact_email": vendor.contact_email,
+        "expires_at": vendor.invite_expires_at.isoformat() if vendor.invite_expires_at else None,
+        "steps": list(ONBOARDING_STEPS),
+        "draft": draft,
+        "readiness": onboarding_readiness(draft),
+        "mode": "vendor",
+    }
+
+
+def save_onboarding_by_token(session: Session, token: str, draft_patch: dict[str, Any]) -> dict[str, Any]:
+    vendor = get_by_invite_token(session, token)
+    if vendor.status in {"ACTIVE", "SUSPENDED", "BLACKLISTED"}:
+        raise ValueError("This registration can no longer be edited")
+    payload = save_onboarding(
+        session,
+        vendor.tenant_id,
+        vendor.vendor_id,
+        draft_patch=draft_patch,
+        actor_email=vendor.contact_email,
+        actor_role="vendor",
+    )
+    payload["mode"] = "vendor"
+    payload["expires_at"] = vendor.invite_expires_at.isoformat() if vendor.invite_expires_at else None
+    return payload
+
+
+def submit_onboarding_by_token(session: Session, token: str) -> dict[str, Any]:
+    vendor = get_by_invite_token(session, token)
+    return submit_onboarding(
+        session,
+        vendor.tenant_id,
+        vendor.vendor_id,
+        actor_email=vendor.contact_email,
+        actor_role="vendor",
+    )
+
+
 def public_registration_form(vendor: Vendor) -> dict[str, Any]:
+    draft = ensure_onboarding(vendor)
     return {
         "vendor_id": vendor.vendor_id,
         "name": vendor.name,
@@ -635,6 +1032,10 @@ def public_registration_form(vendor: Vendor) -> dict[str, Any]:
         "expires_at": vendor.invite_expires_at.isoformat() if vendor.invite_expires_at else None,
         "document_keys": list(DOC_KEYS),
         "compliance_keys": list(COMPLIANCE_KEYS),
+        "steps": list(ONBOARDING_STEPS),
+        "draft": draft,
+        "readiness": onboarding_readiness(draft),
+        "mode": "vendor",
         "existing": {
             "legal_name": vendor.legal_name,
             "gstin": vendor.gstin,

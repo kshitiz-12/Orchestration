@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Desk — Workplace Admin",
-  description: "Run your office helpdesk from one place: requests, teams, and company data.",
+  title: "AdminServices — Workplace Admin",
+  description: "Vendor onboarding, facilities requests, teams, and company master data in one console.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

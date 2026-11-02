@@ -115,6 +115,8 @@ def sweep_desk_cases(
                     )
                     counts["closed_no_reply"] += 1
             elif stage == "RESOLVED" and outcome.status == OutcomeStatus.RESOLVED.value:
+                if facts.get("evidence_status") == "missing":
+                    continue
                 resolved = _ts(facts.get("resolved_at")) or outcome.updated_at
                 if resolved and now - resolved >= timedelta(hours=float(settings.desk_autoclose_hours or 72)):
                     desk.auto_close_resolved(outcome)

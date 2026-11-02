@@ -54,6 +54,10 @@ class SuspendIn(BaseModel):
     notify: bool = True
 
 
+class OnboardingIn(BaseModel):
+    draft: dict[str, Any] = Field(default_factory=dict)
+
+
 @router.get("")
 def list_vendors(
     session: SessionDep,
@@ -233,3 +237,52 @@ def scorecard(
         return vl.performance_scorecard(session, tenant_id, vendor_id, days=max(1, min(365, days)))
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc
+
+
+@router.get("/{vendor_id}/onboarding")
+def get_onboarding(vendor_id: str, session: SessionDep, tenant_id: TenantDep, _: DashboardOpsDep):
+    try:
+        payload = vl.get_onboarding(session, tenant_id, vendor_id)
+        session.commit()
+        return payload
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.put("/{vendor_id}/onboarding")
+def save_onboarding(
+    vendor_id: str,
+    body: OnboardingIn,
+    session: SessionDep,
+    tenant_id: TenantDep,
+    user: DashboardOpsDep,
+):
+    try:
+        payload = vl.save_onboarding(
+            session,
+            tenant_id,
+            vendor_id,
+            draft_patch=body.draft,
+            actor_email=user.email,
+            actor_role="admin",
+        )
+        session.commit()
+        return payload
+    except ValueError as exc:
+        raise HTTPException(404 if "not found" in str(exc).lower() else 400, str(exc)) from exc
+
+
+@router.post("/{vendor_id}/onboarding/submit")
+def submit_onboarding(vendor_id: str, session: SessionDep, tenant_id: TenantDep, user: DashboardOpsDep):
+    try:
+        result = vl.submit_onboarding(
+            session,
+            tenant_id,
+            vendor_id,
+            actor_email=user.email,
+            actor_role="admin",
+        )
+        session.commit()
+        return result
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc

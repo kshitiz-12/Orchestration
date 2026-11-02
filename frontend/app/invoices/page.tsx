@@ -18,8 +18,9 @@ export default function InvoicesPage() {
 
   return (
     <AppShell
-      title="Invoice workbench"
+      title="Invoices & Payments"
       subtitle="Three-way match · exceptions · human approval · mock ERP handoff (never auto-pay)."
+      breadcrumbs={[{ label: "Dashboard", href: "/" }, { label: "Invoices & Payments" }]}
       actions={
         <button className="btn secondary" onClick={load}>
           Refresh
@@ -27,7 +28,10 @@ export default function InvoicesPage() {
       }
     >
       {msg && <p className="muted">{msg}</p>}
-      <div className="panel">
+      <div className="as-card">
+        <div className="panel-head">
+          <h2>Invoice workbench</h2>
+        </div>
         <table>
           <thead>
             <tr>

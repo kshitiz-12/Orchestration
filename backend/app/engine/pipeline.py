@@ -547,9 +547,43 @@ class ProcessingPipeline:
                 "replied": False,
                 "sender_verification": how,
             }
-        from app.services.admin_ops import analytics_scope_for_sender
+        from app.services.admin_ops import NO_OFFICE_SCOPE, analytics_scope_for_sender
 
         location_ids, scope_label = analytics_scope_for_sender(self.session, self.tenant_id, sender)
+        if scope_label == NO_OFFICE_SCOPE:
+            from app.agent.resolution_agent import AdminAnswer
+
+            answer = AdminAnswer(
+                reply=(
+                    "Your role is limited to an office, and no office is saved on your record. "
+                    "A company admin has to assign one before I can answer."
+                ),
+                grounded=True,
+                data={"scope": NO_OFFICE_SCOPE},
+            )
+            from app.services.mail_style import letter
+
+            body = letter("Dear Colleague,", answer.reply, self.settings.mail_signature)
+            self.comms.send(
+                communication_type="INFORMATION_ONLY",
+                recipients=[sender_address(event.sender)],
+                subject="Operations report: office not assigned",
+                body=body,
+                thread_id=event.provider_conversation_id or event.gmail_thread_id,
+                in_reply_to_message_id=event.provider_message_id or event.gmail_message_id,
+                idempotency_key=f"ops-analytics:{event.event_id}",
+            )
+            event.processing_stage = ProcessingStage.COMPLETED.value
+            event.safety_flags = {**(event.safety_flags or {}), "ops_analytics": True, "scope": NO_OFFICE_SCOPE}
+            self.session.add(event)
+            self.session.commit()
+            return {
+                "status": "ops_analytics",
+                "event_id": event.event_id,
+                "grounded": True,
+                "replied": True,
+                "scope": NO_OFFICE_SCOPE,
+            }
         answer = answer_admin_question(
             self.session,
             self.tenant_id,

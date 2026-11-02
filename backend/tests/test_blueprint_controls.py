@@ -60,9 +60,9 @@ def test_no_evidence_closes_honestly_and_is_not_learned_from(session: Session, e
     _team(session, tid, "done", subject)
     sweep_desk_cases(session, tid, now=utcnow() + timedelta(hours=73))
     session.refresh(case)
-    assert case.facts["closure_type"] == "closed_without_evidence" and case.facts["verified"] is False
-    record = session.exec(select(LearningRecord).where(LearningRecord.outcome_id == case.outcome_id)).one()
-    assert record.learning_eligible is False
+    assert case.status != "CLOSED"
+    assert case.facts.get("evidence_status") == "missing"
+    assert case.facts.get("verified") is not True
 
 
 def test_photo_attachment_counts_as_evidence(session: Session, env):

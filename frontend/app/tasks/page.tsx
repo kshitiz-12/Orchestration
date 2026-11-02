@@ -29,8 +29,9 @@ export default function TasksPage() {
 
   return (
     <AppShell
-      title="Team tasks"
+      title="Work Orders"
       subtitle="Work items assigned to your teams — update status as they progress."
+      breadcrumbs={[{ label: "Dashboard", href: "/" }, { label: "Operations" }, { label: "Work Orders" }]}
       actions={
         <button className="btn secondary" onClick={load}>
           Refresh
@@ -38,11 +39,14 @@ export default function TasksPage() {
       }
     >
       {msg && <p className="badge danger">{msg}</p>}
-      <div className="panel">
+      <div className="as-card">
+        <div className="panel-head">
+          <h2>Team tasks</h2>
+        </div>
         {tasks.length === 0 ? (
-          <div className="empty">
+          <div className="as-empty">
             <strong>No tasks yet</strong>
-            Tasks appear when a request is created from email.
+            <p>Tasks appear when a request is created from email.</p>
           </div>
         ) : (
           <table>

@@ -9,7 +9,7 @@ from sqlmodel import Session, col, select
 
 from app.agent.directory import route_for
 from app.models.company import KnowledgeEntry
-from app.models.org import StockSku, Vendor
+from app.models.org import Location, StockSku, Vendor
 from app.models.outcome import Outcome
 from app.services.ops_ledger import (
     query_events,
@@ -228,6 +228,34 @@ def replace_due(session: Session, tenant_id: str, location_ids: Optional[list[st
         if r.asset_tag or "replace" in (r.summary or "").lower() or "damaged" in (r.summary or "").lower()
     ]
     return {"low_stock": low_stock[:30], "assets_attention": assets[:30]}
+
+
+def stock_on_hand(
+    session: Session, tenant_id: str, location_ids: Optional[list[str]] = None
+) -> dict[str, Any]:
+    """Items this sender may see. None means every office. A list hides other offices and unassigned rows."""
+    allowed = set(location_ids) if location_ids is not None else None
+    items: list[dict[str, Any]] = []
+    skus = session.exec(
+        select(StockSku).where(StockSku.tenant_id == tenant_id, StockSku.status == "ACTIVE")
+    ).all()
+    for sku in skus:
+        if allowed is not None and sku.location_id not in allowed:
+            continue
+        place = session.get(Location, sku.location_id) if sku.location_id else None
+        items.append(
+            {
+                "sku_code": sku.sku_code,
+                "name": sku.name,
+                "qty_on_hand": sku.qty_on_hand,
+                "unit": sku.unit or "each",
+                "reorder_min": sku.reorder_min,
+                "expires_on": sku.expires_on,
+                "office": place.name if place else "Office not listed",
+            }
+        )
+    items.sort(key=lambda row: (row["office"] == "Office not listed", row["office"], row["name"]))
+    return {"items": items}
 
 
 TOOL_HANDLERS = {
